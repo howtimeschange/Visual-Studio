@@ -1,0 +1,13 @@
+{
+  "name": "image-translator-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler pages dev public --compatibility-date=2025-01-01",
+    "deploy": "wrangler pages deploy public --project-name=image-translator"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

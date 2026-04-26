@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>视觉工作台 · Visual Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/styles.css?v=20260423-11" />
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">◆</div>
+      <div class="brand-text">
+        <div class="brand-title">Visual Studio</div>
+        <div class="brand-sub">品牌视觉工作台</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-view="translate">
+        <span class="nav-icon">01</span>
+        <span class="nav-label">图片批量翻译</span>
+        <span class="nav-hint">商品图多语言本地化</span>
+      </button>
+      <button class="nav-item" data-view="generate">
+        <span class="nav-icon">02</span>
+        <span class="nav-label">对话生图</span>
+        <span class="nav-hint">多轮 · 参考图 · 一致性</span>
+      </button>
+      <button class="nav-item" data-view="outfit">
+        <span class="nav-icon">03</span>
+        <span class="nav-label">批量换装</span>
+        <span class="nav-hint">模特 × 服装矩阵</span>
+      </button>
+      <button class="nav-item" data-view="style">
+        <span class="nav-icon">04</span>
+        <span class="nav-label">风格迁移</span>
+        <span class="nav-hint">提取风格 · 仿图生成</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button id="settings-btn" class="ghost full">
+        <span class="settings-mark">系统</span> API Keys
+      </button>
+      <div class="footer-hint">所有 Key 仅存浏览器本地</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- ═══════════════ TRANSLATE VIEW ═══════════════ -->
+    <section class="view active" id="view-translate">
+      <header class="view-head">
+        <div>
+          <h1>图片批量翻译</h1>
+          <p class="subtitle">先识别，再重绘。适合商品图与品牌素材的多语言本地化处理。</p>
+        </div>
+      </header>
+
+      <div class="panel">
+        <div class="control-grid translate-control-grid">
+          <div class="field source-field">
+            <label>源语言</label>
+            <div class="dd" data-dd="source-lang">
+              <button class="dd-trigger" type="button">
+                <span class="dd-value" id="source-lang-value">自动检测</span>
+                <span class="dd-caret">▾</span>
+              </button>
+              <div class="dd-menu" id="source-lang-menu"></div>
+            </div>
+          </div>
+          <div class="field target-field">
+            <label>目标语言 <span class="muted">（可多选）</span></label>
+            <div class="dd dd-multi" data-dd="target-langs">
+              <button class="dd-trigger" type="button">
+                <span class="dd-value" id="target-langs-value">点击选择…</span>
+                <span class="dd-caret">▾</span>
+              </button>
+              <div class="dd-menu" id="target-langs-menu"></div>
+            </div>
+          </div>
+          <div class="field model-field">
+            <label>生图模型</label>
+            <select id="t-model" class="input"></select>
+          </div>
+          <div class="field concurrency-field">
+            <label>并发</label>
+            <input id="t-concurrency" type="number" min="1" max="6" value="2" class="input" />
+          </div>
+          <div class="field check preserve-field">
+            <label class="switch">
+              <input id="t-preserve" type="checkbox" checked />
+              <span>保留品牌 / SKU</span>
+            </label>
+          </div>
+        </div>
+        <div class="chips target-chipbar" id="target-chips"></div>
+
+        <div class="dropzone" id="t-dropzone">
+          <input id="t-file-input" type="file" accept="image/*" multiple hidden />
+          <div class="dz-inner">
+            <div class="dz-icon">＋</div>
+            <div class="dz-text">拖拽图片到此，或 <button class="link" id="t-browse-btn">点击选择</button></div>
+            <div class="dz-hint">PNG · JPG · WebP · 支持一次多张</div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="t-run-btn" class="primary" disabled>开始批量翻译</button>
+          <button id="t-clear-btn" class="ghost" disabled>清空</button>
+          <button id="t-dl-btn" class="ghost" disabled>下载全部</button>
+          <span class="progress" id="t-progress"></span>
+        </div>
+      </div>
+
+      <div class="grid-wrap" id="t-grid-wrap">
+        <table class="grid" id="t-grid"></table>
+        <div id="t-empty" class="empty">还没有图片，先上传几张开始吧</div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ GENERATE VIEW (Canvas Mode) ═══════════════ -->
+    <section class="view" id="view-generate">
+      <!-- Canvas Header -->
+      <header class="canvas-header">
+        <div class="canvas-header-left">
+          <h2 class="canvas-title">对话生图</h2>
+        </div>
+        <div class="canvas-header-right">
+          <button type="button" id="g-ai-toggle" class="canvas-header-btn" title="AI 助手">
+            <span class="canvas-btn-icon">&#x2726;</span>
+            <span>AI</span>
+          </button>
+          <button type="button" id="g-new" class="canvas-header-btn" title="新画布">
+            <span>新画布</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Canvas Area -->
+      <div class="canvas-container" id="g-canvas-container">
+        <div class="canvas-viewport" id="g-canvas">
+          <!-- Elements rendered dynamically by JS -->
+        </div>
+
+        <!-- Empty State -->
+        <div class="canvas-empty" id="g-canvas-empty">
+          <div class="canvas-empty-icon">&#x25CE;</div>
+          <div class="canvas-empty-title">开始创作</div>
+          <div class="canvas-empty-desc">用底部工具栏添加图片或 AI 生图卡片，也可以拖拽文件到画布上。</div>
+        </div>
+
+        <!-- SVG layer for connectors -->
+        <svg class="canvas-connectors" id="g-connectors"></svg>
+      </div>
+
+      <!-- AI Sidebar -->
+      <aside class="ai-sidebar hidden" id="g-ai-sidebar">
+        <div class="ai-sidebar-head">
+          <h3>AI 助手</h3>
+          <button type="button" id="g-ai-close" class="ai-sidebar-close">&times;</button>
+        </div>
+        <div class="ai-sidebar-messages" id="g-ai-messages"></div>
+        <div class="ai-sidebar-bottom">
+          <div class="ai-sidebar-refs" id="g-ai-ref-list"></div>
+          <div class="ai-sidebar-controls">
+            <select id="g-ai-model" class="input ai-sidebar-select"></select>
+            <select id="g-ai-ratio" class="input ai-sidebar-select">
+              <option value="1:1">1:1</option>
+              <option value="4:3">4:3</option>
+              <option value="3:4">3:4</option>
+              <option value="16:9">16:9</option>
+              <option value="9:16">9:16</option>
+            </select>
+            <button type="button" id="g-ai-upload" class="ai-sidebar-upload-btn" title="上传参考图">&#x1F5BC; 参考图</button>
+            <input type="file" id="g-ai-file-input" accept="image/*" multiple hidden />
+          </div>
+          <div class="ai-sidebar-input">
+            <textarea id="g-input" placeholder="描述你想要的画面，AI 会生成并放到画布上…" rows="2"></textarea>
+            <button id="g-send" class="primary ai-sidebar-send">发送</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Floating Image Generator Panel (shown when generator element selected) -->
+      <div class="gen-panel hidden" id="g-gen-panel">
+        <div class="gen-panel-head">
+          <span class="gen-panel-title">AI 生图</span>
+        </div>
+        <textarea class="gen-panel-prompt" id="g-gen-prompt" placeholder="描述你想要的画面…" rows="3"></textarea>
+        <div class="gen-panel-ref-area">
+          <div class="gen-panel-ref-label">参考图 <span class="muted">（来自画布或上传）</span></div>
+          <div class="gen-panel-ref-list" id="g-gen-ref-list"></div>
+          <button type="button" class="gen-panel-ref-add" id="g-gen-ref-upload">＋ 上传</button>
+          <input type="file" id="g-gen-ref-input" accept="image/*" multiple hidden />
+        </div>
+        <div class="gen-panel-controls">
+          <select id="g-model" class="input gen-panel-select"></select>
+          <select id="g-gen-ratio" class="input gen-panel-select">
+            <option value="1:1">1:1</option>
+            <option value="4:3">4:3</option>
+            <option value="3:4">3:4</option>
+            <option value="16:9">16:9</option>
+            <option value="9:16">9:16</option>
+          </select>
+          <label class="switch gen-panel-agent">
+            <input id="g-agent" type="checkbox" />
+            <span>Agent</span>
+          </label>
+        </div>
+        <div class="gen-panel-actions">
+          <button type="button" id="g-gen-run" class="primary gen-panel-run" disabled>
+            <span class="gen-panel-run-text">生成</span>
+          </button>
+        </div>
+        <div class="gen-panel-progress hidden" id="g-gen-progress">
+          <span class="spinner"></span>
+          <span>正在生成…</span>
+        </div>
+      </div>
+
+      <!-- Floating Toolbar -->
+      <div class="canvas-toolbar" id="g-toolbar">
+        <button type="button" class="toolbar-btn active" data-tool="select" title="选择">
+          <span class="toolbar-icon">&#x2197;</span>
+        </button>
+        <div class="toolbar-sep"></div>
+        <button type="button" class="toolbar-btn" data-tool="image" title="上传图片">
+          <span class="toolbar-icon">&#x1F5BC;</span>
+        </button>
+        <button type="button" class="toolbar-btn" data-tool="text" title="添加文字">
+          <span class="toolbar-icon">T</span>
+        </button>
+        <button type="button" class="toolbar-btn" data-tool="ai-gen" title="AI 生图">
+          <span class="toolbar-icon">&#x2726;</span>
+        </button>
+        <div class="toolbar-sep"></div>
+        <input type="file" id="g-file-input" accept="image/*" multiple hidden />
+      </div>
+
+      <!-- Zoom Controls -->
+      <div class="zoom-controls" id="g-zoom">
+        <button type="button" id="g-zoom-out" class="zoom-btn">&minus;</button>
+        <span class="zoom-value" id="g-zoom-value">100%</span>
+        <button type="button" id="g-zoom-in" class="zoom-btn">&#43;</button>
+      </div>
+
+      <!-- Context menu for image elements -->
+      <div class="canvas-context-menu hidden" id="g-context-menu">
+        <button type="button" class="context-menu-item" data-action="generate-from">用此图生成</button>
+        <button type="button" class="context-menu-item" data-action="download">下载图片</button>
+        <button type="button" class="context-menu-item context-menu-danger" data-action="delete">删除</button>
+      </div>
+    </section>
+
+    <!-- ═══════════════ OUTFIT VIEW ═══════════════ -->
+    <section class="view" id="view-outfit">
+      <header class="view-head">
+        <div>
+          <h1>批量换装</h1>
+          <p class="subtitle">兼容单张整套直换，也支持上衣 / 下装 / 外套等多单品自动组合。</p>
+        </div>
+        <div class="head-right">
+          <div class="field inline">
+            <label>模型</label>
+            <select id="o-model" class="input"></select>
+          </div>
+          <div class="field inline">
+            <label>上传为</label>
+            <select id="o-garment-type" class="input">
+              <option value="full_outfit">整套</option>
+              <option value="top">上衣</option>
+              <option value="bottom">下装</option>
+              <option value="dress">连衣裙</option>
+              <option value="outerwear">外套</option>
+              <option value="accessory">配饰</option>
+            </select>
+          </div>
+          <div class="field inline">
+            <label>并发</label>
+            <input id="o-concurrency" type="number" min="1" max="4" value="2" class="input small" />
+          </div>
+        </div>
+      </header>
+
+      <div class="outfit-lanes">
+        <div class="lane lane-models">
+          <div class="lane-head">
+            <h3>模特</h3>
+            <span class="muted"><span id="o-model-count">0</span> 张</span>
+          </div>
+          <div class="refs-dropzone">
+            <input type="file" id="o-model-input" accept="image/*" multiple hidden />
+            <button class="dz-add" id="o-model-add">＋ 添加模特图</button>
+          </div>
+          <div class="lane-list" id="o-model-list"></div>
+        </div>
+
+        <div class="lane lane-garments">
+        <div class="lane-head">
+            <h3>服装单品 / 整套</h3>
+            <span class="muted"><span id="o-garment-count">0</span> 件 · <span id="o-look-count">0</span> 套搭配</span>
+          </div>
+          <div class="refs-dropzone">
+            <input type="file" id="o-garment-input" accept="image/*" multiple hidden />
+            <button class="dz-add" id="o-garment-add">＋ 添加服装图</button>
+          </div>
+          <div class="lane-note">单张整套图请保持“整套”上传；上传后也可以逐张改成上衣、下装、外套等分类。</div>
+          <div class="lane-list" id="o-garment-list"></div>
+        </div>
+      </div>
+
+      <div class="panel slim">
+        <div class="field grow">
+          <label>额外要求（可选）</label>
+          <input id="o-instructions" type="text" class="input" placeholder="例：模特保持正面站姿，背景换成纯白影棚..." />
+        </div>
+        <div class="actions">
+          <button id="o-run" class="primary" disabled>批量生成</button>
+          <button id="o-clear" class="ghost" disabled>清空结果</button>
+          <button id="o-dl" class="ghost" disabled>下载全部</button>
+          <span class="progress" id="o-progress"></span>
+        </div>
+      </div>
+
+      <div class="grid-wrap" id="o-grid-wrap">
+        <table class="grid" id="o-grid"></table>
+        <div id="o-empty" class="empty">先上传模特和服装单品，系统会自动组合搭配矩阵</div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ STYLE TRANSFER VIEW ═══════════════ -->
+    <section class="view" id="view-style">
+      <header class="view-head">
+        <div>
+          <h1>风格迁移</h1>
+          <p class="subtitle">上传一张风格源图，AI 提取其视觉 DNA，再用这套风格生成任意新主题的图像。</p>
+        </div>
+        <div class="head-right">
+          <div class="field inline">
+            <label>模型</label>
+            <select id="s-model" class="input"></select>
+          </div>
+        </div>
+      </header>
+
+      <div class="style-grid">
+        <div class="panel style-source-panel">
+          <h3 class="style-section-title">风格源图</h3>
+          <div class="dropzone style-dropzone" id="s-dropzone">
+            <input id="s-file-input" type="file" accept="image/*" hidden />
+            <div class="dz-inner" id="s-dz-inner">
+              <div class="dz-icon">＋</div>
+              <div class="dz-text">拖拽或点击上传风格源图</div>
+              <div class="dz-hint">上传后自动分析视觉风格</div>
+            </div>
+          </div>
+          <div id="s-source-preview" class="style-source-preview hidden">
+            <img id="s-source-img" alt="风格源图" />
+            <button type="button" id="s-clear-source" class="style-source-clear" title="移除源图">×</button>
+          </div>
+          <div id="s-analyze-progress" class="style-progress hidden">
+            <span class="spinner"></span>
+            <span>正在提取视觉风格…</span>
+          </div>
+        </div>
+
+        <div class="panel style-result-panel">
+          <div id="s-style-result" class="style-analysis hidden">
+            <h3 class="style-section-title">风格档案</h3>
+            <div id="s-summary" class="style-summary"></div>
+            <div id="s-palette" class="style-palette"></div>
+            <div id="s-tags" class="style-tags"></div>
+            <details class="style-json">
+              <summary id="s-json-toggle">查看完整 JSON</summary>
+              <div class="style-json-actions">
+                <button type="button" id="s-json-copy" class="ghost" style="min-height:28px;padding:0 10px;font-size:var(--text-xs)">复制 JSON</button>
+              </div>
+              <pre id="s-json-content" class="style-json-content"></pre>
+            </details>
+          </div>
+
+          <div id="s-generate-section" class="style-generate-section hidden">
+            <h3 class="style-section-title">用这套风格生成新图</h3>
+            <div class="style-ref-area">
+              <div class="style-ref-head">
+                <span class="style-ref-label">主体参考图 <span class="muted">（可选，上传后会保留主体特征）</span></span>
+                <button type="button" id="s-ref-add" class="dz-add" style="min-height:32px;padding:0 10px;font-size:var(--text-xs)">＋ 添加</button>
+                <input type="file" id="s-ref-input" accept="image/*" multiple hidden />
+              </div>
+              <div class="style-ref-list" id="s-ref-list"></div>
+            </div>
+            <div class="style-generate-row">
+              <input id="s-subject" type="text" class="input" placeholder="输入新主题，如：赛博朋克街头、森林里的猫咪、极简办公桌面…" />
+              <button id="s-generate" class="primary" disabled>生成 ▸</button>
+            </div>
+          </div>
+
+          <div id="s-gen-progress" class="style-progress hidden">
+            <span class="spinner"></span>
+            <span id="s-progress">正在生成…</span>
+          </div>
+
+          <div id="s-result-wrap" class="style-result-wrap hidden">
+            <h3 class="style-section-title">生成结果</h3>
+            <div class="style-result-img-wrap">
+              <button type="button" id="s-result-preview" class="img-button style-result-img">
+                <img id="s-result-img" alt="生成结果" />
+              </button>
+            </div>
+            <div class="style-result-actions">
+              <button type="button" id="s-result-lightbox" class="retry-btn">放大查看</button>
+              <button type="button" id="s-download" class="ghost">下载结果</button>
+            </div>
+          </div>
+
+          <div id="s-error" class="style-error hidden"></div>
+
+          <div id="s-history-section" class="style-history-section hidden">
+            <div class="style-history-head">
+              <h3 class="style-section-title">历史记录</h3>
+              <button type="button" id="s-clear-history" class="ghost" style="min-height:32px;padding:0 10px;font-size:var(--text-xs)">清空历史</button>
+            </div>
+            <div id="s-history" class="style-history-grid"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="settings-dialog">
+  <form method="dialog" id="settings-form">
+    <div class="dialog-copy">
+      <h3>API Keys · 设置</h3>
+      <p class="hint">所有 key 仅存在浏览器本地，不会上传到我们的服务器。服务端也可配置默认 key，前端填写优先生效。</p>
+    </div>
+
+    <div class="dialog-grid">
+      <label class="dialog-field">
+        <span class="dialog-label">Vision / Design Agent Key <span class="muted">（OCR · 参考图分析 · 设计 Agent · gemini-3-flash-preview）</span></span>
+        <input id="k-vision" type="password" autocomplete="off" placeholder="sk-..." />
+      </label>
+
+      <label class="dialog-field">
+        <span class="dialog-label">Nano Banana 2 Key <span class="muted">（gemini-3.1-flash-image-preview）</span></span>
+        <input id="k-banana2" type="password" autocomplete="off" placeholder="sk-..." />
+      </label>
+
+      <label class="dialog-field">
+        <span class="dialog-label">Nano Banana Pro Key <span class="muted">（gemini-3-pro-image-preview）</span></span>
+        <input id="k-bananapro" type="password" autocomplete="off" placeholder="sk-..." />
+      </label>
+
+      <label class="dialog-field">
+        <span class="dialog-label">GPT Image 2 Key <span class="muted">（gpt-image-2）</span></span>
+        <input id="k-gptimage" type="password" autocomplete="off" placeholder="sk-..." />
+      </label>
+    </div>
+
+    <div class="dialog-actions">
+      <button type="button" id="settings-clear" class="ghost">清空本地</button>
+      <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="image-lightbox" class="image-lightbox">
+  <form method="dialog" class="lightbox-close-wrap">
+    <button type="submit" id="lightbox-close" class="lightbox-close" aria-label="关闭图片预览">×</button>
+  </form>
+
+  <div class="lightbox-body">
+    <img id="lightbox-image" class="lightbox-image" alt="预览图片" />
+    <div class="lightbox-meta">
+      <div id="lightbox-caption" class="lightbox-caption"></div>
+      <a id="lightbox-download" class="ghost lightbox-download" href="#" download>下载图片</a>
+    </div>
+  </div>
+</dialog>
+
+<script type="module" src="/app.js?v=20260423-10"></script>
+</body>
+</html>

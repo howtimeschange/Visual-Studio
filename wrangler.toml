@@ -1,0 +1,14 @@
+name = "image-translator"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "public"
+
+# Server-side default keys (optional). Users can override via the in-app Settings (BYOK).
+# Set with: wrangler pages secret put VISION_API_KEY --project-name=image-translator
+# Optional V2 foundation secrets / bindings:
+# wrangler pages secret put CREDENTIAL_KEK --project-name=image-translator
+# [r2_buckets]
+# binding = "VS_INPUTS_BUCKET", bucket_name = "visual-studio-inputs"
+# binding = "VS_RESULTS_BUCKET", bucket_name = "visual-studio-results"
+# binding = "VS_TEMP_BUCKET", bucket_name = "visual-studio-temp"
+# [vars]
+# RELAY_BASE_URL = "https://api.1xm.ai/v1"
