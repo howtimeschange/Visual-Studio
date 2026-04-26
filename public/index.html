@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/styles.css?v=20260423-11" />
+<link rel="stylesheet" href="/styles.css?v=20260427-3" />
 </head>
 <body>
 <div class="shell">
@@ -21,23 +21,27 @@
     </div>
 
     <nav class="nav">
-      <button class="nav-item active" data-view="translate">
-        <span class="nav-icon">01</span>
+      <button class="nav-item active" data-view="home">
+        <span class="nav-label">首页</span>
+        <span class="nav-hint">对话入口 · 最近项目</span>
+      </button>
+      <button class="nav-item" data-view="generate">
+        <span class="nav-label">画布</span>
+        <span class="nav-hint">无限画布 · 参考图 · 生成流</span>
+      </button>
+      <button class="nav-item" data-view="projects">
+        <span class="nav-label">项目管理</span>
+        <span class="nav-hint">打开 · 新建 · 自动保存</span>
+      </button>
+      <button class="nav-item" data-view="translate">
         <span class="nav-label">图片批量翻译</span>
         <span class="nav-hint">商品图多语言本地化</span>
       </button>
-      <button class="nav-item" data-view="generate">
-        <span class="nav-icon">02</span>
-        <span class="nav-label">对话生图</span>
-        <span class="nav-hint">多轮 · 参考图 · 一致性</span>
-      </button>
       <button class="nav-item" data-view="outfit">
-        <span class="nav-icon">03</span>
         <span class="nav-label">批量换装</span>
         <span class="nav-hint">模特 × 服装矩阵</span>
       </button>
       <button class="nav-item" data-view="style">
-        <span class="nav-icon">04</span>
         <span class="nav-label">风格迁移</span>
         <span class="nav-hint">提取风格 · 仿图生成</span>
       </button>
@@ -45,15 +49,71 @@
 
     <div class="sidebar-footer">
       <button id="settings-btn" class="ghost full">
-        <span class="settings-mark">系统</span> API Keys
+        <span class="settings-mark">系统</span> 设置
       </button>
-      <div class="footer-hint">所有 Key 仅存浏览器本地</div>
+      <div class="footer-hint">Key 与界面风格仅存浏览器本地</div>
     </div>
   </aside>
 
   <main class="main">
+    <!-- ═══════════════ HOME VIEW ═══════════════ -->
+    <section class="view active home-view" id="view-home">
+      <header class="home-topbar">
+        <div class="home-brand">
+          <div class="logo">◆</div>
+          <div>
+            <strong>Visual Studio</strong>
+            <span>品牌视觉工作台</span>
+          </div>
+        </div>
+        <div class="home-top-actions">
+          <button type="button" id="h-projects" class="ghost">项目管理</button>
+          <button type="button" id="h-settings" class="ghost">系统设置</button>
+        </div>
+      </header>
+
+      <div class="home-hero">
+        <div class="home-title">
+          <div class="home-title-mark">VS</div>
+          <h1>输入想法，进入视觉工作台</h1>
+        </div>
+        <p>从一个设计需求开始创建画布，或直接进入已经落地的批处理工具。</p>
+
+        <div class="home-prompt-card">
+          <textarea id="h-prompt" rows="2" placeholder="例如：为春季新品生成一张社媒主图，保留品牌留白和清爽光线"></textarea>
+          <button type="button" id="h-start" class="primary">打开画布</button>
+        </div>
+
+        <div class="home-tools" id="h-tools">
+          <button type="button" class="home-tool" data-view="translate">
+            <strong>图片批量翻译</strong>
+            <span>商品图多语言本地化</span>
+          </button>
+          <button type="button" class="home-tool" data-view="outfit">
+            <strong>批量换装</strong>
+            <span>模特 × 服装矩阵</span>
+          </button>
+          <button type="button" class="home-tool" data-view="style">
+            <strong>风格迁移</strong>
+            <span>提取风格并仿图生成</span>
+          </button>
+        </div>
+      </div>
+
+      <section class="home-recent">
+        <div class="home-section-head">
+          <div>
+            <h2>最近项目</h2>
+            <p id="h-recent-status">读取已保存的画布项目</p>
+          </div>
+          <button type="button" id="h-see-all" class="ghost">查看全部</button>
+        </div>
+        <div class="home-recent-grid" id="h-recent-list"></div>
+      </section>
+    </section>
+
     <!-- ═══════════════ TRANSLATE VIEW ═══════════════ -->
-    <section class="view active" id="view-translate">
+    <section class="view" id="view-translate">
       <header class="view-head">
         <div>
           <h1>图片批量翻译</h1>
@@ -123,14 +183,48 @@
       </div>
     </section>
 
+    <!-- ═══════════════ PROJECTS VIEW ═══════════════ -->
+    <section class="view" id="view-projects">
+      <header class="view-head projects-head">
+        <div>
+          <h1>项目管理</h1>
+          <p class="subtitle">管理已保存的画布项目，继续上一次的生成流或从空白项目开始。</p>
+        </div>
+        <div class="projects-actions">
+          <button type="button" id="p-refresh" class="ghost">刷新</button>
+          <button type="button" id="p-new" class="primary">新建画布</button>
+        </div>
+      </header>
+
+      <div class="projects-summary">
+        <div>
+          <span class="projects-kicker">Canvas Projects</span>
+          <strong id="p-count">0 个项目</strong>
+        </div>
+        <span id="p-status" class="muted"></span>
+      </div>
+
+      <div class="projects-grid" id="p-list"></div>
+      <div class="projects-empty hidden" id="p-empty">
+        <div class="projects-empty-mark">＋</div>
+        <h3>还没有画布项目</h3>
+        <p>创建一个新画布，系统会在你编辑时自动保存。</p>
+        <button type="button" id="p-empty-new" class="primary">创建项目</button>
+      </div>
+    </section>
+
     <!-- ═══════════════ GENERATE VIEW (Canvas Mode) ═══════════════ -->
     <section class="view" id="view-generate">
       <!-- Canvas Header -->
       <header class="canvas-header">
         <div class="canvas-header-left">
-          <h2 class="canvas-title">对话生图</h2>
+          <input id="g-project-title" class="canvas-project-title" type="text" value="未命名画布" aria-label="画布标题" />
+          <span id="g-project-status" class="canvas-project-status"></span>
         </div>
         <div class="canvas-header-right">
+          <button type="button" id="g-projects" class="canvas-header-btn" title="项目管理">
+            <span>项目</span>
+          </button>
           <button type="button" id="g-ai-toggle" class="canvas-header-btn" title="AI 助手">
             <span class="canvas-btn-icon">&#x2726;</span>
             <span>AI</span>
@@ -151,11 +245,27 @@
         <div class="canvas-empty" id="g-canvas-empty">
           <div class="canvas-empty-icon">&#x25CE;</div>
           <div class="canvas-empty-title">开始创作</div>
-          <div class="canvas-empty-desc">用底部工具栏添加图片或 AI 生图卡片，也可以拖拽文件到画布上。</div>
+          <div class="canvas-empty-desc">用左侧工具栏添加图片或 AI 生图卡片，也可以拖拽文件到画布上。</div>
+        </div>
+
+        <div class="canvas-guide hidden" id="g-guide">
+          <div class="canvas-guide-kicker">首次进入</div>
+          <div class="canvas-guide-title">从左侧工具开始搭建生成流</div>
+          <div class="canvas-guide-steps">
+            <span>上传参考图</span>
+            <span>放置 AI 生图卡</span>
+            <span>输入提示词并生成</span>
+          </div>
+          <div class="canvas-guide-actions">
+            <button type="button" class="canvas-guide-btn" id="g-guide-add-image">上传图片</button>
+            <button type="button" class="canvas-guide-btn primary" id="g-guide-add-gen">添加生图卡</button>
+            <button type="button" class="canvas-guide-close" id="g-guide-close">跳过</button>
+          </div>
         </div>
 
         <!-- SVG layer for connectors -->
         <svg class="canvas-connectors" id="g-connectors"></svg>
+        <div class="canvas-selection-box hidden" id="g-selection-box"></div>
       </div>
 
       <!-- AI Sidebar -->
@@ -175,6 +285,11 @@
               <option value="3:4">3:4</option>
               <option value="16:9">16:9</option>
               <option value="9:16">9:16</option>
+            </select>
+            <select id="g-ai-resolution" class="input ai-sidebar-select" aria-label="生成分辨率">
+              <option value="1k">1k</option>
+              <option value="2k">2k</option>
+              <option value="4k">4k</option>
             </select>
             <button type="button" id="g-ai-upload" class="ai-sidebar-upload-btn" title="上传参考图">&#x1F5BC; 参考图</button>
             <input type="file" id="g-ai-file-input" accept="image/*" multiple hidden />
@@ -207,6 +322,11 @@
             <option value="16:9">16:9</option>
             <option value="9:16">9:16</option>
           </select>
+          <select id="g-gen-resolution" class="input gen-panel-select" aria-label="生成分辨率">
+            <option value="1k">1k</option>
+            <option value="2k">2k</option>
+            <option value="4k">4k</option>
+          </select>
           <label class="switch gen-panel-agent">
             <input id="g-agent" type="checkbox" />
             <span>Agent</span>
@@ -227,16 +347,28 @@
       <div class="canvas-toolbar" id="g-toolbar">
         <button type="button" class="toolbar-btn active" data-tool="select" title="选择">
           <span class="toolbar-icon">&#x2197;</span>
+          <span class="toolbar-label">选择</span>
+        </button>
+        <button type="button" class="toolbar-btn" data-tool="hand" title="手型移动">
+          <span class="toolbar-icon">&#x270B;</span>
+          <span class="toolbar-label">移动</span>
         </button>
         <div class="toolbar-sep"></div>
         <button type="button" class="toolbar-btn" data-tool="image" title="上传图片">
           <span class="toolbar-icon">&#x1F5BC;</span>
+          <span class="toolbar-label">图片</span>
         </button>
         <button type="button" class="toolbar-btn" data-tool="text" title="添加文字">
           <span class="toolbar-icon">T</span>
+          <span class="toolbar-label">文字</span>
+        </button>
+        <button type="button" class="toolbar-btn" data-tool="draw" title="自由绘制">
+          <span class="toolbar-icon">&#x270E;</span>
+          <span class="toolbar-label">画笔</span>
         </button>
         <button type="button" class="toolbar-btn" data-tool="ai-gen" title="AI 生图">
           <span class="toolbar-icon">&#x2726;</span>
+          <span class="toolbar-label">生图</span>
         </button>
         <div class="toolbar-sep"></div>
         <input type="file" id="g-file-input" accept="image/*" multiple hidden />
@@ -436,34 +568,73 @@
 <dialog id="settings-dialog">
   <form method="dialog" id="settings-form">
     <div class="dialog-copy">
-      <h3>API Keys · 设置</h3>
-      <p class="hint">所有 key 仅存在浏览器本地，不会上传到我们的服务器。服务端也可配置默认 key，前端填写优先生效。</p>
+      <h3>设置</h3>
+      <p class="hint">API Key 与页面风格都只保存在当前浏览器。服务端可配置默认 Key，前端填写后优先生效。</p>
     </div>
 
-    <div class="dialog-grid">
-      <label class="dialog-field">
-        <span class="dialog-label">Vision / Design Agent Key <span class="muted">（OCR · 参考图分析 · 设计 Agent · gemini-3-flash-preview）</span></span>
-        <input id="k-vision" type="password" autocomplete="off" placeholder="sk-..." />
-      </label>
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h4>页面风格</h4>
+        <p>深色沿用当前专业工作台；浅色接近 openlovart 的白色画布和浮动面板。</p>
+      </div>
+      <div class="theme-options" role="radiogroup" aria-label="页面风格">
+        <label class="theme-option">
+          <input type="radio" name="settings-theme" value="dark" />
+          <span class="theme-card">
+            <span class="theme-preview theme-preview-dark">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="theme-meta">
+              <strong>深色</strong>
+              <small>Visual Studio</small>
+            </span>
+          </span>
+        </label>
+        <label class="theme-option">
+          <input type="radio" name="settings-theme" value="light" />
+          <span class="theme-card">
+            <span class="theme-preview theme-preview-light">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="theme-meta">
+              <strong>浅色</strong>
+              <small>OpenLovart</small>
+            </span>
+          </span>
+        </label>
+      </div>
+    </section>
 
-      <label class="dialog-field">
-        <span class="dialog-label">Nano Banana 2 Key <span class="muted">（gemini-3.1-flash-image-preview）</span></span>
-        <input id="k-banana2" type="password" autocomplete="off" placeholder="sk-..." />
-      </label>
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h4>API Keys</h4>
+        <p>这些 Key 仅用于当前浏览器发起的任务，不会写入项目文件。</p>
+      </div>
+      <div class="dialog-grid">
+        <label class="dialog-field">
+          <span class="dialog-label">Vision / Design Agent Key <span class="muted">（OCR · 参考图分析 · 设计 Agent · gemini-3-flash-preview）</span></span>
+          <input id="k-vision" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
 
-      <label class="dialog-field">
-        <span class="dialog-label">Nano Banana Pro Key <span class="muted">（gemini-3-pro-image-preview）</span></span>
-        <input id="k-bananapro" type="password" autocomplete="off" placeholder="sk-..." />
-      </label>
+        <label class="dialog-field">
+          <span class="dialog-label">Nano Banana 2 Key <span class="muted">（gemini-3.1-flash-image-preview）</span></span>
+          <input id="k-banana2" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
 
-      <label class="dialog-field">
-        <span class="dialog-label">GPT Image 2 Key <span class="muted">（gpt-image-2）</span></span>
-        <input id="k-gptimage" type="password" autocomplete="off" placeholder="sk-..." />
-      </label>
-    </div>
+        <label class="dialog-field">
+          <span class="dialog-label">Nano Banana Pro Key <span class="muted">（gemini-3-pro-image-preview）</span></span>
+          <input id="k-bananapro" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
+
+        <label class="dialog-field">
+          <span class="dialog-label">GPT Image 2 Key <span class="muted">（gpt-image-2）</span></span>
+          <input id="k-gptimage" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
+      </div>
+    </section>
 
     <div class="dialog-actions">
-      <button type="button" id="settings-clear" class="ghost">清空本地</button>
+      <button type="button" id="settings-clear" class="ghost">清空 Key</button>
       <button type="submit" class="primary">保存</button>
     </div>
   </form>
@@ -483,6 +654,6 @@
   </div>
 </dialog>
 
-<script type="module" src="/app.js?v=20260423-10"></script>
+<script type="module" src="/app.js?v=20260427-3"></script>
 </body>
 </html>

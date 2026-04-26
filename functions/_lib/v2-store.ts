@@ -1,5 +1,7 @@
 import type {
   AssetRecord,
+  CanvasProjectElementRecord,
+  CanvasProjectRecord,
   ConversationRecord,
   ConversationTurnRecord,
   JobItemRecord,
@@ -22,6 +24,8 @@ type MemoryState = {
   events: Map<string, RuntimeEvent[]>
   conversations: Map<string, ConversationRecord>
   turns: Map<string, Array<ConversationTurnRecord>>
+  canvasProjects: Map<string, CanvasProjectRecord>
+  canvasProjectElements: Map<string, CanvasProjectElementRecord[]>
   sealedCredentials: Map<string, SealedCredentialRecord>
 }
 
@@ -34,6 +38,8 @@ const memoryState: MemoryState = {
   events: new Map(),
   conversations: new Map(),
   turns: new Map(),
+  canvasProjects: new Map(),
+  canvasProjectElements: new Map(),
   sealedCredentials: new Map(),
 }
 
@@ -284,6 +290,79 @@ export async function updateConversationTurn(turnId: string, patch: Partial<Conv
     return next
   }
   return null
+}
+
+export async function listCanvasProjects(sessionId?: string): Promise<CanvasProjectRecord[]> {
+  const projects = [...memoryState.canvasProjects.values()]
+  return sessionId ? projects.filter((project) => project.sessionId === sessionId) : projects
+}
+
+export async function createCanvasProject(input: {
+  sessionId: string
+  title?: string
+  metadataJson?: Record<string, unknown>
+}): Promise<CanvasProjectRecord> {
+  const now = nowIso()
+  const record: CanvasProjectRecord = {
+    id: createId('canvas'),
+    sessionId: input.sessionId,
+    title: String(input.title || 'Untitled canvas').trim() || 'Untitled canvas',
+    metadataJson: input.metadataJson || {},
+    createdAt: now,
+    updatedAt: now,
+  }
+  memoryState.canvasProjects.set(record.id, record)
+  memoryState.canvasProjectElements.set(record.id, [])
+  return record
+}
+
+export async function getCanvasProject(projectId: string): Promise<CanvasProjectRecord | null> {
+  return memoryState.canvasProjects.get(projectId) || null
+}
+
+export async function updateCanvasProject(projectId: string, patch: Partial<CanvasProjectRecord>): Promise<CanvasProjectRecord | null> {
+  const current = memoryState.canvasProjects.get(projectId)
+  if (!current) return null
+  const next: CanvasProjectRecord = {
+    ...current,
+    ...patch,
+    id: current.id,
+    sessionId: patch.sessionId || current.sessionId,
+    title: typeof patch.title === 'string' && patch.title.trim() ? patch.title.trim() : current.title,
+    metadataJson: patch.metadataJson || current.metadataJson,
+    updatedAt: nowIso(),
+  }
+  memoryState.canvasProjects.set(projectId, next)
+  return next
+}
+
+export async function listCanvasProjectElements(projectId: string): Promise<CanvasProjectElementRecord[]> {
+  return [...(memoryState.canvasProjectElements.get(projectId) || [])]
+}
+
+export async function replaceCanvasProjectElements(
+  projectId: string,
+  elements: Array<Record<string, unknown>>,
+): Promise<CanvasProjectElementRecord[] | null> {
+  const project = memoryState.canvasProjects.get(projectId)
+  if (!project) return null
+  const now = nowIso()
+  const records = elements.map((element, index) => {
+    const id = typeof element.id === 'string' && element.id ? element.id : createId('cel')
+    return {
+      id,
+      projectId,
+      elementType: typeof element.type === 'string' ? element.type : 'unknown',
+      zIndex: index,
+      dataJson: element,
+      createdAt: now,
+      updatedAt: now,
+    }
+  })
+  memoryState.canvasProjectElements.set(projectId, records)
+  project.updatedAt = now
+  memoryState.canvasProjects.set(projectId, project)
+  return records
 }
 
 export async function createSealedCredential(jobId: string, ciphertext: string, expiresAt: string): Promise<SealedCredentialRecord> {

@@ -54,14 +54,34 @@ const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
 const LEGACY_TRANSLATE_PREF_STORAGE = 'img-translator:prefs:v1'
 const RUNTIME_STORAGE = 'img-translator:runtime:v2'
 const RESULTS_STORAGE = 'img-translator:results:v1'
+const CANVAS_GUIDE_STORAGE = 'img-translator:canvas-guide:v1'
+const CANVAS_AI_FIRST_OPEN_STORAGE = 'img-translator:canvas-ai-opened:v1'
+const DEFAULT_CANVAS_PROJECT_TITLE = '未命名画布'
+const CANVAS_SHAPES = new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right'])
+const CANVAS_RESOLUTIONS = new Set(['1k', '2k', '4k'])
+const VIEW_ROUTES = {
+  home: '/',
+  translate: '/?view=translate',
+  generate: '/lovart/canvas',
+  projects: '/lovart/projects',
+  outfit: '/?view=outfit',
+  style: '/?view=style',
+}
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
 let canvasSpaceHeld = false
+let canvasSaveTimer = 0
+let canvasSaveInFlight = null
+let canvasSavePending = false
+let canvasProjectCreateInFlight = null
+let restoringRuntimeState = false
+let runtimeStateReady = false
 
 const state = {
-  activeView: 'translate',
+  activeView: 'home',
   openDropdown: null,
+  theme: 'dark',
   keys: {},
   runtime: {
     sessionId: '',
@@ -78,6 +98,9 @@ const state = {
     jobId: '',
   },
   generate: {
+    projectId: '',
+    projectTitle: DEFAULT_CANVAS_PROJECT_TITLE,
+    projectSaveStatus: '',
     // canvas
     scale: 1,
     panX: 0,
@@ -85,12 +108,29 @@ const state = {
     elements: [],
     selectedIds: [],
     activeTool: 'select',
+    shapeTool: 'square',
     isDragging: false,
     isPanning: false,
+    isResizing: false,
+    isBoxSelecting: false,
+    isDrawing: false,
+    suppressCanvasClick: false,
     dragStartX: 0,
     dragStartY: 0,
     dragElementStartX: 0,
     dragElementStartY: 0,
+    dragStartPositions: [],
+    resizeHandle: '',
+    resizeStartWidth: 0,
+    resizeStartHeight: 0,
+    resizeStartAspect: 1,
+    boxStartClientX: 0,
+    boxStartClientY: 0,
+    boxEndClientX: 0,
+    boxEndClientY: 0,
+    boxSelectAdditive: false,
+    drawElementId: '',
+    drawPoints: [],
     // ai sidebar
     showAiPanel: false,
     aiMessages: [],
@@ -101,11 +141,21 @@ const state = {
     genPrompt: '',
     genModel: 'nano-banana-2',
     genRatio: '1:1',
+    genResolution: '1k',
     genUseAgent: false,
     genRefs: [],
     genRunning: false,
     // runtime
     model: 'nano-banana-2',
+  },
+  projects: {
+    items: [],
+    loading: false,
+    loadedSessionId: '',
+    error: '',
+  },
+  home: {
+    prompt: '',
   },
   outfit: {
     model: 'nano-banana-pro',
@@ -165,15 +215,27 @@ const dom = {
   tProgress: $('#t-progress'),
   tGrid: $('#t-grid'),
   tEmpty: $('#t-empty'),
+  hPrompt: $('#h-prompt'),
+  hStart: $('#h-start'),
+  hTools: $('#h-tools'),
+  hProjects: $('#h-projects'),
+  hSettings: $('#h-settings'),
+  hSeeAll: $('#h-see-all'),
+  hRecentStatus: $('#h-recent-status'),
+  hRecentList: $('#h-recent-list'),
   gModel: $('#g-model'),
   gAgent: $('#g-agent'),
   gNew: $('#g-new'),
+  gProjects: $('#g-projects'),
+  gProjectTitle: $('#g-project-title'),
+  gProjectStatus: $('#g-project-status'),
   gInput: $('#g-input'),
   gSend: $('#g-send'),
   gCanvasContainer: $('#g-canvas-container'),
   gCanvas: $('#g-canvas'),
   gCanvasEmpty: $('#g-canvas-empty'),
   gConnectors: $('#g-connectors'),
+  gSelectionBox: $('#g-selection-box'),
   gAiSidebar: $('#g-ai-sidebar'),
   gAiToggle: $('#g-ai-toggle'),
   gAiClose: $('#g-ai-close'),
@@ -184,6 +246,7 @@ const dom = {
   gGenRefUpload: $('#g-gen-ref-upload'),
   gGenRefInput: $('#g-gen-ref-input'),
   gGenRatio: $('#g-gen-ratio'),
+  gGenResolution: $('#g-gen-resolution'),
   gGenRun: $('#g-gen-run'),
   gGenProgress: $('#g-gen-progress'),
   gToolbar: $('#g-toolbar'),
@@ -194,9 +257,21 @@ const dom = {
   gContextMenu: $('#g-context-menu'),
   gAiModel: $('#g-ai-model'),
   gAiRatio: $('#g-ai-ratio'),
+  gAiResolution: $('#g-ai-resolution'),
   gAiUpload: $('#g-ai-upload'),
   gAiFileInput: $('#g-ai-file-input'),
   gAiRefList: $('#g-ai-ref-list'),
+  gGuide: $('#g-guide'),
+  gGuideAddImage: $('#g-guide-add-image'),
+  gGuideAddGen: $('#g-guide-add-gen'),
+  gGuideClose: $('#g-guide-close'),
+  pList: $('#p-list'),
+  pCount: $('#p-count'),
+  pStatus: $('#p-status'),
+  pEmpty: $('#p-empty'),
+  pNew: $('#p-new'),
+  pEmptyNew: $('#p-empty-new'),
+  pRefresh: $('#p-refresh'),
   oModel: $('#o-model'),
   oGarmentType: $('#o-garment-type'),
   oConcurrency: $('#o-concurrency'),
@@ -258,16 +333,40 @@ init()
 
 function init() {
   hydrateStoredState()
+  applyTheme()
+  state.activeView = viewFromLocation(state.activeView)
+  const routeProjectId = canvasProjectIdFromLocation()
+  if (state.activeView === 'generate' && routeProjectId) {
+    state.generate.projectId = routeProjectId
+  }
+  ensureCanvasFirstOpenAiPanel()
   populateModelSelects()
   bindShell()
   bindSettings()
   bindLightbox()
+  bindHome()
   bindTranslate()
+  bindProjects()
   bindGenerate()
   bindOutfit()
   bindStyle()
   renderAll()
   void restoreRuntimeState()
+}
+
+function viewFromLocation(fallback = 'home') {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  if (path === '/lovart/canvas') return 'generate'
+  if (path === '/lovart/projects') return 'projects'
+  if (path === '/lovart') return 'home'
+  const view = new URLSearchParams(window.location.search).get('view')
+  if (view) return normalizeView(view)
+  if (path === '/') return 'home'
+  return normalizeView(fallback)
+}
+
+function canvasProjectIdFromLocation() {
+  return new URLSearchParams(window.location.search).get('id') || ''
 }
 
 function hydrateStoredState() {
@@ -294,6 +393,7 @@ function hydrateStoredState() {
   const stored = readJson(PREF_STORAGE, null)
   if (stored) {
     state.activeView = normalizeView(stored.activeView)
+    state.theme = normalizeTheme(stored.theme || stored.appearance?.theme)
     Object.assign(state.translate, sanitizeTranslatePrefs(stored.translate))
     Object.assign(state.generate, sanitizeGeneratePrefs(stored.generate))
     Object.assign(state.outfit, sanitizeOutfitPrefs(stored.outfit))
@@ -323,8 +423,12 @@ function sanitizeTranslatePrefs(raw = {}) {
 }
 
 function sanitizeGeneratePrefs(raw = {}) {
+  const model = getModel(raw.model)?.id || state.generate.model
   return {
-    model: getModel(raw.model)?.id || state.generate.model,
+    model,
+    genModel: model,
+    genRatio: normalizeAspectRatio(raw.genRatio || raw.aspectRatio || state.generate.genRatio),
+    genResolution: normalizeCanvasResolution(raw.genResolution || raw.resolution || state.generate.genResolution),
     genUseAgent: typeof raw.genUseAgent === 'boolean' ? raw.genUseAgent : (typeof raw.useDesignAgent === 'boolean' ? raw.useDesignAgent : state.generate.genUseAgent),
   }
 }
@@ -344,6 +448,7 @@ function sanitizeOutfitPrefs(raw = {}) {
 function savePrefs() {
   localStorage.setItem(PREF_STORAGE, JSON.stringify({
     activeView: state.activeView,
+    theme: state.theme,
     translate: {
       source: state.translate.source,
       targets: state.translate.targets,
@@ -353,6 +458,8 @@ function savePrefs() {
     },
     generate: {
       model: state.generate.model,
+      genRatio: state.generate.genRatio,
+      genResolution: state.generate.genResolution,
       genUseAgent: state.generate.genUseAgent,
     },
     outfit: {
@@ -367,7 +474,8 @@ function savePrefs() {
   }))
 }
 
-function saveRuntimeState() {
+function saveRuntimeState(options = {}) {
+  const persistCanvas = options.persistCanvas !== false
   localStorage.setItem(RUNTIME_STORAGE, JSON.stringify({
     sessionId: state.runtime.sessionId || '',
     translate: {
@@ -375,21 +483,9 @@ function saveRuntimeState() {
       items: state.translate.items.map((item) => serializeAssetBackedItem(item)),
     },
     generate: {
-      elements: state.generate.elements.map((el) => ({
-        id: el.id,
-        type: el.type,
-        x: el.x,
-        y: el.y,
-        width: el.width,
-        height: el.height,
-        content: el.type === 'image' ? '' : (el.content || ''),
-        name: el.name || '',
-        assetId: el.assetId || '',
-        referenceImageId: el.referenceImageId || null,
-        generatingPrompt: el.generatingPrompt || '',
-        connectorFrom: el.connectorFrom || '',
-        connectorTo: el.connectorTo || '',
-      })),
+      projectId: state.generate.projectId || '',
+      projectTitle: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+      elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
       scale: state.generate.scale,
       panX: state.generate.panX,
       panY: state.generate.panY,
@@ -414,6 +510,7 @@ function saveRuntimeState() {
       })),
     },
   }))
+  if (persistCanvas) scheduleCanvasProjectSave()
 }
 
 function loadRuntimeState() {
@@ -428,7 +525,7 @@ function sanitizeRuntimeState(raw = {}) {
       .map((item) => ({ ...item, results: {} }))
     : []
   const generateElements = Array.isArray(raw.generate?.elements)
-    ? raw.generate.elements.filter((el) => el && el.id && el.type)
+    ? raw.generate.elements.map((el) => sanitizeCanvasElement(el)).filter(Boolean)
     : []
   const outfitModels = Array.isArray(raw.outfit?.models)
     ? raw.outfit.models.map((item) => sanitizeStoredAssetItem(item)).filter(Boolean)
@@ -447,6 +544,10 @@ function sanitizeRuntimeState(raw = {}) {
       items: translateItems,
     },
     generate: {
+      projectId: typeof raw.generate?.projectId === 'string' ? raw.generate.projectId : '',
+      projectTitle: typeof raw.generate?.projectTitle === 'string' && raw.generate.projectTitle.trim()
+        ? raw.generate.projectTitle.trim()
+        : DEFAULT_CANVAS_PROJECT_TITLE,
       elements: generateElements,
       scale: Number(raw.generate?.scale) || 1,
       panX: Number(raw.generate?.panX) || 0,
@@ -471,6 +572,104 @@ function sanitizeRuntimeState(raw = {}) {
         : [],
     },
   }
+}
+
+function sanitizeCanvasElement(raw = {}) {
+  const type = String(raw.type || '')
+  if (!raw.id || !['image', 'text', 'shape', 'path', 'image-generator', 'connector'].includes(type)) return null
+  const defaultWidth = type === 'connector' ? 0 : (type === 'text' ? 220 : 300)
+  const defaultHeight = type === 'connector' ? 0 : (type === 'text' ? 48 : 300)
+  const rawWidth = Number(raw.width)
+  const rawHeight = Number(raw.height)
+  const width = Math.max(0, Number.isFinite(rawWidth) ? rawWidth : defaultWidth)
+  const height = Math.max(0, Number.isFinite(rawHeight) ? rawHeight : defaultHeight)
+  const shape = normalizeCanvasShape(raw.shape || raw.shapeType)
+  const path = sanitizeCanvasPath(raw.path || raw.points)
+  const pathBoxWidth = Math.max(1, Number(raw.pathBoxWidth) || width || 1)
+  const pathBoxHeight = Math.max(1, Number(raw.pathBoxHeight) || height || 1)
+  return {
+    id: String(raw.id),
+    type,
+    x: Number(raw.x) || 0,
+    y: Number(raw.y) || 0,
+    width,
+    height,
+    content: typeof raw.content === 'string' ? raw.content : '',
+    name: typeof raw.name === 'string' ? raw.name : '',
+    mime: typeof raw.mime === 'string' ? raw.mime : '',
+    assetId: typeof raw.assetId === 'string' ? raw.assetId : '',
+    referenceImageId: raw.referenceImageId ? String(raw.referenceImageId) : null,
+    generatingPrompt: typeof raw.generatingPrompt === 'string' ? raw.generatingPrompt : '',
+    connectorFrom: typeof raw.connectorFrom === 'string' ? raw.connectorFrom : '',
+    connectorTo: typeof raw.connectorTo === 'string' ? raw.connectorTo : '',
+    aspectRatio: normalizeAspectRatio(raw.aspectRatio || raw.ratio || ''),
+    resolution: normalizeCanvasResolution(raw.resolution || ''),
+    shape,
+    shapeType: shape,
+    path,
+    pathBoxWidth,
+    pathBoxHeight,
+    color: typeof raw.color === 'string' ? raw.color : '',
+    fill: typeof raw.fill === 'string' ? raw.fill : '',
+    stroke: typeof raw.stroke === 'string' ? raw.stroke : '',
+    fontSize: clamp(Number(raw.fontSize) || 16, 10, 96),
+    fontFamily: typeof raw.fontFamily === 'string' ? raw.fontFamily : '',
+    strokeWidth: clamp(Number(raw.strokeWidth) || 2, 1, 16),
+    groupId: typeof raw.groupId === 'string' ? raw.groupId : '',
+    linkedElements: Array.isArray(raw.linkedElements) ? unique(raw.linkedElements.map(String).filter(Boolean)) : [],
+    connectorStyle: typeof raw.connectorStyle === 'string' ? raw.connectorStyle : 'bezier',
+  }
+}
+
+function serializeCanvasElement(el) {
+  return {
+    id: el.id,
+    type: el.type,
+    x: el.x,
+    y: el.y,
+    width: el.width,
+    height: el.height,
+    content: el.type === 'image' && el.assetId ? '' : (el.content || ''),
+    name: el.name || '',
+    mime: el.mime || '',
+    assetId: el.assetId || '',
+    referenceImageId: el.referenceImageId || null,
+    generatingPrompt: el.generatingPrompt || '',
+    connectorFrom: el.connectorFrom || '',
+    connectorTo: el.connectorTo || '',
+    aspectRatio: el.aspectRatio || '',
+    resolution: el.resolution || '',
+    shape: el.shape || el.shapeType || '',
+    shapeType: el.shape || el.shapeType || '',
+    path: sanitizeCanvasPath(el.path),
+    pathBoxWidth: Number(el.pathBoxWidth) || Number(el.width) || 1,
+    pathBoxHeight: Number(el.pathBoxHeight) || Number(el.height) || 1,
+    color: el.color || '',
+    fill: el.fill || '',
+    stroke: el.stroke || '',
+    fontSize: Number(el.fontSize) || 16,
+    fontFamily: el.fontFamily || '',
+    strokeWidth: Number(el.strokeWidth) || 2,
+    groupId: el.groupId || '',
+    linkedElements: Array.isArray(el.linkedElements) ? unique(el.linkedElements.map(String).filter(Boolean)) : [],
+    connectorStyle: el.connectorStyle || 'bezier',
+  }
+}
+
+function sanitizeCanvasPath(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((point) => ({
+      x: Number(point?.x),
+      y: Number(point?.y),
+    }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+    .slice(0, 2000)
+}
+
+function normalizeCanvasShape(value) {
+  const shape = String(value || 'square')
+  return CANVAS_SHAPES.has(shape) ? shape : 'square'
 }
 
 function serializeAssetBackedItem(item, extra = {}) {
@@ -506,6 +705,15 @@ function bindShell() {
       setActiveView(button.dataset.view || 'translate')
     })
   }
+
+  window.addEventListener('popstate', () => {
+    state.activeView = viewFromLocation(state.activeView)
+    const routeProjectId = state.activeView === 'generate' ? canvasProjectIdFromLocation() : ''
+    if (routeProjectId) state.generate.projectId = routeProjectId
+    savePrefs()
+    renderAll()
+    if (state.activeView === 'home' || state.activeView === 'projects') void loadCanvasProjects()
+  })
 
   const sourceTrigger = $('.dd-trigger', dom.sourceDropdown)
   const targetTrigger = $('.dd-trigger', dom.targetDropdown)
@@ -548,7 +756,7 @@ function bindShell() {
 
 function bindSettings() {
   dom.settingsBtn.addEventListener('click', () => {
-    hydrateKeyForm()
+    hydrateSettingsForm()
     dom.settingsDialog.showModal()
   })
 
@@ -563,15 +771,27 @@ function bindSettings() {
     for (const key of Object.keys(state.keys)) {
       if (!state.keys[key]) delete state.keys[key]
     }
+    state.theme = getSelectedSettingsTheme()
+    applyTheme()
     localStorage.setItem(KEY_STORAGE, JSON.stringify(state.keys))
+    savePrefs()
     dom.settingsDialog.close()
   })
 
   dom.settingsClear.addEventListener('click', () => {
     localStorage.removeItem(KEY_STORAGE)
     state.keys = {}
-    hydrateKeyForm()
+    hydrateSettingsForm()
   })
+
+  for (const input of $$('input[name="settings-theme"]')) {
+    input.addEventListener('change', () => {
+      if (!input.checked) return
+      state.theme = normalizeTheme(input.value)
+      applyTheme()
+      savePrefs()
+    })
+  }
 }
 
 function bindTranslate() {
@@ -626,24 +846,82 @@ function bindTranslate() {
   dom.tDlBtn.addEventListener('click', downloadTranslateResults)
 }
 
+function bindHome() {
+  dom.hPrompt?.addEventListener('input', () => {
+    state.home.prompt = dom.hPrompt.value
+  })
+  dom.hPrompt?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      void startCanvasFromHomePrompt()
+    }
+  })
+  dom.hStart?.addEventListener('click', () => {
+    void startCanvasFromHomePrompt()
+  })
+  dom.hTools?.addEventListener('click', (event) => {
+    const tool = event.target.closest('[data-view]')
+    if (!tool) return
+    setActiveView(tool.dataset.view || 'home')
+  })
+  dom.hProjects?.addEventListener('click', () => setActiveView('projects'))
+  dom.hSeeAll?.addEventListener('click', () => setActiveView('projects'))
+  dom.hSettings?.addEventListener('click', () => {
+    hydrateSettingsForm()
+    dom.settingsDialog.showModal()
+  })
+  dom.hRecentList?.addEventListener('click', (event) => {
+    const newCard = event.target.closest('[data-home-new]')
+    if (newCard) {
+      void startNewCanvasProject()
+      return
+    }
+    const card = event.target.closest('[data-project-id]')
+    if (card) void openCanvasProject(card.dataset.projectId)
+  })
+}
+
+function bindProjects() {
+  dom.pNew?.addEventListener('click', () => {
+    void startNewCanvasProject()
+  })
+  dom.pEmptyNew?.addEventListener('click', () => {
+    void startNewCanvasProject()
+  })
+  dom.pRefresh?.addEventListener('click', () => {
+    void loadCanvasProjects({ force: true })
+  })
+  dom.pList?.addEventListener('click', (event) => {
+    const card = event.target.closest('[data-project-id]')
+    if (!card) return
+    void openCanvasProject(card.dataset.projectId)
+  })
+}
+
 function bindGenerate() {
   bindCanvas()
   bindToolbar()
   bindZoom()
   bindGenPanel()
   bindAiSidebar()
+  bindCanvasGuide()
+
+  dom.gProjectTitle.addEventListener('input', () => {
+    state.generate.projectTitle = dom.gProjectTitle.value.trim() || DEFAULT_CANVAS_PROJECT_TITLE
+    saveRuntimeState()
+  })
+  dom.gProjectTitle.addEventListener('blur', () => {
+    dom.gProjectTitle.value = state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
+    saveRuntimeState()
+  })
+
+  dom.gProjects.addEventListener('click', () => {
+    setActiveView('projects')
+  })
 
   dom.gNew.addEventListener('click', () => {
     if (state.generate.genRunning || state.generate.aiRunning) return
-    state.generate.elements = []
-    state.generate.selectedIds = []
-    state.generate.scale = 1
-    state.generate.panX = 0
-    state.generate.panY = 0
-    hideGenPanel()
-    hideContextMenu()
-    saveRuntimeState()
-    renderGenerate()
+    void startNewCanvasProject()
   })
 }
 
@@ -661,6 +939,39 @@ function updateCanvasTransform() {
   const { panX, panY, scale } = state.generate
   dom.gCanvas.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`
   dom.gCanvas.style.transformOrigin = '0 0'
+  dom.gCanvasContainer.style.backgroundPosition = `${panX}px ${panY}px`
+  dom.gCanvasContainer.style.backgroundSize = `${22 * scale}px ${22 * scale}px`
+}
+
+function isCanvasBackgroundTarget(target) {
+  return target === dom.gCanvasContainer || target === dom.gCanvas
+}
+
+function startCanvasPan(e) {
+  e.preventDefault()
+  state.generate.isPanning = true
+  state.generate.dragStartX = e.clientX
+  state.generate.dragStartY = e.clientY
+  state.generate.dragElementStartX = state.generate.panX
+  state.generate.dragElementStartY = state.generate.panY
+  dom.gCanvasContainer.style.cursor = 'grabbing'
+}
+
+function startCanvasDrag(e) {
+  state.generate.isDragging = true
+  state.generate.dragStartX = e.clientX
+  state.generate.dragStartY = e.clientY
+  state.generate.dragStartPositions = state.generate.selectedIds
+    .map((id) => state.generate.elements.find((item) => item.id === id))
+    .filter(Boolean)
+    .map((el) => ({ id: el.id, x: el.x, y: el.y }))
+}
+
+function applyCanvasToolCursor() {
+  const tool = state.generate.activeTool
+  dom.gCanvasContainer.classList.toggle('tool-hand', tool === 'hand')
+  dom.gCanvasContainer.classList.toggle('tool-draw', tool === 'draw')
+  dom.gCanvasContainer.classList.toggle('tool-shape', isShapeTool(tool))
 }
 
 function bindCanvas() {
@@ -692,10 +1003,15 @@ function bindCanvas() {
   dom.gCanvasContainer.addEventListener('drop', async (e) => {
     e.preventDefault()
     if (!e.dataTransfer?.files?.length) return
-    const images = await readImageFiles(e.dataTransfer.files)
+    const images = await prepareAssetItems(e.dataTransfer.files, { kind: 'upload', source: 'canvas_drop' })
     const pos = screenToCanvas(e.clientX, e.clientY)
     for (let i = 0; i < images.length; i++) {
-      addImageToCanvas(images[i].dataUrl, images[i].name, pos.x + i * 40, pos.y + i * 40)
+      addImageToCanvas(images[i].dataUrl, images[i].name, pos.x + i * 40, pos.y + i * 40, {
+        assetId: images[i].assetId,
+        mime: images[i].mime,
+        width: images[i].width,
+        height: images[i].height,
+      })
     }
     renderCanvas()
     saveRuntimeState()
@@ -703,7 +1019,12 @@ function bindCanvas() {
 
   // Click outside elements deselects
   dom.gCanvasContainer.addEventListener('click', (e) => {
-    if (e.target === dom.gCanvasContainer || e.target === dom.gCanvas) {
+    if (state.generate.suppressCanvasClick) {
+      state.generate.suppressCanvasClick = false
+      return
+    }
+    if (state.generate.activeTool !== 'select') return
+    if (isCanvasBackgroundTarget(e.target)) {
       if (!state.generate.isPanning && !state.generate.isDragging) {
         state.generate.selectedIds = []
         hideGenPanel()
@@ -720,10 +1041,17 @@ function bindCanvas() {
     const pos = screenToCanvas(e.clientX, e.clientY)
     if (tool === 'text') {
       addTextToCanvas(pos.x, pos.y)
+      setCanvasTool('select')
       renderCanvas()
       saveRuntimeState()
     } else if (tool === 'ai-gen') {
       addGeneratorToCanvas(pos.x, pos.y)
+      setCanvasTool('select')
+      renderCanvas()
+      saveRuntimeState()
+    } else if (isShapeTool(tool)) {
+      addShapeToCanvas(getShapeFromTool(tool), pos.x, pos.y)
+      setCanvasTool('select')
       renderCanvas()
       saveRuntimeState()
     }
@@ -733,21 +1061,45 @@ function bindCanvas() {
 function handleCanvasMouseDown(e) {
   if (state.activeView !== 'generate') return
   hideContextMenu()
+  const tool = state.generate.activeTool
 
   // Middle button or space+left = pan
-  if (e.button === 1 || (e.button === 0 && canvasSpaceHeld)) {
-    e.preventDefault()
-    state.generate.isPanning = true
-    state.generate.dragStartX = e.clientX
-    state.generate.dragStartY = e.clientY
-    state.generate.dragElementStartX = state.generate.panX
-    state.generate.dragElementStartY = state.generate.panY
-    dom.gCanvasContainer.style.cursor = 'grabbing'
+  if (e.button === 1 || (e.button === 0 && (canvasSpaceHeld || tool === 'hand'))) {
+    startCanvasPan(e)
     return
   }
 
   // Left click on element = select or drag
   if (e.button === 0) {
+    if (tool === 'draw' && !e.target.closest('.canvas-el')) {
+      beginCanvasDraw(e)
+      return
+    }
+
+    const handleNode = e.target.closest('.resize-handle')
+    if (handleNode) {
+      const elNode = handleNode.closest('.canvas-el')
+      const elId = elNode?.dataset.elId
+      const el = state.generate.elements.find((item) => item.id === elId)
+      if (el) {
+        e.preventDefault()
+        e.stopPropagation()
+        state.generate.selectedIds = [el.id]
+        state.generate.isResizing = true
+        state.generate.resizeHandle = handleNode.dataset.handle || 'se'
+        state.generate.dragStartX = e.clientX
+        state.generate.dragStartY = e.clientY
+        state.generate.dragElementStartX = el.x
+        state.generate.dragElementStartY = el.y
+        state.generate.resizeStartWidth = el.width
+        state.generate.resizeStartHeight = el.height
+        state.generate.resizeStartAspect = el.width && el.height ? el.width / el.height : 1
+        hideGenPanel()
+        renderCanvas()
+      }
+      return
+    }
+
     const elNode = e.target.closest('.canvas-el')
     if (elNode) {
       const elId = elNode.dataset.elId
@@ -761,17 +1113,23 @@ function handleCanvasMouseDown(e) {
           return
         }
 
-        state.generate.selectedIds = [elId]
         const el = state.generate.elements.find((item) => item.id === elId)
-        if (el) {
-          state.generate.isDragging = true
-          state.generate.dragStartX = e.clientX
-          state.generate.dragStartY = e.clientY
-          state.generate.dragElementStartX = el.x
-          state.generate.dragElementStartY = el.y
+        if (!el) return
+
+        const wasSelected = state.generate.selectedIds.includes(elId)
+        if (e.shiftKey) {
+          state.generate.selectedIds = wasSelected
+            ? state.generate.selectedIds.filter((id) => id !== elId)
+            : [...state.generate.selectedIds, elId]
+        } else if (!wasSelected) {
+          state.generate.selectedIds = [elId]
         }
 
-        if (el?.type === 'image-generator') {
+        if (state.generate.selectedIds.includes(elId)) {
+          startCanvasDrag(e)
+        }
+
+        if (state.generate.selectedIds.length === 1 && el.type === 'image-generator') {
           showGenPanel(elId)
         } else {
           hideGenPanel()
@@ -783,9 +1141,17 @@ function handleCanvasMouseDown(e) {
     }
 
     // Click empty canvas area with tool
-    const tool = state.generate.activeTool
-    if (tool === 'image' && (e.target === dom.gCanvasContainer || e.target === dom.gCanvas)) {
+    if (tool === 'image' && isCanvasBackgroundTarget(e.target)) {
       dom.gFileInput.click()
+    } else if (isShapeTool(tool) && isCanvasBackgroundTarget(e.target)) {
+      const pos = screenToCanvas(e.clientX, e.clientY)
+      addShapeToCanvas(getShapeFromTool(tool), pos.x, pos.y)
+      setCanvasTool('select')
+      state.generate.suppressCanvasClick = true
+      renderCanvas()
+      saveRuntimeState()
+    } else if (tool === 'select' && isCanvasBackgroundTarget(e.target)) {
+      beginBoxSelection(e)
     }
   }
 }
@@ -801,20 +1167,93 @@ function handleCanvasMouseMove(e) {
     return
   }
 
-  if (state.generate.isDragging && state.generate.selectedIds.length === 1) {
+  if (state.generate.isDrawing) {
+    updateCanvasDraw(e)
+    return
+  }
+
+  if (state.generate.isBoxSelecting) {
+    updateBoxSelection(e)
+    return
+  }
+
+  if (state.generate.isResizing && state.generate.selectedIds.length === 1) {
     const el = state.generate.elements.find((item) => item.id === state.generate.selectedIds[0])
     if (!el) return
     const dx = (e.clientX - state.generate.dragStartX) / state.generate.scale
     const dy = (e.clientY - state.generate.dragStartY) / state.generate.scale
-    el.x = state.generate.dragElementStartX + dx
-    el.y = state.generate.dragElementStartY + dy
+    const handle = state.generate.resizeHandle || 'se'
+
+    let nextX = state.generate.dragElementStartX
+    let nextY = state.generate.dragElementStartY
+    let nextW = state.generate.resizeStartWidth
+    let nextH = state.generate.resizeStartHeight
+
+    if (handle.includes('e')) nextW = state.generate.resizeStartWidth + dx
+    if (handle.includes('s')) nextH = state.generate.resizeStartHeight + dy
+    if (handle.includes('w')) {
+      nextW = state.generate.resizeStartWidth - dx
+      nextX = state.generate.dragElementStartX + dx
+    }
+    if (handle.includes('n')) {
+      nextH = state.generate.resizeStartHeight - dy
+      nextY = state.generate.dragElementStartY + dy
+    }
+
+    if (el.type === 'image' && state.generate.resizeStartAspect > 0) {
+      if (handle.includes('e') || handle.includes('w')) {
+        nextH = nextW / state.generate.resizeStartAspect
+        if (handle.includes('n')) nextY = state.generate.dragElementStartY + state.generate.resizeStartHeight - nextH
+      } else if (handle.includes('n') || handle.includes('s')) {
+        nextW = nextH * state.generate.resizeStartAspect
+        if (handle.includes('w')) nextX = state.generate.dragElementStartX + state.generate.resizeStartWidth - nextW
+      }
+    }
+
+    const minW = el.type === 'text' ? 80 : 28
+    const minH = el.type === 'text' ? 32 : 28
+    if (nextW < minW) {
+      nextX = handle.includes('w') ? state.generate.dragElementStartX + state.generate.resizeStartWidth - minW : nextX
+      nextW = minW
+    }
+    if (nextH < minH) {
+      nextY = handle.includes('n') ? state.generate.dragElementStartY + state.generate.resizeStartHeight - minH : nextY
+      nextH = minH
+    }
+    el.x = nextX
+    el.y = nextY
+    el.width = nextW
+    el.height = nextH
 
     const node = dom.gCanvas.querySelector(`[data-el-id="${el.id}"]`)
     if (node) {
       node.style.left = `${el.x}px`
       node.style.top = `${el.y}px`
+      node.style.width = `${el.width}px`
+      node.style.height = `${el.height}px`
     }
     renderConnectors()
+    return
+  }
+
+  if (state.generate.isDragging && state.generate.selectedIds.length > 0) {
+    const dx = (e.clientX - state.generate.dragStartX) / state.generate.scale
+    const dy = (e.clientY - state.generate.dragStartY) / state.generate.scale
+
+    for (const start of state.generate.dragStartPositions) {
+      const el = state.generate.elements.find((item) => item.id === start.id)
+      if (!el) continue
+      el.x = start.x + dx
+      el.y = start.y + dy
+
+      const node = dom.gCanvas.querySelector(`[data-el-id="${el.id}"]`)
+      if (node) {
+        node.style.left = `${el.x}px`
+        node.style.top = `${el.y}px`
+      }
+    }
+    renderConnectors()
+    refreshGenPanelPosition()
   }
 }
 
@@ -822,12 +1261,165 @@ function handleCanvasMouseUp(e) {
   if (state.generate.isPanning) {
     state.generate.isPanning = false
     dom.gCanvasContainer.style.cursor = canvasSpaceHeld ? 'grab' : ''
+    refreshGenPanelPosition()
     saveRuntimeState()
+  }
+  if (state.generate.isDrawing) {
+    finishCanvasDraw()
+    saveRuntimeState()
+  }
+  if (state.generate.isBoxSelecting) {
+    finishBoxSelection(e)
   }
   if (state.generate.isDragging) {
     state.generate.isDragging = false
+    state.generate.dragStartPositions = []
+    refreshGenPanelPosition()
     saveRuntimeState()
   }
+  if (state.generate.isResizing) {
+    state.generate.isResizing = false
+    state.generate.resizeHandle = ''
+    renderCanvas()
+    saveRuntimeState()
+  }
+}
+
+function beginBoxSelection(e) {
+  e.preventDefault()
+  state.generate.isBoxSelecting = true
+  state.generate.boxSelectAdditive = e.shiftKey
+  state.generate.boxStartClientX = e.clientX
+  state.generate.boxStartClientY = e.clientY
+  state.generate.boxEndClientX = e.clientX
+  state.generate.boxEndClientY = e.clientY
+  state.generate.suppressCanvasClick = true
+  updateBoxSelection(e)
+}
+
+function updateBoxSelection(e) {
+  state.generate.boxEndClientX = e.clientX
+  state.generate.boxEndClientY = e.clientY
+  const rect = dom.gCanvasContainer.getBoundingClientRect()
+  const left = Math.min(state.generate.boxStartClientX, state.generate.boxEndClientX) - rect.left
+  const top = Math.min(state.generate.boxStartClientY, state.generate.boxEndClientY) - rect.top
+  const width = Math.abs(state.generate.boxEndClientX - state.generate.boxStartClientX)
+  const height = Math.abs(state.generate.boxEndClientY - state.generate.boxStartClientY)
+  dom.gSelectionBox.classList.remove('hidden')
+  dom.gSelectionBox.style.left = `${left}px`
+  dom.gSelectionBox.style.top = `${top}px`
+  dom.gSelectionBox.style.width = `${width}px`
+  dom.gSelectionBox.style.height = `${height}px`
+}
+
+function finishBoxSelection(e) {
+  const dx = Math.abs(e.clientX - state.generate.boxStartClientX)
+  const dy = Math.abs(e.clientY - state.generate.boxStartClientY)
+  state.generate.isBoxSelecting = false
+  dom.gSelectionBox.classList.add('hidden')
+
+  if (dx < 4 && dy < 4) {
+    if (!state.generate.boxSelectAdditive) {
+      state.generate.selectedIds = []
+      hideGenPanel()
+    }
+    renderCanvas()
+    return
+  }
+
+  const start = screenToCanvas(state.generate.boxStartClientX, state.generate.boxStartClientY)
+  const end = screenToCanvas(e.clientX, e.clientY)
+  const selection = {
+    x1: Math.min(start.x, end.x),
+    y1: Math.min(start.y, end.y),
+    x2: Math.max(start.x, end.x),
+    y2: Math.max(start.y, end.y),
+  }
+  const matched = state.generate.elements
+    .filter((el) => el.type !== 'connector')
+    .filter((el) => rectsIntersect(
+      { x1: el.x, y1: el.y, x2: el.x + el.width, y2: el.y + el.height },
+      selection,
+    ))
+    .map((el) => el.id)
+
+  state.generate.selectedIds = state.generate.boxSelectAdditive
+    ? unique([...state.generate.selectedIds, ...matched])
+    : matched
+  hideGenPanel()
+  renderCanvas()
+}
+
+function beginCanvasDraw(e) {
+  e.preventDefault()
+  const point = screenToCanvas(e.clientX, e.clientY)
+  const el = {
+    id: crypto.randomUUID(),
+    type: 'path',
+    x: point.x,
+    y: point.y,
+    width: 2,
+    height: 2,
+    path: [{ x: 0, y: 0 }],
+    pathBoxWidth: 2,
+    pathBoxHeight: 2,
+    strokeWidth: 3,
+    color: '',
+  }
+  state.generate.elements.push(el)
+  state.generate.selectedIds = [el.id]
+  state.generate.drawElementId = el.id
+  state.generate.drawPoints = [point]
+  state.generate.isDrawing = true
+  state.generate.suppressCanvasClick = true
+  renderCanvas()
+}
+
+function updateCanvasDraw(e) {
+  const point = screenToCanvas(e.clientX, e.clientY)
+  const last = state.generate.drawPoints[state.generate.drawPoints.length - 1]
+  if (last && Math.hypot(point.x - last.x, point.y - last.y) < 2) return
+  state.generate.drawPoints.push(point)
+  const el = state.generate.elements.find((item) => item.id === state.generate.drawElementId)
+  if (!el) return
+  normalizePathElementFromPoints(el, state.generate.drawPoints)
+  renderCanvas()
+}
+
+function finishCanvasDraw() {
+  const el = state.generate.elements.find((item) => item.id === state.generate.drawElementId)
+  state.generate.isDrawing = false
+  state.generate.drawElementId = ''
+  if (!el) return
+  if (state.generate.drawPoints.length < 2) {
+    el.width = 6
+    el.height = 6
+    el.path = [{ x: 3, y: 3 }, { x: 3.1, y: 3.1 }]
+    el.pathBoxWidth = 6
+    el.pathBoxHeight = 6
+  } else {
+    normalizePathElementFromPoints(el, state.generate.drawPoints)
+  }
+  state.generate.drawPoints = []
+  renderCanvas()
+}
+
+function normalizePathElementFromPoints(el, points) {
+  const minX = Math.min(...points.map((point) => point.x))
+  const minY = Math.min(...points.map((point) => point.y))
+  const maxX = Math.max(...points.map((point) => point.x))
+  const maxY = Math.max(...points.map((point) => point.y))
+  const padding = Math.max(3, Number(el.strokeWidth) || 3)
+  el.x = minX - padding
+  el.y = minY - padding
+  el.width = Math.max(2, maxX - minX + padding * 2)
+  el.height = Math.max(2, maxY - minY + padding * 2)
+  el.pathBoxWidth = el.width
+  el.pathBoxHeight = el.height
+  el.path = points.map((point) => ({
+    x: point.x - el.x,
+    y: point.y - el.y,
+  }))
 }
 
 function handleCanvasWheel(e) {
@@ -851,6 +1443,7 @@ function handleCanvasWheel(e) {
   updateCanvasTransform()
   updateZoomDisplay()
   renderConnectors()
+  refreshGenPanelPosition()
 }
 
 function handleCanvasKeyDown(e) {
@@ -871,9 +1464,10 @@ function handleCanvasKeyDown(e) {
 
 function showContextMenu(e, elementId) {
   const menu = dom.gContextMenu
+  const viewRect = $('#view-generate').getBoundingClientRect()
   menu.classList.remove('hidden')
-  menu.style.left = `${e.clientX}px`
-  menu.style.top = `${e.clientY}px`
+  menu.style.left = `${clamp(e.clientX - viewRect.left, 8, viewRect.width - 180)}px`
+  menu.style.top = `${clamp(e.clientY - viewRect.top, 8, viewRect.height - 140)}px`
   menu.dataset.targetId = elementId
 
   // Rebind actions
@@ -927,26 +1521,35 @@ function hideContextMenu() {
   dom.gContextMenu.classList.add('hidden')
 }
 
-function addImageToCanvas(dataUrl, name, x, y) {
-  const cx = typeof x === 'number' ? x : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - 150
-  const cy = typeof y === 'number' ? y : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - 150
-  state.generate.elements.push({
+function addImageToCanvas(dataUrl, name, x, y, meta = {}) {
+  markCanvasGuideSeen()
+  const size = getCanvasImageSize(meta.aspectRatio, meta.width, meta.height)
+  const cx = typeof x === 'number' ? x : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - size.width / 2
+  const cy = typeof y === 'number' ? y : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - size.height / 2
+  const el = {
     id: crypto.randomUUID(),
     type: 'image',
     x: cx,
     y: cy,
-    width: 300,
-    height: 300,
+    width: size.width,
+    height: size.height,
     content: dataUrl,
     name: name || 'image',
-    assetId: '',
-  })
+    mime: meta.mime || splitDataUrl(dataUrl)?.mime || 'image/png',
+    assetId: meta.assetId || '',
+    aspectRatio: normalizeAspectRatio(meta.aspectRatio || ''),
+    resolution: normalizeCanvasResolution(meta.resolution || ''),
+  }
+  state.generate.elements.push(el)
+  state.generate.selectedIds = [el.id]
+  return el
 }
 
 function addTextToCanvas(x, y) {
+  markCanvasGuideSeen()
   const cx = typeof x === 'number' ? x : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - 100
   const cy = typeof y === 'number' ? y : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - 20
-  state.generate.elements.push({
+  const el = {
     id: crypto.randomUUID(),
     type: 'text',
     x: cx,
@@ -954,10 +1557,43 @@ function addTextToCanvas(x, y) {
     width: 200,
     height: 40,
     content: '双击编辑文字',
-  })
+    fontSize: 16,
+    fontFamily: '',
+  }
+  state.generate.elements.push(el)
+  state.generate.selectedIds = [el.id]
+  return el
+}
+
+function addShapeToCanvas(shape, x, y) {
+  markCanvasGuideSeen()
+  const normalizedShape = normalizeCanvasShape(shape)
+  const isArrow = normalizedShape === 'arrow-left' || normalizedShape === 'arrow-right'
+  const isMessage = normalizedShape === 'message'
+  const width = isArrow ? 180 : (isMessage ? 190 : 140)
+  const height = isArrow ? 90 : (isMessage ? 120 : 140)
+  const cx = typeof x === 'number' ? x - width / 2 : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - width / 2
+  const cy = typeof y === 'number' ? y - height / 2 : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - height / 2
+  const el = {
+    id: crypto.randomUUID(),
+    type: 'shape',
+    x: cx,
+    y: cy,
+    width,
+    height,
+    content: '',
+    shape: normalizedShape,
+    shapeType: normalizedShape,
+    strokeWidth: 2,
+    color: '',
+  }
+  state.generate.elements.push(el)
+  state.generate.selectedIds = [el.id]
+  return el
 }
 
 function addGeneratorToCanvas(x, y, refImageId) {
+  markCanvasGuideSeen()
   const cx = typeof x === 'number' ? x : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - 150
   const cy = typeof y === 'number' ? y : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - 150
   const el = {
@@ -982,9 +1618,10 @@ function connectFlow(sourceElementId) {
   if (!source) return
 
   const gen = addGeneratorToCanvas(source.x + source.width + 80, source.y, sourceElementId)
+  const groupId = crypto.randomUUID()
 
   // Create connector
-  state.generate.elements.push({
+  const connector = {
     id: crypto.randomUUID(),
     type: 'connector',
     x: 0,
@@ -994,7 +1631,15 @@ function connectFlow(sourceElementId) {
     content: '',
     connectorFrom: sourceElementId,
     connectorTo: gen.id,
-  })
+    connectorStyle: 'bezier',
+    groupId,
+    linkedElements: [sourceElementId, gen.id],
+  }
+  source.groupId = source.groupId || groupId
+  gen.groupId = groupId
+  source.linkedElements = unique([...(source.linkedElements || []), gen.id, connector.id])
+  gen.linkedElements = unique([...(gen.linkedElements || []), sourceElementId, connector.id])
+  state.generate.elements.push(connector)
 
   // Auto-add the source image as a reference in gen panel
   if (source.type === 'image' && source.content) {
@@ -1017,11 +1662,18 @@ function deleteElement(id) {
     if (el.type === 'connector' && (el.connectorFrom === id || el.connectorTo === id)) return false
     return true
   })
+  for (const el of state.generate.elements) {
+    if (Array.isArray(el.linkedElements)) {
+      el.linkedElements = el.linkedElements.filter((linkedId) => linkedId !== id)
+    }
+  }
 }
 
 function renderCanvas() {
   const elements = state.generate.elements.filter((el) => el.type !== 'connector')
+  const linkedIds = getLinkedCanvasElementIds()
   dom.gCanvasEmpty.classList.toggle('hidden', elements.length > 0)
+  renderCanvasGuide(elements.length)
 
   // Build a set of existing DOM el IDs
   const existingNodes = new Map()
@@ -1047,12 +1699,26 @@ function renderCanvas() {
     node.style.top = `${el.y}px`
     node.style.width = `${el.width}px`
     node.style.height = `${el.height}px`
-    node.classList.toggle('selected', state.generate.selectedIds.includes(el.id))
+    const selected = state.generate.selectedIds.includes(el.id)
+    node.classList.toggle('selected', selected)
+    node.classList.toggle('linked', !selected && linkedIds.has(el.id))
 
     // Update image src if changed
     if (el.type === 'image') {
       const img = node.querySelector('.canvas-el-image')
       if (img && img.src !== el.content) img.src = el.content
+      const size = node.querySelector('.canvas-el-size')
+      if (size) size.textContent = `${Math.round(el.width)} × ${Math.round(el.height)}`
+    } else if (el.type === 'text') {
+      const text = node.querySelector('.canvas-el-text')
+      if (text && text.textContent !== el.content) text.textContent = el.content || ''
+      applyTextElementStyle(text, el)
+    } else if (el.type === 'shape') {
+      const shape = node.querySelector('.canvas-shape-svg')
+      if (shape) renderShapeSvg(shape, el)
+    } else if (el.type === 'path') {
+      const path = node.querySelector('.canvas-path-svg')
+      if (path) renderPathSvg(path, el)
     }
   }
 
@@ -1072,21 +1738,40 @@ function renderCanvasElement(el) {
     img.alt = el.name || 'image'
     img.draggable = false
     node.append(img)
+    node.append(createCanvasElementActions(el))
   } else if (el.type === 'text') {
     const text = document.createElement('div')
     text.className = 'canvas-el-text'
     text.contentEditable = 'true'
     text.textContent = el.content || ''
+    applyTextElementStyle(text, el)
     text.addEventListener('blur', () => {
       el.content = text.textContent || ''
       saveRuntimeState()
     })
     node.append(text)
+  } else if (el.type === 'shape') {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.classList.add('canvas-shape-svg')
+    renderShapeSvg(svg, el)
+    node.append(svg)
+  } else if (el.type === 'path') {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.classList.add('canvas-path-svg')
+    renderPathSvg(svg, el)
+    node.append(svg)
   } else if (el.type === 'image-generator') {
     const placeholder = document.createElement('div')
     placeholder.className = 'canvas-el-generator'
-    placeholder.innerHTML = '<span class="gen-icon">&#x2726;</span><span class="gen-label">AI 生图</span><span class="gen-hint">选中后设置参数并生成</span>'
+    placeholder.innerHTML = '<span class="canvas-gen-icon">&#x2726;</span><span class="canvas-gen-label">AI 生图</span><span class="gen-hint">选中后设置参数并生成</span>'
     node.append(placeholder)
+  }
+
+  for (const handle of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+    const grip = document.createElement('span')
+    grip.className = `resize-handle ${handle}`
+    grip.dataset.handle = handle
+    node.append(grip)
   }
 
   // Right-click
@@ -1099,9 +1784,150 @@ function renderCanvasElement(el) {
   return node
 }
 
+function applyTextElementStyle(node, el) {
+  if (!node) return
+  node.style.fontSize = `${Number(el.fontSize) || 16}px`
+  node.style.fontFamily = el.fontFamily || ''
+}
+
+function renderShapeSvg(svg, el) {
+  const shape = normalizeCanvasShape(el.shape || el.shapeType)
+  svg.setAttribute('viewBox', '0 0 100 100')
+  svg.setAttribute('preserveAspectRatio', 'none')
+  svg.setAttribute('aria-hidden', 'true')
+  const strokeWidth = Number(el.strokeWidth) || 2
+  const attrs = `class="canvas-shape-mark" vector-effect="non-scaling-stroke" stroke-width="${strokeWidth}"`
+  if (shape === 'circle') {
+    svg.innerHTML = `<ellipse ${attrs} cx="50" cy="50" rx="43" ry="43"></ellipse>`
+  } else if (shape === 'triangle') {
+    svg.innerHTML = `<polygon ${attrs} points="50 7 94 92 6 92"></polygon>`
+  } else if (shape === 'message') {
+    svg.innerHTML = `<path ${attrs} d="M14 12H86Q94 12 94 20V64Q94 72 86 72H43L27 91V72H14Q6 72 6 64V20Q6 12 14 12Z"></path>`
+  } else if (shape === 'arrow-left') {
+    svg.innerHTML = `<polygon ${attrs} points="6 50 36 18 36 36 94 36 94 64 36 64 36 82"></polygon>`
+  } else if (shape === 'arrow-right') {
+    svg.innerHTML = `<polygon ${attrs} points="94 50 64 18 64 36 6 36 6 64 64 64 64 82"></polygon>`
+  } else {
+    svg.innerHTML = `<rect ${attrs} x="8" y="8" width="84" height="84" rx="8"></rect>`
+  }
+}
+
+function renderPathSvg(svg, el) {
+  const points = sanitizeCanvasPath(el.path)
+  const width = Math.max(1, Number(el.pathBoxWidth) || Number(el.width) || 1)
+  const height = Math.max(1, Number(el.pathBoxHeight) || Number(el.height) || 1)
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`)
+  svg.setAttribute('preserveAspectRatio', 'none')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.replaceChildren()
+  if (!points.length) return
+  const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline')
+  polyline.setAttribute('points', points.map((point) => `${point.x},${point.y}`).join(' '))
+  polyline.setAttribute('class', 'canvas-path-mark')
+  polyline.setAttribute('fill', 'none')
+  polyline.setAttribute('stroke-width', String(Number(el.strokeWidth) || 3))
+  polyline.setAttribute('stroke-linecap', 'round')
+  polyline.setAttribute('stroke-linejoin', 'round')
+  polyline.setAttribute('vector-effect', 'non-scaling-stroke')
+  svg.append(polyline)
+}
+
+function createCanvasElementActions(el) {
+  const actions = document.createElement('div')
+  actions.className = 'canvas-el-actions'
+
+  const size = document.createElement('span')
+  size.className = 'canvas-el-size'
+  size.textContent = `${Math.round(el.width)} × ${Math.round(el.height)}`
+  actions.append(size)
+
+  const flow = document.createElement('button')
+  flow.type = 'button'
+  flow.className = 'canvas-el-action'
+  flow.textContent = '用此图生成'
+  flow.addEventListener('mousedown', (event) => event.stopPropagation())
+  flow.addEventListener('click', (event) => {
+    event.stopPropagation()
+    connectFlow(el.id)
+  })
+  actions.append(flow)
+
+  const download = document.createElement('button')
+  download.type = 'button'
+  download.className = 'canvas-el-action'
+  download.textContent = '下载'
+  download.addEventListener('mousedown', (event) => event.stopPropagation())
+  download.addEventListener('click', (event) => {
+    event.stopPropagation()
+    if (el.content) downloadAsset(el.content, `${sanitizeFileName(el.name || 'canvas-image')}.png`)
+  })
+  actions.append(download)
+
+  const remove = document.createElement('button')
+  remove.type = 'button'
+  remove.className = 'canvas-el-action danger'
+  remove.textContent = '删除'
+  remove.addEventListener('mousedown', (event) => event.stopPropagation())
+  remove.addEventListener('click', (event) => {
+    event.stopPropagation()
+    deleteElement(el.id)
+    state.generate.selectedIds = state.generate.selectedIds.filter((id) => id !== el.id)
+    hideGenPanel()
+    renderCanvas()
+    saveRuntimeState()
+  })
+  actions.append(remove)
+
+  return actions
+}
+
+function getLinkedCanvasElementIds() {
+  const selectedIds = new Set(state.generate.selectedIds)
+  const linkedIds = new Set()
+  const groupIds = new Set()
+
+  for (const el of state.generate.elements) {
+    if (!selectedIds.has(el.id)) continue
+    if (el.groupId) groupIds.add(el.groupId)
+    for (const linkedId of el.linkedElements || []) linkedIds.add(linkedId)
+    if (el.type === 'connector') {
+      if (el.connectorFrom) linkedIds.add(el.connectorFrom)
+      if (el.connectorTo) linkedIds.add(el.connectorTo)
+    }
+  }
+
+  for (const el of state.generate.elements) {
+    if (el.groupId && groupIds.has(el.groupId)) linkedIds.add(el.id)
+    if (el.type === 'connector' && (selectedIds.has(el.connectorFrom) || selectedIds.has(el.connectorTo))) {
+      linkedIds.add(el.connectorFrom)
+      linkedIds.add(el.connectorTo)
+    }
+  }
+
+  for (const id of selectedIds) linkedIds.delete(id)
+  return linkedIds
+}
+
 function renderConnectors() {
   const svg = dom.gConnectors
   svg.innerHTML = ''
+  const linkedIds = getLinkedCanvasElementIds()
+  const selectedIds = new Set(state.generate.selectedIds)
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs')
+  const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker')
+  marker.setAttribute('id', 'canvas-arrowhead')
+  marker.setAttribute('markerWidth', '10')
+  marker.setAttribute('markerHeight', '10')
+  marker.setAttribute('refX', '8')
+  marker.setAttribute('refY', '3')
+  marker.setAttribute('orient', 'auto')
+  const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon')
+  arrow.setAttribute('points', '0 0, 8 3, 0 6')
+  arrow.setAttribute('fill', 'var(--accent)')
+  marker.append(arrow)
+  defs.append(marker)
+  svg.append(defs)
+
   const connectors = state.generate.elements.filter((el) => el.type === 'connector')
   for (const conn of connectors) {
     const from = state.generate.elements.find((item) => item.id === conn.connectorFrom)
@@ -1113,15 +1939,16 @@ function renderConnectors() {
     const x2 = to.x * state.generate.scale + state.generate.panX
     const y2 = (to.y + to.height / 2) * state.generate.scale + state.generate.panY
 
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
-    line.setAttribute('x1', x1)
-    line.setAttribute('y1', y1)
-    line.setAttribute('x2', x2)
-    line.setAttribute('y2', y2)
-    line.setAttribute('stroke', 'var(--accent)')
-    line.setAttribute('stroke-width', '2')
-    line.setAttribute('stroke-dasharray', '6 4')
-    svg.append(line)
+    const bend = Math.max(60, Math.abs(x2 - x1) * 0.4)
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`)
+    path.setAttribute('fill', 'none')
+    path.setAttribute('stroke', 'var(--accent)')
+    path.setAttribute('stroke-width', '2')
+    path.setAttribute('stroke-dasharray', '6 5')
+    path.setAttribute('marker-end', 'url(#canvas-arrowhead)')
+    path.setAttribute('class', `canvas-connector${selectedIds.has(from.id) || selectedIds.has(to.id) || linkedIds.has(from.id) || linkedIds.has(to.id) ? ' linked' : ''}`)
+    svg.append(path)
   }
 }
 
@@ -1139,10 +1966,17 @@ function bindToolbar() {
         dom.gFileInput.click()
       } else if (tool === 'text') {
         addTextToCanvas()
+        setCanvasTool('select')
         renderCanvas()
         saveRuntimeState()
       } else if (tool === 'ai-gen') {
         addGeneratorToCanvas()
+        setCanvasTool('select')
+        renderCanvas()
+        saveRuntimeState()
+      } else if (isShapeTool(tool)) {
+        addShapeToCanvas(getShapeFromTool(tool))
+        setCanvasTool('select')
         renderCanvas()
         saveRuntimeState()
       }
@@ -1151,11 +1985,17 @@ function bindToolbar() {
 
   dom.gFileInput.addEventListener('change', async () => {
     if (!dom.gFileInput.files?.length) return
-    const images = await readImageFiles(dom.gFileInput.files)
+    const images = await prepareAssetItems(dom.gFileInput.files, { kind: 'upload', source: 'canvas_upload' })
     for (let i = 0; i < images.length; i++) {
-      addImageToCanvas(images[i].dataUrl, images[i].name)
+      addImageToCanvas(images[i].dataUrl, images[i].name, undefined, undefined, {
+        assetId: images[i].assetId,
+        mime: images[i].mime,
+        width: images[i].width,
+        height: images[i].height,
+      })
     }
     dom.gFileInput.value = ''
+    setCanvasTool('select')
     renderCanvas()
     saveRuntimeState()
   })
@@ -1163,9 +2003,58 @@ function bindToolbar() {
 
 function setCanvasTool(tool) {
   state.generate.activeTool = tool
+  if (isShapeTool(tool)) state.generate.shapeTool = getShapeFromTool(tool)
   for (const btn of $$('.toolbar-btn', dom.gToolbar)) {
     btn.classList.toggle('active', btn.dataset.tool === tool)
   }
+  applyCanvasToolCursor()
+}
+
+function isShapeTool(tool) {
+  return String(tool || '').startsWith('shape:')
+}
+
+function getShapeFromTool(tool) {
+  return normalizeCanvasShape(String(tool || '').replace(/^shape:/, ''))
+}
+
+function bindCanvasGuide() {
+  dom.gGuideClose.addEventListener('click', dismissCanvasGuide)
+  dom.gGuideAddImage.addEventListener('click', () => {
+    dismissCanvasGuide()
+    dom.gFileInput.click()
+  })
+  dom.gGuideAddGen.addEventListener('click', () => {
+    dismissCanvasGuide()
+    addGeneratorToCanvas()
+    setCanvasTool('select')
+    renderCanvas()
+    saveRuntimeState()
+  })
+}
+
+function ensureCanvasFirstOpenAiPanel() {
+  if (state.activeView !== 'generate') return
+  if (localStorage.getItem(CANVAS_AI_FIRST_OPEN_STORAGE) === 'opened') return
+  state.generate.showAiPanel = true
+  localStorage.setItem(CANVAS_AI_FIRST_OPEN_STORAGE, 'opened')
+}
+
+function renderCanvasGuide(elementCount = state.generate.elements.filter((el) => el.type !== 'connector').length) {
+  if (!dom.gGuide) return
+  const dismissed = localStorage.getItem(CANVAS_GUIDE_STORAGE) === 'dismissed'
+  const shouldShow = state.activeView === 'generate' && elementCount === 0 && !dismissed
+  dom.gGuide.classList.toggle('hidden', !shouldShow)
+}
+
+function dismissCanvasGuide() {
+  localStorage.setItem(CANVAS_GUIDE_STORAGE, 'dismissed')
+  dom.gGuide.classList.add('hidden')
+}
+
+function markCanvasGuideSeen() {
+  localStorage.setItem(CANVAS_GUIDE_STORAGE, 'dismissed')
+  if (dom.gGuide) dom.gGuide.classList.add('hidden')
 }
 
 /* ═══════════════ ZOOM ═══════════════ */
@@ -1214,6 +2103,7 @@ function showGenPanel(elementId) {
   dom.gGenPrompt.value = state.generate.genPrompt
   dom.gModel.value = state.generate.genModel
   dom.gGenRatio.value = state.generate.genRatio
+  dom.gGenResolution.value = state.generate.genResolution
   dom.gAgent.checked = state.generate.genUseAgent
   dom.gGenRun.disabled = false
 
@@ -1223,15 +2113,32 @@ function showGenPanel(elementId) {
 
   // Position panel near the element
   const rect = dom.gCanvasContainer.getBoundingClientRect()
+  const viewRect = $('#view-generate').getBoundingClientRect()
+  const panelWidth = 380
+  const panelGap = 16
+  const reservedRight = state.generate.showAiPanel && !dom.gAiSidebar.classList.contains('hidden')
+    ? dom.gAiSidebar.offsetWidth + 32
+    : 8
   const elScreenX = el.x * state.generate.scale + state.generate.panX + rect.left + el.width * state.generate.scale + 16
   const elScreenY = el.y * state.generate.scale + state.generate.panY + rect.top
-  dom.gGenPanel.style.left = `${clamp(elScreenX, rect.left, rect.right - 320)}px`
-  dom.gGenPanel.style.top = `${clamp(elScreenY, rect.top, rect.bottom - 400)}px`
+  const elLeftScreenX = el.x * state.generate.scale + state.generate.panX + rect.left
+  const maxPanelLeft = Math.max(8, viewRect.width - panelWidth - reservedRight)
+  let panelLeft = elScreenX - viewRect.left
+  if (panelLeft > maxPanelLeft) {
+    panelLeft = elLeftScreenX - viewRect.left - panelWidth - panelGap
+  }
+  dom.gGenPanel.style.left = `${clamp(panelLeft, 8, maxPanelLeft)}px`
+  dom.gGenPanel.style.top = `${clamp(elScreenY - viewRect.top, 8, viewRect.height - 400)}px`
 }
 
 function hideGenPanel() {
   dom.gGenPanel.classList.add('hidden')
   state.generate.genTargetId = ''
+}
+
+function refreshGenPanelPosition() {
+  if (dom.gGenPanel.classList.contains('hidden') || !state.generate.genTargetId) return
+  showGenPanel(state.generate.genTargetId)
 }
 
 function bindGenPanel() {
@@ -1248,7 +2155,15 @@ function bindGenPanel() {
   })
 
   dom.gGenRatio.addEventListener('change', () => {
-    state.generate.genRatio = dom.gGenRatio.value
+    state.generate.genRatio = normalizeAspectRatio(dom.gGenRatio.value)
+    dom.gAiRatio.value = state.generate.genRatio
+    savePrefs()
+  })
+
+  dom.gGenResolution.addEventListener('change', () => {
+    state.generate.genResolution = normalizeCanvasResolution(dom.gGenResolution.value)
+    dom.gAiResolution.value = state.generate.genResolution
+    savePrefs()
   })
 
   dom.gAgent.addEventListener('change', () => {
@@ -1341,16 +2256,29 @@ async function executeCanvasGenerate() {
       prompt,
       referenceImages: refImages,
       aspectRatio: state.generate.genRatio,
+      resolution: state.generate.genResolution,
       useDesignAgent: state.generate.genUseAgent,
       clientKeys: { ...state.keys },
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, `generated-${el.id}.png`, {
+      kind: 'result',
+      source: 'canvas_generation',
+    })
+    const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
 
     // Replace generator with image element
     el.type = 'image'
     el.content = data.resultDataUrl
     el.name = `generated-${el.id}`
+    el.mime = storedResult.mime
+    el.assetId = storedResult.assetId
+    el.aspectRatio = state.generate.genRatio
+    el.resolution = state.generate.genResolution
+    const size = getCanvasImageSize(state.generate.genRatio, imageSize?.width, imageSize?.height)
+    el.width = size.width
+    el.height = size.height
 
     state.generate.genRefs = []
     hideGenPanel()
@@ -1378,6 +2306,13 @@ function bindAiSidebar() {
     dom.gAiSidebar.classList.add('hidden')
   })
 
+  dom.gAiMessages.addEventListener('click', (event) => {
+    const suggestion = event.target.closest('[data-ai-prompt]')
+    if (!suggestion) return
+    dom.gInput.value = suggestion.dataset.aiPrompt || ''
+    dom.gInput.focus()
+  })
+
   dom.gSend.addEventListener('click', sendCanvasAiMessage)
   dom.gInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1396,7 +2331,15 @@ function bindAiSidebar() {
 
   // 比例选择
   dom.gAiRatio.addEventListener('change', () => {
-    state.generate.genRatio = dom.gAiRatio.value
+    state.generate.genRatio = normalizeAspectRatio(dom.gAiRatio.value)
+    dom.gGenRatio.value = state.generate.genRatio
+    savePrefs()
+  })
+
+  dom.gAiResolution.addEventListener('change', () => {
+    state.generate.genResolution = normalizeCanvasResolution(dom.gAiResolution.value)
+    dom.gGenResolution.value = state.generate.genResolution
+    savePrefs()
   })
 
   // 上传参考图
@@ -1442,6 +2385,12 @@ function renderAiRefList() {
 }
 
 function renderAiMessages() {
+  if (state.generate.aiMessages.length === 0) {
+    dom.gAiMessages.replaceChildren(createAiWelcomeNode())
+    dom.gAiMessages.scrollTop = 0
+    return
+  }
+
   dom.gAiMessages.replaceChildren(...state.generate.aiMessages.map((msg) => {
     const node = document.createElement('div')
     node.className = `msg ${msg.role}`
@@ -1468,6 +2417,16 @@ function renderAiMessages() {
     bubble.className = 'msg-bubble'
     bubble.textContent = msg.content
     node.append(bubble)
+    if (Array.isArray(msg.steps) && msg.steps.length) {
+      const steps = document.createElement('ul')
+      steps.className = 'msg-steps'
+      for (const step of msg.steps.slice(0, 4)) {
+        const item = document.createElement('li')
+        item.textContent = step
+        steps.append(item)
+      }
+      node.append(steps)
+    }
     if (msg.imageDataUrl) {
       const imgWrap = document.createElement('div')
       imgWrap.className = 'msg-images'
@@ -1487,21 +2446,93 @@ function renderAiMessages() {
   dom.gAiMessages.scrollTop = dom.gAiMessages.scrollHeight
 }
 
+function createAiWelcomeNode() {
+  const wrap = document.createElement('div')
+  wrap.className = 'ai-welcome'
+
+  const mark = document.createElement('div')
+  mark.className = 'ai-welcome-mark'
+  mark.textContent = 'AI'
+  wrap.append(mark)
+
+  const title = document.createElement('h4')
+  title.textContent = 'Hi，我是你的 AI 设计师'
+  wrap.append(title)
+
+  const copy = document.createElement('p')
+  copy.textContent = '我会读取当前画布上下文，先整理设计意图，再按需生成图片并放回画布。'
+  wrap.append(copy)
+
+  const suggestions = document.createElement('div')
+  suggestions.className = 'ai-suggestions'
+  const items = [
+    ['生成一张品牌主图', '基于当前参考图生成一张电商主图，留出标题区，背景干净但有质感。'],
+    ['整理画布方案', '帮我分析当前画布，给出下一步生成流和视觉改进建议，先不要出图。'],
+    ['延展同款风格', '沿用当前画布里的风格和主体，生成一张不同构图的社媒海报。'],
+  ]
+  for (const [label, prompt] of items) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'ai-suggestion'
+    button.dataset.aiPrompt = prompt
+    const strong = document.createElement('strong')
+    strong.textContent = label
+    const span = document.createElement('span')
+    span.textContent = prompt
+    button.append(strong, span)
+    suggestions.append(button)
+  }
+  wrap.append(suggestions)
+
+  return wrap
+}
+
+function getCanvasAgentContext() {
+  const visible = state.generate.elements.filter((el) => el.type !== 'connector')
+  const counts = visible.reduce((acc, el) => {
+    acc[el.type] = (acc[el.type] || 0) + 1
+    return acc
+  }, {})
+  return {
+    projectTitle: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+    elementCount: visible.length,
+    selectedIds: [...state.generate.selectedIds],
+    counts,
+    elements: visible.slice(0, 24).map((el) => ({
+      id: el.id,
+      type: el.type,
+      name: el.name || '',
+      selected: state.generate.selectedIds.includes(el.id),
+      aspectRatio: el.aspectRatio || '',
+      resolution: el.resolution || '',
+      width: Math.round(Number(el.width) || 0),
+      height: Math.round(Number(el.height) || 0),
+      prompt: el.generatingPrompt || '',
+    })),
+  }
+}
+
 async function sendCanvasAiMessage() {
   if (state.generate.aiRunning) return
   const text = dom.gInput.value.trim()
   if (!text && state.generate.aiRefs.length === 0) return
+  const requestText = text || '基于参考图生成一版。'
+  const history = state.generate.aiMessages
+    .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
+    .map((msg) => ({ role: msg.role, content: msg.content || '' }))
+    .slice(-8)
 
   const userMsg = {
     id: crypto.randomUUID(),
     role: 'user',
-    content: text || '基于参考图生成一版。',
+    content: requestText,
     refs: state.generate.aiRefs.map((r) => ({ dataUrl: r.dataUrl, name: r.name })),
   }
+  const assistantMsg = { id: crypto.randomUUID(), role: 'assistant', content: '正在理解画布和需求…', steps: [] }
   state.generate.aiMessages.push(userMsg)
   dom.gInput.value = ''
   state.generate.aiRunning = true
-  state.generate.aiMessages.push({ id: crypto.randomUUID(), role: 'assistant', content: '正在生成…' })
+  state.generate.aiMessages.push(assistantMsg)
   renderAiMessages()
 
   try {
@@ -1525,30 +2556,66 @@ async function sendCanvasAiMessage() {
       }
     }
 
+    const agentData = await postJson('/api/canvas/agent', {
+      sessionId: state.runtime.sessionId || undefined,
+      message: requestText,
+      history,
+      canvasContext: getCanvasAgentContext(),
+      modelId: dom.gAiModel.value || state.generate.genModel,
+      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio),
+      resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution),
+      hasReferenceImages: refImages.length > 0,
+      clientKeys: { ...state.keys },
+    })
+    state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
+    assistantMsg.content = agentData.reply || '我已经整理好设计方向。'
+    assistantMsg.steps = Array.isArray(agentData.steps) ? agentData.steps : []
+    renderAiMessages()
+
+    if (!agentData.shouldGenerate) {
+      saveRuntimeState()
+      return
+    }
+
+    assistantMsg.content = `${assistantMsg.content}\n\n正在按这个方向生成图片…`
+    renderAiMessages()
+
     const data = await postJson('/api/generate-direct', {
       sessionId: state.runtime.sessionId || undefined,
       modelId: dom.gAiModel.value || state.generate.genModel,
-      prompt: text || '基于参考图生成一版。',
+      prompt: agentData.prompt || requestText,
       referenceImages: refImages,
-      aspectRatio: dom.gAiRatio.value || state.generate.genRatio,
-      useDesignAgent: state.generate.genUseAgent,
+      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio),
+      resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution),
+      useDesignAgent: false,
       clientKeys: { ...state.keys },
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, `ai-${Date.now()}.png`, {
+      kind: 'result',
+      source: 'canvas_ai_sidebar',
+    })
+    const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
 
-    const lastMsg = state.generate.aiMessages[state.generate.aiMessages.length - 1]
-    lastMsg.content = '已生成图片，已添加到画布。'
-    lastMsg.imageDataUrl = data.resultDataUrl
+    assistantMsg.content = `${agentData.reply || '已生成图片'}\n\n图片已添加到画布。`
+    assistantMsg.imageDataUrl = data.resultDataUrl
+    assistantMsg.aspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
 
-    addImageToCanvas(data.resultDataUrl, `ai-${Date.now()}`)
+    addImageToCanvas(data.resultDataUrl, `ai-${Date.now()}`, undefined, undefined, {
+      assetId: storedResult.assetId,
+      mime: storedResult.mime,
+      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio),
+      resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution),
+      width: imageSize?.width,
+      height: imageSize?.height,
+    })
     state.generate.aiRefs = []
     renderAiRefList()
     renderCanvas()
     saveRuntimeState()
   } catch (error) {
-    const lastMsg = state.generate.aiMessages[state.generate.aiMessages.length - 1]
-    lastMsg.content = `生成失败：${trimError(error)}`
+    assistantMsg.content = `处理失败：${trimError(error)}`
   } finally {
     state.generate.aiRunning = false
     renderAiMessages()
@@ -1558,10 +2625,24 @@ async function sendCanvasAiMessage() {
 /* ═══════════════ RENDER GENERATE ═══════════════ */
 
 function renderGenerate() {
+  if (state.activeView === 'generate' && runtimeStateReady && !state.generate.projectId && !restoringRuntimeState) {
+    void ensureCanvasProjectRecord().catch(() => {
+      state.generate.projectSaveStatus = 'local'
+      renderCanvasProjectMeta()
+    })
+  }
   dom.gModel.value = state.generate.genModel
   dom.gAiModel.value = state.generate.genModel
+  dom.gGenRatio.value = state.generate.genRatio
+  dom.gAiRatio.value = state.generate.genRatio
+  dom.gGenResolution.value = state.generate.genResolution
+  dom.gAiResolution.value = state.generate.genResolution
   dom.gAgent.checked = state.generate.genUseAgent
   dom.gAiSidebar.classList.toggle('hidden', !state.generate.showAiPanel)
+  renderCanvasProjectMeta()
+  renderAiMessages()
+  renderAiRefList()
+  applyCanvasToolCursor()
   renderCanvas()
   updateZoomDisplay()
 }
@@ -1984,8 +3065,10 @@ async function generateStyleTransfer() {
 
 function renderAll() {
   renderShell()
+  renderHome()
   renderTranslateDropdowns()
   renderTranslate()
+  renderProjects()
   renderGenerate()
   renderOutfit()
   renderStyle()
@@ -2154,6 +3237,112 @@ function renderTranslate() {
   }
 
   dom.tGrid.replaceChildren(thead, tbody)
+}
+
+function renderHome() {
+  if (!dom.hRecentList) return
+  if (dom.hPrompt && document.activeElement !== dom.hPrompt) {
+    dom.hPrompt.value = state.home.prompt || ''
+  }
+
+  const { items, loading, error } = state.projects
+  if (dom.hRecentStatus) {
+    dom.hRecentStatus.textContent = loading
+      ? '正在读取最近项目…'
+      : error
+        ? error
+        : items.length
+          ? `${items.length} 个已保存项目`
+          : '还没有保存项目'
+  }
+
+  const cards = [createHomeNewProjectCard()]
+  if (loading && !items.length) {
+    cards.push(createProjectSkeleton(), createProjectSkeleton(), createProjectSkeleton())
+  } else {
+    cards.push(...items.slice(0, 3).map(createProjectCard))
+  }
+  dom.hRecentList.replaceChildren(...cards)
+}
+
+function createHomeNewProjectCard() {
+  const card = document.createElement('button')
+  card.type = 'button'
+  card.className = 'home-new-card'
+  card.dataset.homeNew = '1'
+
+  const mark = document.createElement('span')
+  mark.className = 'home-new-mark'
+  mark.textContent = '＋'
+
+  const text = document.createElement('strong')
+  text.textContent = '新建画布'
+
+  card.append(mark, text)
+  return card
+}
+
+function renderProjects() {
+  if (!dom.pList) return
+  const { items, loading, error } = state.projects
+  dom.pCount.textContent = `${items.length} 个项目`
+  dom.pStatus.textContent = loading ? '加载中…' : (error || '')
+  dom.pRefresh.disabled = loading
+  dom.pNew.disabled = loading && !items.length
+
+  if (loading && !items.length) {
+    dom.pList.replaceChildren(createProjectSkeleton(), createProjectSkeleton(), createProjectSkeleton())
+    dom.pEmpty.classList.add('hidden')
+    return
+  }
+
+  dom.pList.replaceChildren(...items.map(createProjectCard))
+  dom.pEmpty.classList.toggle('hidden', items.length > 0 || loading)
+}
+
+function createProjectSkeleton() {
+  const card = document.createElement('div')
+  card.className = 'project-card'
+  card.innerHTML = `
+    <div class="project-thumb"><span class="project-thumb-placeholder">·</span></div>
+    <div class="project-meta"><strong>加载中…</strong><span>正在读取项目</span></div>
+  `
+  return card
+}
+
+function createProjectCard(project) {
+  const card = document.createElement('button')
+  card.type = 'button'
+  card.className = 'project-card'
+  card.dataset.projectId = project.id
+  card.title = `打开 ${project.title || DEFAULT_CANVAS_PROJECT_TITLE}`
+
+  const thumb = document.createElement('div')
+  thumb.className = 'project-thumb'
+  if (project.previewUrl) {
+    const img = document.createElement('img')
+    img.src = project.previewUrl
+    img.alt = project.title || DEFAULT_CANVAS_PROJECT_TITLE
+    thumb.append(img)
+  } else {
+    const placeholder = document.createElement('span')
+    placeholder.className = 'project-thumb-placeholder'
+    placeholder.textContent = '◇'
+    thumb.append(placeholder)
+  }
+  card.append(thumb)
+
+  const meta = document.createElement('div')
+  meta.className = 'project-meta'
+  const title = document.createElement('strong')
+  title.textContent = project.title || DEFAULT_CANVAS_PROJECT_TITLE
+  const detail = document.createElement('span')
+  const count = Number(project.elementCount || 0)
+  detail.textContent = `${formatRelativeTime(project.updatedAt)} · ${count} 个元素`
+  meta.append(title, detail)
+  card.append(meta)
+
+  return card
 }
 
 function renderOutfit() {
@@ -2933,10 +4122,29 @@ function toggleTargetLanguage(code) {
   renderTranslate()
 }
 
-function setActiveView(view) {
+function setActiveView(view, { updateRoute = true } = {}) {
   state.activeView = normalizeView(view)
+  if (state.activeView === 'generate') {
+    ensureCanvasFirstOpenAiPanel()
+  }
+  if (updateRoute) {
+    const targetPath = routeForView(state.activeView)
+    const currentPath = `${window.location.pathname}${window.location.search}`
+    if (targetPath && currentPath !== targetPath) {
+      window.history.pushState({}, '', targetPath)
+    }
+  }
   savePrefs()
   renderShell()
+  if (state.activeView === 'generate') {
+    renderGenerate()
+  } else if (state.activeView === 'home') {
+    renderHome()
+    void loadCanvasProjects()
+  } else if (state.activeView === 'projects') {
+    renderProjects()
+    void loadCanvasProjects()
+  }
   const scrollToTop = () => {
     $('.main')?.scrollTo({ top: 0, behavior: 'auto' })
     window.scrollTo({ top: 0, behavior: 'auto' })
@@ -2945,6 +4153,13 @@ function setActiveView(view) {
   }
   scrollToTop()
   requestAnimationFrame(scrollToTop)
+}
+
+function routeForView(view) {
+  if (view === 'generate' && state.generate.projectId) {
+    return `/lovart/canvas?id=${encodeURIComponent(state.generate.projectId)}`
+  }
+  return VIEW_ROUTES[view]
 }
 
 function toggleDropdown(name) {
@@ -3009,12 +4224,15 @@ async function readImageFiles(fileList) {
   const images = []
   for (const file of files) {
     const data = await readAsDataUrl(file)
+    const size = await getImageDimensions(data.dataUrl).catch(() => null)
     images.push({
       id: crypto.randomUUID(),
       name: file.name,
       mime: file.type || 'image/jpeg',
       base64: data.base64,
       dataUrl: data.dataUrl,
+      width: size?.width || 0,
+      height: size?.height || 0,
     })
   }
   return images
@@ -3042,6 +4260,8 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       mime: image.mime,
       base64: image.base64,
       dataUrl: image.dataUrl,
+      width: image.width,
+      height: image.height,
       label: basename(image.name),
       role: '',
     })
@@ -3049,6 +4269,23 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
 
   saveRuntimeState()
   return uploaded
+}
+
+async function uploadCanvasImageAsset(dataUrl, name, { kind = 'upload', source = 'canvas_upload' } = {}) {
+  const mime = splitDataUrl(dataUrl)?.mime || 'image/png'
+  const data = await postJson('/api/assets/upload', {
+    sessionId: state.runtime.sessionId || undefined,
+    kind,
+    source,
+    filename: name || 'canvas-image.png',
+    mime,
+    dataUrl,
+  })
+  state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+  return {
+    assetId: data.asset.id,
+    mime: data.asset.mime || mime,
+  }
 }
 
 async function hydrateAssetItems(items) {
@@ -3073,11 +4310,294 @@ async function hydrateAssetItems(items) {
   return hydrated.filter(Boolean)
 }
 
+function renderCanvasProjectMeta() {
+  if (dom.gProjectTitle && document.activeElement !== dom.gProjectTitle) {
+    dom.gProjectTitle.value = state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
+  }
+  if (!dom.gProjectStatus) return
+  const status = state.generate.projectSaveStatus
+  dom.gProjectStatus.textContent = status === 'saving'
+    ? '保存中'
+    : status === 'saved'
+      ? '已保存'
+      : status === 'local'
+        ? '本地缓存'
+        : ''
+}
+
+async function startCanvasFromHomePrompt() {
+  const prompt = (dom.hPrompt?.value || state.home.prompt || '').trim()
+  await startNewCanvasProject({ initialPrompt: prompt })
+}
+
+async function startNewCanvasProject({ initialPrompt = '' } = {}) {
+  if (state.generate.genRunning || state.generate.aiRunning) return
+  state.generate.projectId = ''
+  state.generate.projectTitle = initialPrompt ? initialPrompt.slice(0, 36) : DEFAULT_CANVAS_PROJECT_TITLE
+  state.generate.projectSaveStatus = ''
+  state.generate.elements = []
+  state.generate.selectedIds = []
+  state.generate.scale = 1
+  state.generate.panX = 0
+  state.generate.panY = 0
+  state.generate.genTargetId = ''
+  state.generate.showAiPanel = true
+  hideGenPanel()
+  hideContextMenu()
+  ensureCanvasFirstOpenAiPanel()
+  window.history.pushState({}, '', '/lovart/canvas')
+  state.activeView = 'generate'
+  saveRuntimeState({ persistCanvas: false })
+  renderShell()
+  renderGenerate()
+  if (initialPrompt && dom.gInput) {
+    dom.gInput.value = initialPrompt
+    dom.gInput.focus()
+  }
+  try {
+    await ensureCanvasProjectRecord()
+    await persistCanvasProject()
+    state.projects.loadedSessionId = ''
+  } catch {
+    state.generate.projectSaveStatus = 'local'
+    renderCanvasProjectMeta()
+  }
+}
+
+async function openCanvasProject(projectId) {
+  if (!projectId) return
+  state.projects.error = '正在打开项目…'
+  renderProjects()
+  try {
+    const snapshot = await loadCanvasProjectSnapshot(projectId)
+    state.generate.projectId = projectId
+    state.generate.projectTitle = snapshot.project?.title || DEFAULT_CANVAS_PROJECT_TITLE
+    state.generate.elements = await hydrateCanvasElements(snapshot.elements || [])
+    state.generate.selectedIds = []
+    state.generate.scale = 1
+    state.generate.panX = 0
+    state.generate.panY = 0
+    state.generate.projectSaveStatus = 'saved'
+    hideGenPanel()
+    hideContextMenu()
+    ensureCanvasFirstOpenAiPanel()
+    window.history.pushState({}, '', `/lovart/canvas?id=${encodeURIComponent(projectId)}`)
+    state.activeView = 'generate'
+    saveRuntimeState({ persistCanvas: false })
+    renderShell()
+    renderGenerate()
+    state.projects.error = ''
+  } catch (error) {
+    state.projects.error = trimError(error)
+    renderProjects()
+  }
+}
+
+async function loadCanvasProjects({ force = false } = {}) {
+  if (!dom.pList) return
+  const sessionId = state.runtime.sessionId || ''
+  if (!sessionId) {
+    state.projects.items = []
+    state.projects.loading = false
+    state.projects.loadedSessionId = ''
+    state.projects.error = ''
+    renderProjects()
+    renderHome()
+    return
+  }
+  if (!force && state.projects.loadedSessionId === sessionId && state.projects.items.length) {
+    renderProjects()
+    renderHome()
+    return
+  }
+
+  state.projects.loading = true
+  state.projects.error = ''
+  renderProjects()
+  renderHome()
+
+  try {
+    const data = await getJson(`/api/canvas/projects?sessionId=${encodeURIComponent(sessionId)}`)
+    const projects = Array.isArray(data.projects) ? data.projects : []
+    const enriched = await Promise.all(projects.map(enrichCanvasProjectCard))
+    state.projects.items = enriched.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
+    state.projects.loadedSessionId = sessionId
+  } catch (error) {
+    state.projects.error = trimError(error)
+  } finally {
+    state.projects.loading = false
+    renderProjects()
+    renderHome()
+  }
+}
+
+async function enrichCanvasProjectCard(project) {
+  try {
+    const data = await getJson(`/api/canvas/projects/${encodeURIComponent(project.id)}/elements`)
+    const elements = Array.isArray(data.elements) ? data.elements : []
+    const visibleElements = elements.filter((el) => el?.type !== 'connector')
+    const firstImage = visibleElements.find((el) => el?.type === 'image' && (el.content || el.assetId))
+    return {
+      ...project,
+      elementCount: visibleElements.length,
+      previewUrl: firstImage?.content || (firstImage?.assetId ? assetResultUrl(firstImage.assetId) : ''),
+    }
+  } catch {
+    return {
+      ...project,
+      elementCount: 0,
+      previewUrl: '',
+    }
+  }
+}
+
+function scheduleCanvasProjectSave() {
+  if (restoringRuntimeState) return
+  if (state.activeView !== 'generate' && !state.generate.projectId) return
+  window.clearTimeout(canvasSaveTimer)
+  canvasSaveTimer = window.setTimeout(() => {
+    void persistCanvasProject()
+  }, 450)
+}
+
+async function ensureCanvasProjectRecord() {
+  if (state.generate.projectId) return state.generate.projectId
+  if (canvasProjectCreateInFlight) return canvasProjectCreateInFlight
+
+  canvasProjectCreateInFlight = (async () => {
+    const data = await postJson('/api/canvas/projects', {
+      sessionId: state.runtime.sessionId || undefined,
+      title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+    })
+    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.generate.projectId = data.project?.id || ''
+    state.generate.projectTitle = data.project?.title || state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
+    if (state.activeView === 'generate' && state.generate.projectId && window.location.pathname === '/lovart/canvas' && !canvasProjectIdFromLocation()) {
+      window.history.replaceState({}, '', `/lovart/canvas?id=${encodeURIComponent(state.generate.projectId)}`)
+    }
+    saveRuntimeState({ persistCanvas: false })
+    renderCanvasProjectMeta()
+    return state.generate.projectId
+  })()
+
+  try {
+    return await canvasProjectCreateInFlight
+  } finally {
+    canvasProjectCreateInFlight = null
+  }
+}
+
+async function persistCanvasProject() {
+  if (restoringRuntimeState) return
+  if (canvasSaveInFlight) {
+    canvasSavePending = true
+    return canvasSaveInFlight
+  }
+
+  canvasSaveInFlight = (async () => {
+    state.generate.projectSaveStatus = 'saving'
+    renderCanvasProjectMeta()
+    try {
+      await ensureCanvasProjectRecord()
+      if (!state.generate.projectId) throw new Error('Canvas project id missing')
+      const projectUrl = `/api/canvas/projects/${encodeURIComponent(state.generate.projectId)}`
+      const projectBody = {
+        sessionId: state.runtime.sessionId || undefined,
+        title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+      }
+
+      try {
+        await putJson(projectUrl, projectBody)
+      } catch (error) {
+        if (error?.status !== 404) throw error
+        state.generate.projectId = ''
+        await ensureCanvasProjectRecord()
+      }
+
+      await putJson(`/api/canvas/projects/${encodeURIComponent(state.generate.projectId)}/elements`, {
+        sessionId: state.runtime.sessionId || undefined,
+        elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
+      })
+      state.generate.projectSaveStatus = 'saved'
+      state.projects.loadedSessionId = ''
+    } catch {
+      state.generate.projectSaveStatus = 'local'
+    } finally {
+      renderCanvasProjectMeta()
+      saveRuntimeState({ persistCanvas: false })
+      canvasSaveInFlight = null
+      if (canvasSavePending) {
+        canvasSavePending = false
+        scheduleCanvasProjectSave()
+      }
+    }
+  })()
+
+  return canvasSaveInFlight
+}
+
+async function loadCanvasProjectSnapshot(projectId) {
+  if (!projectId) return null
+  const projectUrl = `/api/canvas/projects/${encodeURIComponent(projectId)}`
+  const [projectData, elementsData] = await Promise.all([
+    getJson(projectUrl),
+    getJson(`${projectUrl}/elements`),
+  ])
+  return {
+    project: projectData.project,
+    elements: Array.isArray(elementsData.elements)
+      ? elementsData.elements.map((el) => sanitizeCanvasElement(el)).filter(Boolean)
+      : [],
+  }
+}
+
+async function hydrateCanvasElements(elements) {
+  const imageElements = elements.filter((el) => el.type === 'image' && el.assetId)
+  if (!imageElements.length) return elements
+
+  const hydratedImages = await hydrateAssetItems(imageElements.map((el) => ({
+    id: el.assetId,
+    assetId: el.assetId,
+    name: el.name,
+    mime: el.mime || 'image/png',
+  })))
+  const byAssetId = new Map(hydratedImages.map((item) => [item.assetId || item.id, item]))
+
+  return elements.map((el) => {
+    if (el.type !== 'image' || !el.assetId) return el
+    const hydrated = byAssetId.get(el.assetId)
+    if (!hydrated?.dataUrl) return el
+    return {
+      ...el,
+      content: hydrated.dataUrl,
+      name: el.name || hydrated.name,
+      mime: hydrated.mime || el.mime,
+    }
+  })
+}
+
 async function restoreRuntimeState() {
+  restoringRuntimeState = true
   const runtime = sanitizeRuntimeState(loadRuntimeState())
+  const routeProjectId = state.activeView === 'generate' ? canvasProjectIdFromLocation() : ''
   state.runtime.sessionId = runtime.sessionId
   state.translate.jobId = runtime.translate.jobId
-  state.generate.elements = runtime.generate.elements || []
+  state.generate.projectId = routeProjectId || runtime.generate.projectId || ''
+  state.generate.projectTitle = runtime.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
+  let canvasElements = runtime.generate.elements || []
+  if (state.generate.projectId) {
+    try {
+      const snapshot = await loadCanvasProjectSnapshot(state.generate.projectId)
+      if (snapshot) {
+        state.generate.projectTitle = snapshot.project?.title || state.generate.projectTitle
+        canvasElements = snapshot.elements
+        state.generate.projectSaveStatus = 'saved'
+      }
+    } catch {
+      state.generate.projectSaveStatus = 'local'
+    }
+  }
+  state.generate.elements = await hydrateCanvasElements(canvasElements)
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0
@@ -3110,8 +4630,13 @@ async function restoreRuntimeState() {
   state.style.tags = runtime.style?.tags || []
   state.style.history = runtime.style?.history || []
 
-  saveRuntimeState()
+  restoringRuntimeState = false
+  runtimeStateReady = true
+  saveRuntimeState({ persistCanvas: false })
   renderAll()
+  if (state.activeView === 'home' || state.activeView === 'projects') {
+    void loadCanvasProjects()
+  }
 
   if (state.translate.jobId) {
     void syncTranslateJob(state.translate.jobId, { passive404: true })
@@ -3381,6 +4906,18 @@ function readAsDataUrl(file) {
   })
 }
 
+function getImageDimensions(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve({
+      width: image.naturalWidth || image.width || 0,
+      height: image.naturalHeight || image.height || 0,
+    })
+    image.onerror = () => reject(new Error('Failed to read image dimensions'))
+    image.src = src
+  })
+}
+
 async function runPool(items, limit, worker) {
   let index = 0
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -3408,6 +4945,22 @@ async function getJson(url) {
 async function postJson(url, body) {
   const response = await fetch(url, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`)
+    error.status = response.status
+    error.payload = data
+    throw error
+  }
+  return data
+}
+
+async function putJson(url, body) {
+  const response = await fetch(url, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
@@ -3629,11 +5182,46 @@ function createDropdownItem({ primary, secondary, selected, multiple }) {
   return button
 }
 
+function hydrateSettingsForm() {
+  hydrateKeyForm()
+  hydrateThemeForm()
+}
+
 function hydrateKeyForm() {
   $('#k-vision').value = state.keys.visionApiKey || ''
   $('#k-banana2').value = state.keys.banana2ApiKey || ''
   $('#k-bananapro').value = state.keys.bananaProApiKey || ''
   $('#k-gptimage').value = state.keys.gptImageApiKey || ''
+}
+
+function hydrateThemeForm() {
+  for (const input of $$('input[name="settings-theme"]')) {
+    input.checked = input.value === state.theme
+  }
+}
+
+function getSelectedSettingsTheme() {
+  const selected = $('input[name="settings-theme"]:checked')
+  return normalizeTheme(selected?.value)
+}
+
+function normalizeTheme(value) {
+  return value === 'light' ? 'light' : 'dark'
+}
+
+function normalizeAspectRatio(value, fallback = '1:1') {
+  const ratio = String(value || '').trim()
+  return ['1:1', '4:3', '3:4', '16:9', '9:16'].includes(ratio) ? ratio : fallback
+}
+
+function normalizeCanvasResolution(value, fallback = '1k') {
+  const resolution = String(value || '').trim().toLowerCase()
+  return CANVAS_RESOLUTIONS.has(resolution) ? resolution : fallback
+}
+
+function applyTheme() {
+  state.theme = normalizeTheme(state.theme)
+  document.documentElement.dataset.theme = state.theme
 }
 
 function loadKeys() {
@@ -3671,7 +5259,7 @@ function splitDataUrl(dataUrl) {
 }
 
 function normalizeView(view) {
-  return ['translate', 'generate', 'outfit', 'style'].includes(view) ? view : 'translate'
+  return ['home', 'translate', 'generate', 'projects', 'outfit', 'style'].includes(view) ? view : 'home'
 }
 
 function basename(name = '') {
@@ -3683,6 +5271,21 @@ function formatTimestamp(ts) {
   const d = new Date(ts)
   const pad = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function formatRelativeTime(ts) {
+  if (!ts) return '刚刚编辑'
+  const time = new Date(ts).getTime()
+  if (!Number.isFinite(time)) return '刚刚编辑'
+  const diff = Date.now() - time
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (diff < minute) return '刚刚编辑'
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前编辑`
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前编辑`
+  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前编辑`
+  return new Date(ts).toLocaleDateString('zh-CN')
 }
 
 function sanitizeFileName(name = '') {
@@ -3699,8 +5302,35 @@ function ensureImageExtension(name = '', href = '') {
   return `${normalized}.png`
 }
 
+function getCanvasImageSize(aspectRatio = '1:1', width, height) {
+  const explicitWidth = Number(width)
+  const explicitHeight = Number(height)
+  if (Number.isFinite(explicitWidth) && explicitWidth > 0 && Number.isFinite(explicitHeight) && explicitHeight > 0) {
+    const maxSide = 360
+    const scale = Math.min(1, maxSide / Math.max(explicitWidth, explicitHeight))
+    return {
+      width: Math.max(80, Math.round(explicitWidth * scale)),
+      height: Math.max(80, Math.round(explicitHeight * scale)),
+    }
+  }
+
+  const [w, h] = normalizeAspectRatio(aspectRatio).split(':').map((part) => Number(part) || 1)
+  const baseArea = 300 * 300
+  const ratio = w / h
+  const nextWidth = Math.sqrt(baseArea * ratio)
+  const nextHeight = nextWidth / ratio
+  return {
+    width: Math.round(clamp(nextWidth, 180, 420)),
+    height: Math.round(clamp(nextHeight, 180, 420)),
+  }
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
+}
+
+function rectsIntersect(a, b) {
+  return a.x1 <= b.x2 && a.x2 >= b.x1 && a.y1 <= b.y2 && a.y2 >= b.y1
 }
 
 function unique(values) {

@@ -115,6 +115,25 @@ export interface ConversationTurnRecord {
   updatedAt: string
 }
 
+export interface CanvasProjectRecord {
+  id: string
+  sessionId: string
+  title: string
+  metadataJson: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CanvasProjectElementRecord {
+  id: string
+  projectId: string
+  elementType: string
+  zIndex: number
+  dataJson: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
 export interface SealedCredentialRecord {
   id: string
   jobId: string

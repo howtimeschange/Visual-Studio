@@ -36,7 +36,8 @@ async function handleDirectGenerate(env: Env, body: any) {
   const session = await ensureSession(env, body?.sessionId)
   const modelId = String(body?.modelId || 'nano-banana-2')
   const prompt = String(body?.prompt || '').trim()
-  const aspectRatio = String(body?.aspectRatio || '1:1')
+  const aspectRatio = normalizeAspectRatio(body?.aspectRatio)
+  const resolution = normalizeResolution(body?.resolution)
   const useDesignAgent = Boolean(body?.useDesignAgent)
   const referenceEntries: RefEntry[] = Array.isArray(body?.referenceImages)
     ? body.referenceImages.filter((r: any) => r?.assetId)
@@ -70,12 +71,12 @@ async function handleDirectGenerate(env: Env, body: any) {
 
   if (useDesignAgent && visionKey) {
     // Design Agent mode: use vision model to refine prompt, but still pass images directly
-    const refined = await refineWithDesignAgent(baseUrl, visionKey, prompt, refImages, aspectRatio)
+    const refined = await refineWithDesignAgent(baseUrl, visionKey, prompt, refImages, aspectRatio, resolution)
     if (refined) finalPrompt = refined
   }
 
   // Build the final prompt with role annotations
-  const fullPrompt = buildDirectPrompt(finalPrompt, refImages, aspectRatio)
+  const fullPrompt = buildDirectPrompt(finalPrompt, refImages, aspectRatio, resolution)
 
   // Pass all reference images directly to the image model
   const images = refImages.map((img) => ({ base64: img.base64, mime: img.mime }))
@@ -94,6 +95,8 @@ async function handleDirectGenerate(env: Env, body: any) {
   return {
     sessionId: session.id,
     resultDataUrl: result.dataUrl,
+    aspectRatio,
+    resolution,
   }
 }
 
@@ -101,6 +104,7 @@ function buildDirectPrompt(
   userPrompt: string,
   refs: Array<{ role: string; label: string }>,
   aspectRatio: string,
+  resolution: string,
 ): string {
   const parts: string[] = []
 
@@ -135,6 +139,15 @@ function buildDirectPrompt(
     parts.push(`Aspect ratio: ${ratioHint}`)
   }
 
+  const resolutionHint = ({
+    '1k': '1k class output, approximately 1024px on the long edge.',
+    '2k': '2k class output, approximately 2048px on the long edge.',
+    '4k': '4k class output, approximately 4096px on the long edge.',
+  } as Record<string, string>)[resolution]
+  if (resolutionHint) {
+    parts.push(`Resolution target: ${resolutionHint}`)
+  }
+
   // Minimal output constraint — no bloat
   parts.push('Output: a single image. No watermark, border, or UI chrome.')
 
@@ -147,6 +160,7 @@ async function refineWithDesignAgent(
   prompt: string,
   refs: Array<{ base64: string; mime: string; role: string; label: string }>,
   aspectRatio: string,
+  resolution: string,
 ): Promise<string | null> {
   const refSummary = refs.length > 0
     ? refs.map((r, i) => `- Image ${i + 1}: role=${r.role}${r.label ? `, "${r.label}"` : ''}`).join('\n')
@@ -167,13 +181,23 @@ The references will be passed directly as images — you only need to describe t
       },
       {
         role: 'user',
-        content: `User request: ${prompt}\n\nReferences:\n${refSummary}\n\nAspect ratio: ${aspectRatio}\n\nOutput the refined prompt only, no explanation.`,
+        content: `User request: ${prompt}\n\nReferences:\n${refSummary}\n\nAspect ratio: ${aspectRatio}\nResolution: ${resolution}\n\nOutput the refined prompt only, no explanation.`,
       },
     ],
     { maxTokens: 600, temperature: 0.7 },
   )
 
   return raw?.trim() || null
+}
+
+function normalizeAspectRatio(value: unknown): string {
+  const ratio = String(value || '').trim()
+  return ['1:1', '4:3', '3:4', '16:9', '9:16'].includes(ratio) ? ratio : '1:1'
+}
+
+function normalizeResolution(value: unknown): string {
+  const resolution = String(value || '').trim().toLowerCase()
+  return ['1k', '2k', '4k'].includes(resolution) ? resolution : '1k'
 }
 
 function splitDataUrl(dataUrl: string): { mime: string; base64: string } {
