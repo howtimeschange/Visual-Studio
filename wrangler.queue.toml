@@ -5,7 +5,7 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "VS_DB"
 database_name = "visual-studio"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "628e04ac-8d74-44f5-99b9-12a6aafcaf2c"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
