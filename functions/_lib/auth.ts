@@ -14,7 +14,7 @@ import {
 
 const AUTH_COOKIE = 'vs_auth'
 const SESSION_DAYS = 14
-const PASSWORD_ITERATIONS = 120_000
+const PASSWORD_ITERATIONS = 100_000
 
 export type AuthContext = {
   user: PublicUser | null
