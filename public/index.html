@@ -48,6 +48,9 @@
     </nav>
 
     <div class="sidebar-footer">
+      <button id="account-btn" class="ghost full">
+        <span class="settings-mark">账号</span> 登录 / 注册
+      </button>
       <button id="settings-btn" class="ghost full">
         <span class="settings-mark">系统</span> 设置
       </button>
@@ -67,6 +70,7 @@
           </div>
         </div>
         <div class="home-top-actions">
+          <button type="button" id="h-account" class="ghost">账号</button>
           <button type="button" id="h-projects" class="ghost">项目管理</button>
           <button type="button" id="h-settings" class="ghost">系统设置</button>
         </div>
@@ -110,6 +114,64 @@
         </div>
         <div class="home-recent-grid" id="h-recent-list"></div>
       </section>
+    </section>
+
+    <!-- ═══════════════ AUTH VIEW ═══════════════ -->
+    <section class="view auth-view" id="view-auth">
+      <header class="auth-topbar">
+        <button type="button" id="auth-back" class="ghost">返回首页</button>
+        <button type="button" id="auth-settings" class="ghost">系统设置</button>
+      </header>
+
+      <div class="auth-layout">
+        <section class="auth-copy">
+          <div class="auth-mark">VS</div>
+          <h1>登录 Visual Studio</h1>
+          <p>项目、素材、任务历史和共享权限会归属到当前账号。</p>
+          <div class="auth-points">
+            <span>项目 owner / viewer / editor</span>
+            <span>共享项目列表</span>
+            <span>用量统计</span>
+          </div>
+        </section>
+
+        <section id="account-panel" class="account-panel auth-panel">
+          <div class="account-summary hidden" id="account-summary">
+            <div>
+              <strong id="account-name">未登录</strong>
+              <span id="account-email"></span>
+            </div>
+            <button type="button" id="account-logout" class="ghost">退出登录</button>
+          </div>
+
+          <div class="auth-form-head" id="account-form-head">
+            <h2>账号</h2>
+            <p>没有账号时可直接注册并登录。</p>
+          </div>
+
+          <div class="dialog-grid" id="account-form">
+            <label class="dialog-field">
+              <span class="dialog-label">邮箱</span>
+              <input id="account-email-input" type="email" autocomplete="email" placeholder="name@example.com" />
+            </label>
+            <label class="dialog-field">
+              <span class="dialog-label">昵称 <span class="muted">（注册时使用）</span></span>
+              <input id="account-name-input" type="text" autocomplete="name" placeholder="例如：设计团队" />
+            </label>
+            <label class="dialog-field">
+              <span class="dialog-label">密码</span>
+              <input id="account-password-input" type="password" autocomplete="current-password" placeholder="至少 8 位" />
+            </label>
+            <div class="account-actions">
+              <button type="button" id="account-login" class="primary">登录</button>
+              <button type="button" id="account-register" class="ghost">注册并登录</button>
+            </div>
+          </div>
+
+          <div id="account-usage" class="account-usage"></div>
+          <div id="account-status" class="status"></div>
+        </section>
+      </div>
     </section>
 
     <!-- ═══════════════ TRANSLATE VIEW ═══════════════ -->
@@ -191,6 +253,7 @@
           <p class="subtitle">管理已保存的画布项目，继续上一次的生成流或从空白项目开始。</p>
         </div>
         <div class="projects-actions">
+          <button type="button" id="p-shared" class="ghost">共享项目</button>
           <button type="button" id="p-refresh" class="ghost">刷新</button>
           <button type="button" id="p-new" class="primary">新建画布</button>
         </div>
@@ -222,6 +285,9 @@
           <span id="g-project-status" class="canvas-project-status"></span>
         </div>
         <div class="canvas-header-right">
+          <button type="button" id="g-share" class="canvas-header-btn" title="共享项目">
+            <span>共享</span>
+          </button>
           <button type="button" id="g-projects" class="canvas-header-btn" title="项目管理">
             <span>项目</span>
           </button>
@@ -640,6 +706,43 @@
   </form>
 </dialog>
 
+<dialog id="share-dialog">
+  <form method="dialog" id="share-form">
+    <div class="dialog-copy">
+      <h3>共享项目</h3>
+      <p class="hint" id="share-hint">邀请成员查看或编辑当前画布项目。</p>
+    </div>
+
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h4>邀请成员</h4>
+        <p>viewer 可以查看项目；editor 可以编辑画布内容。owner 可管理成员。</p>
+      </div>
+      <div class="share-invite-row">
+        <input id="share-email" type="email" autocomplete="off" placeholder="成员邮箱" />
+        <select id="share-role">
+          <option value="viewer">viewer</option>
+          <option value="editor">editor</option>
+        </select>
+        <button type="button" id="share-invite" class="primary">邀请</button>
+      </div>
+      <div id="share-status" class="status"></div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h4>成员</h4>
+        <p>当前项目的 owner、成员和待接受邀请。</p>
+      </div>
+      <div id="share-members" class="share-members"></div>
+    </section>
+
+    <div class="dialog-actions">
+      <button type="submit" class="ghost">关闭</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="image-lightbox" class="image-lightbox">
   <form method="dialog" class="lightbox-close-wrap">
     <button type="submit" id="lightbox-close" class="lightbox-close" aria-label="关闭图片预览">×</button>
@@ -654,6 +757,6 @@
   </div>
 </dialog>
 
-<script type="module" src="/app.js?v=20260427-3"></script>
+<script type="module" src="/app.js?v=20260427-5"></script>
 </body>
 </html>

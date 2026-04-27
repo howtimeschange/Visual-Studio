@@ -2,6 +2,7 @@ import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
 } from '../_shared'
+import { getAuthContext } from '../_lib/auth'
 import { ensureSession, getAssetDataUrl } from '../_lib/v2-store'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
@@ -15,13 +16,15 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   const action = String(body?.action || '').trim()
+  const auth = await getAuthContext(env, request)
+  const requestBody = { ...body, _authUserId: auth.user?.id || null }
 
   try {
     if (action === 'analyze') {
-      return json(await handleAnalyze(env, body))
+      return json(await handleAnalyze(env, requestBody))
     }
     if (action === 'generate') {
-      return json(await handleGenerate(env, body))
+      return json(await handleGenerate(env, requestBody))
     }
     return json({ error: 'Unknown action. Use "analyze" or "generate".' }, 400)
   } catch (error: any) {
@@ -75,7 +78,7 @@ const STYLE_ANALYSIS_PROMPT = `你是一个专业视觉分析师，将图像风�
 // ── Analyze ─────────────────────────────────────────────────────────────────
 
 async function handleAnalyze(env: Env, body: any) {
-  const session = await ensureSession(env, body?.sessionId)
+  const session = await ensureSession(env, body?.sessionId, body?._authUserId || null)
   const assetId = String(body?.assetId || '').trim()
   if (!assetId) throw createError('assetId required', 400)
 
@@ -123,7 +126,7 @@ async function handleAnalyze(env: Env, body: any) {
 // ── Generate ────────────────────────────────────────────────────────────────
 
 async function handleGenerate(env: Env, body: any) {
-  const session = await ensureSession(env, body?.sessionId)
+  const session = await ensureSession(env, body?.sessionId, body?._authUserId || null)
   const assetId = String(body?.assetId || '').trim()
   const visualStyle = body?.visualStyle
   const subject = String(body?.subject || '').trim()

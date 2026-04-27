@@ -14,10 +14,10 @@ function toSseResponse(events: any[]) {
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
-export const onRequestGet: PagesFunction<Env> = async ({ params, request }) => {
+export const onRequestGet: PagesFunction<Env> = async ({ env, params, request }) => {
   const after = Number(new URL(request.url).searchParams.get('after') || '0')
   const turnId = String(params?.turnId || '')
-  const events = await getEventsSince('turn', turnId, after)
+  const events = await getEventsSince(env, 'turn', turnId, after)
   if (events.length > 0) return toSseResponse(events)
-  return toSseResponse(await waitForEvents('turn', turnId, after))
+  return toSseResponse(await waitForEvents(env, 'turn', turnId, after))
 }

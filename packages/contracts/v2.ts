@@ -29,6 +29,8 @@ export type JobItemStatus =
 
 export type EventScope = 'job' | 'turn' | 'item'
 
+export type ProjectRole = 'owner' | 'editor' | 'viewer'
+
 export type EventType =
   | 'status'
   | 'trace'
@@ -46,13 +48,34 @@ export interface SessionRecord {
   id: string
   createdAt: string
   lastActiveAt: string
+  userId?: string | null
   clientFingerprint?: string
   preferencesJson?: Record<string, unknown> | null
+}
+
+export interface UserRecord {
+  id: string
+  email: string
+  name: string
+  passwordHash: string
+  passwordSalt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AuthSessionRecord {
+  id: string
+  userId: string
+  tokenHash: string
+  createdAt: string
+  expiresAt: string
+  lastSeenAt: string
 }
 
 export interface AssetRecord {
   id: string
   sessionId: string
+  userId?: string | null
   kind: AssetKind
   source: string
   mime: string
@@ -68,6 +91,7 @@ export interface AssetRecord {
 export interface JobRecord {
   id: string
   sessionId: string
+  userId?: string | null
   type: JobType
   status: JobStatus
   configJson: Record<string, unknown>
@@ -96,6 +120,7 @@ export interface JobItemRecord {
 export interface ConversationRecord {
   id: string
   sessionId: string
+  userId?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -118,6 +143,7 @@ export interface ConversationTurnRecord {
 export interface CanvasProjectRecord {
   id: string
   sessionId: string
+  ownerUserId?: string | null
   title: string
   metadataJson: Record<string, unknown>
   createdAt: string
@@ -132,6 +158,46 @@ export interface CanvasProjectElementRecord {
   dataJson: Record<string, unknown>
   createdAt: string
   updatedAt: string
+}
+
+export interface ProjectMemberRecord {
+  projectId: string
+  userId: string
+  role: ProjectRole
+  invitedByUserId?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectInviteRecord {
+  id: string
+  projectId: string
+  email: string
+  role: Exclude<ProjectRole, 'owner'>
+  token: string
+  status: 'pending' | 'accepted' | 'revoked'
+  invitedByUserId?: string | null
+  acceptedByUserId?: string | null
+  createdAt: string
+  updatedAt: string
+  expiresAt: string
+}
+
+export interface UsageEventRecord {
+  id: string
+  userId?: string | null
+  sessionId?: string | null
+  projectId?: string | null
+  jobId?: string | null
+  eventType: string
+  amount: number
+  provider?: string | null
+  modelId?: string | null
+  inputTokens?: number
+  outputTokens?: number
+  apiCostUsd?: number
+  metadataJson: Record<string, unknown>
+  createdAt: string
 }
 
 export interface SealedCredentialRecord {

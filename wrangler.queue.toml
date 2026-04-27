@@ -1,0 +1,27 @@
+name = "visual-studio-job-consumer"
+main = "workers/job-consumer.ts"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "VS_DB"
+database_name = "visual-studio"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "VS_INPUTS_BUCKET"
+bucket_name = "visual-studio-inputs"
+
+[[r2_buckets]]
+binding = "VS_RESULTS_BUCKET"
+bucket_name = "visual-studio-results"
+
+[[r2_buckets]]
+binding = "VS_TEMP_BUCKET"
+bucket_name = "visual-studio-temp"
+
+[[queues.consumers]]
+queue = "visual-studio-jobs"
+max_batch_size = 4
+max_batch_timeout = 10
+max_retries = 3

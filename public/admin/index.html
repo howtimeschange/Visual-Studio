@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Visual Studio Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=Sora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body>
+  <main class="admin-shell">
+    <header class="admin-topbar">
+      <a class="brand" href="/lovart">
+        <span class="brand-mark">VS</span>
+        <span>
+          <strong>Admin</strong>
+          <small>Visual Studio</small>
+        </span>
+      </a>
+      <div class="topbar-actions">
+        <span id="admin-user" class="admin-user"></span>
+        <a class="ghost-link" href="/lovart/auth">账号</a>
+        <button id="refresh-all" type="button" class="primary-button">刷新</button>
+      </div>
+    </header>
+
+    <section id="admin-gate" class="gate hidden">
+      <h1>需要管理员权限</h1>
+      <p id="gate-message">请先使用管理员账号登录。</p>
+      <a class="primary-link" href="/lovart/auth">去登录</a>
+    </section>
+
+    <section id="admin-app" class="hidden">
+      <div class="page-head">
+        <div>
+          <p class="kicker">运营后台</p>
+          <h1>用户、在线、用量与任务</h1>
+        </div>
+        <label class="inline-field">
+          <span>在线窗口</span>
+          <select id="online-window">
+            <option value="5">5 分钟</option>
+            <option value="10">10 分钟</option>
+            <option value="30">30 分钟</option>
+          </select>
+        </label>
+      </div>
+
+      <section id="metric-grid" class="metric-grid"></section>
+
+      <nav class="tabs" aria-label="Admin sections">
+        <button class="tab active" type="button" data-tab="users">用户</button>
+        <button class="tab" type="button" data-tab="usage">用量</button>
+        <button class="tab" type="button" data-tab="jobs">任务</button>
+      </nav>
+
+      <section id="panel-users" class="panel active">
+        <form id="user-filter" class="toolbar">
+          <label class="search-field">
+            <span>搜索用户</span>
+            <input id="user-q" type="search" placeholder="邮箱、昵称或 user id" />
+          </label>
+          <button type="submit" class="ghost-button">筛选</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>用户</th>
+                <th>最近登录</th>
+                <th>最近活跃</th>
+                <th>Session</th>
+                <th>用量</th>
+                <th>API 成本</th>
+                <th>任务</th>
+                <th>项目</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="panel-usage" class="panel">
+        <form id="usage-filter" class="toolbar toolbar-grid">
+          <label>
+            <span>开始日期</span>
+            <input id="usage-from" type="date" />
+          </label>
+          <label>
+            <span>结束日期</span>
+            <input id="usage-to" type="date" />
+          </label>
+          <label>
+            <span>用户 ID</span>
+            <input id="usage-user-id" type="text" placeholder="留空看全部" />
+          </label>
+          <label>
+            <span>功能</span>
+            <select id="usage-event-type">
+              <option value="">全部</option>
+              <option value="asset_upload">素材上传</option>
+              <option value="generate_direct_result">画布生图</option>
+              <option value="generate_result">AI 生图</option>
+              <option value="translate_result">翻译结果</option>
+              <option value="outfit_result">换装结果</option>
+              <option value="auth_login">登录</option>
+              <option value="auth_register">注册</option>
+            </select>
+          </label>
+          <button type="submit" class="ghost-button">查询</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>用户 / 会话</th>
+                <th>功能</th>
+                <th>模型</th>
+                <th>次数</th>
+                <th>Tokens</th>
+                <th>API 成本</th>
+                <th>最后记录</th>
+              </tr>
+            </thead>
+            <tbody id="usage-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="panel-jobs" class="panel">
+        <form id="job-filter" class="toolbar toolbar-grid">
+          <label>
+            <span>搜索任务</span>
+            <input id="job-q" type="search" placeholder="job id、邮箱、昵称" />
+          </label>
+          <label>
+            <span>状态</span>
+            <select id="job-status">
+              <option value="">全部</option>
+              <option value="queued">queued</option>
+              <option value="running">running</option>
+              <option value="completed">completed</option>
+              <option value="partial_failed">partial_failed</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </label>
+          <label>
+            <span>类型</span>
+            <select id="job-type">
+              <option value="">全部</option>
+              <option value="generate_batch">generate_batch</option>
+              <option value="generate_turn">generate_turn</option>
+              <option value="translate_batch">translate_batch</option>
+              <option value="outfit_batch">outfit_batch</option>
+            </select>
+          </label>
+          <label>
+            <span>用户 ID</span>
+            <input id="job-user-id" type="text" placeholder="留空看全部" />
+          </label>
+          <button type="submit" class="ghost-button">查询</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>更新时间</th>
+                <th>任务</th>
+                <th>用户</th>
+                <th>状态</th>
+                <th>进度</th>
+                <th>用量</th>
+                <th>API 成本</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="jobs-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <aside id="job-inspector" class="job-inspector" aria-live="polite">
+    <div class="inspector-head">
+      <div>
+        <p class="kicker">任务明细</p>
+        <h2 id="inspector-title">未选择任务</h2>
+      </div>
+      <button id="close-inspector" type="button" class="icon-button" aria-label="关闭">×</button>
+    </div>
+    <div id="inspector-body" class="inspector-body"></div>
+  </aside>
+
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="/admin.js"></script>
+</body>
+</html>

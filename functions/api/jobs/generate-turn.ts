@@ -1,4 +1,5 @@
 import { Env, json, corsPreflight } from '../../_shared'
+import { getAuthContext } from '../../_lib/auth'
 import { submitGenerateTurn } from '../../_lib/v2-runner'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
@@ -12,7 +13,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUnti
   }
 
   try {
-    return json(await submitGenerateTurn(env, body, waitUntil))
+    const auth = await getAuthContext(env, request)
+    return json(await submitGenerateTurn(env, { ...body, _authUserId: auth.user?.id || null }, waitUntil))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Create generate turn job failed') }, error?.status || 502)
   }

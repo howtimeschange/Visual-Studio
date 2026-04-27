@@ -8,9 +8,16 @@ export interface Env {
   GPT_IMAGE_API_KEY?: string
   GPT_IMAGE_GROUP?: string
   CREDENTIAL_KEK?: string
+  ADMIN_EMAILS?: string
+  ADMIN_USER_IDS?: string
+  VS_ADMIN_EMAILS?: string
+  VS_ADMIN_USER_IDS?: string
+  VS_QUEUE_EXECUTION_MODE?: string
+  VS_DB?: D1Database
   VS_INPUTS_BUCKET?: R2Bucket
   VS_RESULTS_BUCKET?: R2Bucket
   VS_TEMP_BUCKET?: R2Bucket
+  VS_JOBS_QUEUE?: Queue<unknown>
 }
 
 export const DEFAULT_BASE = 'https://api.1xm.ai/v1'

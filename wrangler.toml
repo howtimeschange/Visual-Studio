@@ -4,11 +4,38 @@ pages_build_output_dir = "public"
 
 # Server-side default keys (optional). Users can override via the in-app Settings (BYOK).
 # Set with: wrangler pages secret put VISION_API_KEY --project-name=image-translator
-# Optional V2 foundation secrets / bindings:
+# Optional V2 foundation secrets:
 # wrangler pages secret put CREDENTIAL_KEK --project-name=image-translator
-# [r2_buckets]
-# binding = "VS_INPUTS_BUCKET", bucket_name = "visual-studio-inputs"
-# binding = "VS_RESULTS_BUCKET", bucket_name = "visual-studio-results"
-# binding = "VS_TEMP_BUCKET", bucket_name = "visual-studio-temp"
+
+# Persistent data bindings. Fill database_id after creating the D1 database:
+# wrangler d1 create visual-studio
+# wrangler d1 migrations apply visual-studio --local
+# wrangler d1 migrations apply visual-studio --remote
+[[d1_databases]]
+binding = "VS_DB"
+database_name = "visual-studio"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "VS_INPUTS_BUCKET"
+bucket_name = "visual-studio-inputs"
+
+[[r2_buckets]]
+binding = "VS_RESULTS_BUCKET"
+bucket_name = "visual-studio-results"
+
+[[r2_buckets]]
+binding = "VS_TEMP_BUCKET"
+bucket_name = "visual-studio-temp"
+
+# Queue producer for durable job dispatch. The Pages Function falls back to waitUntil
+# when this binding is not provisioned by the deployment environment.
+[[queues.producers]]
+binding = "VS_JOBS_QUEUE"
+queue = "visual-studio-jobs"
+
 # [vars]
 # RELAY_BASE_URL = "https://api.1xm.ai/v1"
+# ADMIN_EMAILS = "owner@example.com" # comma-separated admin account emails for /admin
+# VS_QUEUE_EXECUTION_MODE = "waitUntil" # set to "queue" after deploying workers/job-consumer.ts

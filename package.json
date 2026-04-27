@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler pages dev public --compatibility-date=2025-01-01",
-    "deploy": "wrangler pages deploy public --project-name=image-translator"
+    "deploy": "wrangler pages deploy public --project-name=image-translator",
+    "deploy:queue": "wrangler deploy --config wrangler.queue.toml"
   },
   "devDependencies": {
     "wrangler": "^3.90.0"

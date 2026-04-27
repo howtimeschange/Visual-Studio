@@ -16,6 +16,7 @@ function scopeKey(scope: string, scopeId: string): string {
 }
 
 export async function publishEvent(
+  env: any,
   scope: RuntimeEvent['scope'],
   scopeId: string,
   type: RuntimeEvent['type'],
@@ -33,7 +34,7 @@ export async function publishEvent(
     timestamp: nowIso(),
     payload,
   }
-  await appendEvent(event)
+  const storedEvent = await appendEvent(env, event)
 
   const watchers = waiters.get(key)
   if (watchers?.size) {
@@ -41,24 +42,25 @@ export async function publishEvent(
     waiters.delete(key)
     snapshot.forEach((watcher) => {
       clearTimeout(watcher.timeout)
-      watcher.resolve([event].filter((entry) => entry.seq > watcher.afterSeq))
+      watcher.resolve([storedEvent].filter((entry) => entry.seq > watcher.afterSeq))
     })
   }
 
-  return event
+  return storedEvent
 }
 
-export async function getEventsSince(scope: string, scopeId: string, afterSeq = 0): Promise<RuntimeEvent[]> {
-  return listEvents(scope, scopeId, afterSeq)
+export async function getEventsSince(env: any, scope: string, scopeId: string, afterSeq = 0): Promise<RuntimeEvent[]> {
+  return listEvents(env, scope, scopeId, afterSeq)
 }
 
 export async function waitForEvents(
+  env: any,
   scope: string,
   scopeId: string,
   afterSeq = 0,
   timeoutMs = 25000,
 ): Promise<RuntimeEvent[]> {
-  const current = await listEvents(scope, scopeId, afterSeq)
+  const current = await listEvents(env, scope, scopeId, afterSeq)
   if (current.length > 0) return current
 
   const key = scopeKey(scope, scopeId)

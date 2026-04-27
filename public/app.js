@@ -1,3 +1,21 @@
+import {
+  basename,
+  clamp,
+  ensureImageExtension,
+  formatRelativeTime,
+  formatTimestamp,
+  normalizeAspectRatio,
+  normalizeCanvasResolution,
+  normalizeView,
+  readJson,
+  rectsIntersect,
+  sanitizeFileName,
+  splitDataUrl,
+  trimError,
+  unique,
+  wait,
+} from './js/shared.js'
+
 const LANGUAGES = [
   { code: 'auto', label: '自动检测', nativeLabel: 'Auto detect' },
   { code: 'zh', label: '简体中文', nativeLabel: '简体中文' },
@@ -58,9 +76,9 @@ const CANVAS_GUIDE_STORAGE = 'img-translator:canvas-guide:v1'
 const CANVAS_AI_FIRST_OPEN_STORAGE = 'img-translator:canvas-ai-opened:v1'
 const DEFAULT_CANVAS_PROJECT_TITLE = '未命名画布'
 const CANVAS_SHAPES = new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right'])
-const CANVAS_RESOLUTIONS = new Set(['1k', '2k', '4k'])
 const VIEW_ROUTES = {
   home: '/',
+  auth: '/lovart/auth',
   translate: '/?view=translate',
   generate: '/lovart/canvas',
   projects: '/lovart/projects',
@@ -153,6 +171,22 @@ const state = {
     loading: false,
     loadedSessionId: '',
     error: '',
+    filterShared: false,
+  },
+  account: {
+    user: null,
+    usage: null,
+    loading: false,
+    error: '',
+    status: '',
+  },
+  share: {
+    loading: false,
+    members: [],
+    invites: [],
+    owner: null,
+    role: '',
+    status: '',
   },
   home: {
     prompt: '',
@@ -192,6 +226,7 @@ const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selec
 const dom = {
   views: $$('.view'),
   navItems: $$('.nav-item'),
+  accountBtn: $('#account-btn'),
   settingsBtn: $('#settings-btn'),
   settingsDialog: $('#settings-dialog'),
   settingsForm: $('#settings-form'),
@@ -218,14 +253,18 @@ const dom = {
   hPrompt: $('#h-prompt'),
   hStart: $('#h-start'),
   hTools: $('#h-tools'),
+  hAccount: $('#h-account'),
   hProjects: $('#h-projects'),
   hSettings: $('#h-settings'),
   hSeeAll: $('#h-see-all'),
   hRecentStatus: $('#h-recent-status'),
   hRecentList: $('#h-recent-list'),
+  authBack: $('#auth-back'),
+  authSettings: $('#auth-settings'),
   gModel: $('#g-model'),
   gAgent: $('#g-agent'),
   gNew: $('#g-new'),
+  gShare: $('#g-share'),
   gProjects: $('#g-projects'),
   gProjectTitle: $('#g-project-title'),
   gProjectStatus: $('#g-project-status'),
@@ -272,6 +311,28 @@ const dom = {
   pNew: $('#p-new'),
   pEmptyNew: $('#p-empty-new'),
   pRefresh: $('#p-refresh'),
+  pShared: $('#p-shared'),
+  accountSummary: $('#account-summary'),
+  accountName: $('#account-name'),
+  accountEmail: $('#account-email'),
+  accountFormHead: $('#account-form-head'),
+  accountForm: $('#account-form'),
+  accountEmailInput: $('#account-email-input'),
+  accountNameInput: $('#account-name-input'),
+  accountPasswordInput: $('#account-password-input'),
+  accountLogin: $('#account-login'),
+  accountRegister: $('#account-register'),
+  accountLogout: $('#account-logout'),
+  accountUsage: $('#account-usage'),
+  accountStatus: $('#account-status'),
+  shareDialog: $('#share-dialog'),
+  shareForm: $('#share-form'),
+  shareHint: $('#share-hint'),
+  shareEmail: $('#share-email'),
+  shareRole: $('#share-role'),
+  shareInvite: $('#share-invite'),
+  shareStatus: $('#share-status'),
+  shareMembers: $('#share-members'),
   oModel: $('#o-model'),
   oGarmentType: $('#o-garment-type'),
   oConcurrency: $('#o-concurrency'),
@@ -343,19 +404,23 @@ function init() {
   populateModelSelects()
   bindShell()
   bindSettings()
+  bindAccount()
   bindLightbox()
   bindHome()
   bindTranslate()
   bindProjects()
+  bindShare()
   bindGenerate()
   bindOutfit()
   bindStyle()
   renderAll()
+  void loadAccount()
   void restoreRuntimeState()
 }
 
 function viewFromLocation(fallback = 'home') {
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  if (path === '/lovart/auth') return 'auth'
   if (path === '/lovart/canvas') return 'generate'
   if (path === '/lovart/projects') return 'projects'
   if (path === '/lovart') return 'home'
@@ -794,6 +859,119 @@ function bindSettings() {
   }
 }
 
+function bindAccount() {
+  const openAccountPage = () => {
+    setActiveView('auth')
+    renderAccount()
+    if (!state.account.user) {
+      requestAnimationFrame(() => dom.accountEmailInput?.focus())
+    }
+  }
+  dom.accountBtn?.addEventListener('click', openAccountPage)
+  dom.hAccount?.addEventListener('click', openAccountPage)
+  dom.authBack?.addEventListener('click', () => setActiveView('home'))
+  dom.authSettings?.addEventListener('click', () => {
+    hydrateSettingsForm()
+    dom.settingsDialog.showModal()
+  })
+
+  dom.accountLogin?.addEventListener('click', () => {
+    void submitAccountAuth('login')
+  })
+  dom.accountRegister?.addEventListener('click', () => {
+    void submitAccountAuth('register')
+  })
+  dom.accountLogout?.addEventListener('click', () => {
+    void logoutAccount()
+  })
+}
+
+async function loadAccount() {
+  try {
+    const data = await getJson('/api/auth/me')
+    state.account.user = data.user || null
+    state.account.usage = data.usage || null
+    state.account.error = ''
+  } catch (error) {
+    state.account.error = trimError(error)
+  } finally {
+    renderAccount()
+    void handlePendingInvite()
+  }
+}
+
+async function handlePendingInvite() {
+  const token = new URLSearchParams(window.location.search).get('invite') || ''
+  if (!token) return
+  if (!state.account.user) {
+    state.account.status = '请先登录或注册后接受项目邀请'
+    renderAccount()
+    setActiveView('auth')
+    window.history.replaceState({}, '', `/lovart/auth?invite=${encodeURIComponent(token)}`)
+    return
+  }
+  try {
+    const data = await postJson(`/api/canvas/invites/${encodeURIComponent(token)}/accept`, {})
+    state.projects.filterShared = true
+    state.projects.loadedSessionId = ''
+    await loadCanvasProjects({ force: true })
+    window.history.replaceState({}, '', '/lovart/projects')
+    if (data.projectId) void openCanvasProject(data.projectId)
+  } catch (error) {
+    state.account.error = trimError(error)
+    renderAccount()
+    setActiveView('auth')
+  }
+}
+
+async function submitAccountAuth(mode) {
+  const email = dom.accountEmailInput?.value.trim() || ''
+  const password = dom.accountPasswordInput?.value || ''
+  const name = dom.accountNameInput?.value.trim() || ''
+  state.account.loading = true
+  state.account.status = mode === 'register' ? '正在注册…' : '正在登录…'
+  state.account.error = ''
+  renderAccount()
+  try {
+    const data = await postJson(`/api/auth/${mode}`, {
+      email,
+      password,
+      name,
+      sessionId: state.runtime.sessionId || undefined,
+    })
+    state.account.user = data.user || null
+    state.account.status = state.account.user ? '已登录' : ''
+    dom.accountPasswordInput.value = ''
+    await loadAccount()
+    state.projects.loadedSessionId = ''
+    void loadCanvasProjects({ force: true })
+  } catch (error) {
+    state.account.error = trimError(error)
+  } finally {
+    state.account.loading = false
+    renderAccount()
+  }
+}
+
+async function logoutAccount() {
+  state.account.loading = true
+  state.account.status = '正在退出…'
+  renderAccount()
+  try {
+    await postJson('/api/auth/logout', {})
+    state.account.user = null
+    state.account.usage = null
+    state.account.status = '已退出登录'
+    state.projects.loadedSessionId = ''
+    void loadCanvasProjects({ force: true })
+  } catch (error) {
+    state.account.error = trimError(error)
+  } finally {
+    state.account.loading = false
+    renderAccount()
+  }
+}
+
 function bindTranslate() {
   dom.tModel.addEventListener('change', () => {
     state.translate.model = dom.tModel.value
@@ -891,10 +1069,29 @@ function bindProjects() {
   dom.pRefresh?.addEventListener('click', () => {
     void loadCanvasProjects({ force: true })
   })
+  dom.pShared?.addEventListener('click', () => {
+    state.projects.filterShared = !state.projects.filterShared
+    state.projects.loadedSessionId = ''
+    void loadCanvasProjects({ force: true })
+    renderProjects()
+  })
   dom.pList?.addEventListener('click', (event) => {
+    const share = event.target.closest('[data-project-share]')
+    if (share) {
+      event.preventDefault()
+      event.stopPropagation()
+      void openShareDialog(share.dataset.projectShare)
+      return
+    }
     const card = event.target.closest('[data-project-id]')
     if (!card) return
     void openCanvasProject(card.dataset.projectId)
+  })
+}
+
+function bindShare() {
+  dom.shareInvite?.addEventListener('click', () => {
+    void inviteProjectMember()
   })
 }
 
@@ -917,6 +1114,10 @@ function bindGenerate() {
 
   dom.gProjects.addEventListener('click', () => {
     setActiveView('projects')
+  })
+
+  dom.gShare?.addEventListener('click', () => {
+    void openShareDialog(state.generate.projectId)
   })
 
   dom.gNew.addEventListener('click', () => {
@@ -1691,6 +1892,10 @@ function renderCanvas() {
   // Add or update nodes
   for (const el of elements) {
     let node = existingNodes.get(el.id)
+    if (node && node.dataset.elType !== el.type) {
+      node.remove()
+      node = null
+    }
     if (!node) {
       node = renderCanvasElement(el)
       dom.gCanvas.append(node)
@@ -1719,6 +1924,8 @@ function renderCanvas() {
     } else if (el.type === 'path') {
       const path = node.querySelector('.canvas-path-svg')
       if (path) renderPathSvg(path, el)
+    } else if (el.type === 'image-generator') {
+      updateCanvasGeneratorNode(node, el)
     }
   }
 
@@ -1730,6 +1937,7 @@ function renderCanvasElement(el) {
   const node = document.createElement('div')
   node.className = `canvas-el canvas-el-${el.type}`
   node.dataset.elId = el.id
+  node.dataset.elType = el.type
 
   if (el.type === 'image') {
     const img = document.createElement('img')
@@ -1763,8 +1971,8 @@ function renderCanvasElement(el) {
   } else if (el.type === 'image-generator') {
     const placeholder = document.createElement('div')
     placeholder.className = 'canvas-el-generator'
-    placeholder.innerHTML = '<span class="canvas-gen-icon">&#x2726;</span><span class="canvas-gen-label">AI 生图</span><span class="gen-hint">选中后设置参数并生成</span>'
     node.append(placeholder)
+    updateCanvasGeneratorNode(node, el)
   }
 
   for (const handle of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
@@ -1782,6 +1990,33 @@ function renderCanvasElement(el) {
   })
 
   return node
+}
+
+function updateCanvasGeneratorNode(node, el) {
+  const placeholder = node.querySelector('.canvas-el-generator')
+  if (!placeholder) return
+  const status = String(el.generatingStatus || '').trim()
+  const error = String(el.generatingError || '').trim()
+  const isLoading = Boolean(status)
+  const hasError = Boolean(error)
+  placeholder.classList.toggle('loading', isLoading)
+  placeholder.classList.toggle('error', hasError)
+  placeholder.replaceChildren()
+
+  const icon = document.createElement('span')
+  icon.className = isLoading ? 'spinner canvas-gen-spinner' : 'canvas-gen-icon'
+  if (!isLoading) icon.textContent = hasError ? '!' : '\u2726'
+  placeholder.append(icon)
+
+  const label = document.createElement('span')
+  label.className = 'canvas-gen-label'
+  label.textContent = isLoading ? '正在生成' : (hasError ? '生成失败' : 'AI 生图')
+  placeholder.append(label)
+
+  const hint = document.createElement('span')
+  hint.className = 'gen-hint'
+  hint.textContent = isLoading ? status : (hasError ? error : '选中后设置参数并生成')
+  placeholder.append(hint)
 }
 
 function applyTextElementStyle(node, el) {
@@ -2105,11 +2340,14 @@ function showGenPanel(elementId) {
   dom.gGenRatio.value = state.generate.genRatio
   dom.gGenResolution.value = state.generate.genResolution
   dom.gAgent.checked = state.generate.genUseAgent
-  dom.gGenRun.disabled = false
 
   renderGenPanelRefs()
   dom.gGenPanel.classList.remove('hidden')
-  dom.gGenProgress.classList.add('hidden')
+  updateGenPanelBusy(
+    state.generate.genRunning && state.generate.genTargetId === elementId,
+    el.generatingStatus || el.generatingError || '',
+    { error: Boolean(el.generatingError) },
+  )
 
   // Position panel near the element
   const rect = dom.gCanvasContainer.getBoundingClientRect()
@@ -2214,6 +2452,42 @@ function renderGenPanelRefs() {
   }))
 }
 
+function updateGenPanelBusy(isBusy, message = '', options = {}) {
+  const text = String(message || '').trim()
+  const isError = Boolean(options.error)
+  dom.gGenPrompt.disabled = isBusy
+  dom.gModel.disabled = isBusy
+  dom.gGenRatio.disabled = isBusy
+  dom.gGenResolution.disabled = isBusy
+  dom.gAgent.disabled = isBusy
+  dom.gGenRefUpload.disabled = isBusy
+  dom.gGenRun.disabled = isBusy
+  dom.gGenRun.classList.toggle('running', isBusy)
+  dom.gGenRun.textContent = isBusy ? '生成中…' : '生成'
+  for (const button of $$('.gen-panel-ref-rm', dom.gGenRefList)) button.disabled = isBusy
+
+  dom.gGenProgress.classList.toggle('hidden', !text)
+  dom.gGenProgress.classList.toggle('err', isError)
+  dom.gGenProgress.replaceChildren()
+  if (!text) return
+  if (isBusy) {
+    const spinner = document.createElement('span')
+    spinner.className = 'spinner'
+    dom.gGenProgress.append(spinner)
+  }
+  const label = document.createElement('span')
+  label.textContent = text
+  dom.gGenProgress.append(label)
+}
+
+function setCanvasGenerateStatus(el, message) {
+  if (!el) return
+  el.generatingStatus = String(message || '')
+  el.generatingError = ''
+  updateGenPanelBusy(true, el.generatingStatus)
+  renderCanvas()
+}
+
 async function executeCanvasGenerate() {
   const targetId = state.generate.genTargetId
   const el = state.generate.elements.find((item) => item.id === targetId)
@@ -2226,16 +2500,18 @@ async function executeCanvasGenerate() {
   }
 
   state.generate.genRunning = true
-  dom.gGenRun.disabled = true
-  dom.gGenProgress.classList.remove('hidden')
+  el.generatingPrompt = prompt
+  setCanvasGenerateStatus(el, '正在准备生成任务…')
+  let failedMessage = ''
 
   try {
     // Upload reference images if needed
     const refImages = []
-    for (const ref of state.generate.genRefs) {
+    for (const [index, ref] of state.generate.genRefs.entries()) {
       if (ref.assetId) {
         refImages.push({ assetId: ref.assetId, role: ref.role || 'subject' })
       } else if (ref.dataUrl) {
+        setCanvasGenerateStatus(el, `正在上传参考图 ${index + 1}/${state.generate.genRefs.length}…`)
         const uploaded = await postJson('/api/assets/upload', {
           sessionId: state.runtime.sessionId || undefined,
           kind: 'upload',
@@ -2250,6 +2526,7 @@ async function executeCanvasGenerate() {
       }
     }
 
+    setCanvasGenerateStatus(el, '正在调用图像模型生成图片…')
     const data = await postJson('/api/generate-direct', {
       sessionId: state.runtime.sessionId || undefined,
       modelId: state.generate.genModel,
@@ -2262,10 +2539,13 @@ async function executeCanvasGenerate() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-    const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, `generated-${el.id}.png`, {
-      kind: 'result',
-      source: 'canvas_generation',
-    })
+    setCanvasGenerateStatus(el, '正在保存生成结果…')
+    const storedResult = data.resultAsset
+      ? { assetId: data.resultAsset.id, mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png' }
+      : await uploadCanvasImageAsset(data.resultDataUrl, `generated-${el.id}.png`, {
+        kind: 'result',
+        source: 'canvas_generation',
+      })
     const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
 
     // Replace generator with image element
@@ -2276,6 +2556,8 @@ async function executeCanvasGenerate() {
     el.assetId = storedResult.assetId
     el.aspectRatio = state.generate.genRatio
     el.resolution = state.generate.genResolution
+    el.generatingStatus = ''
+    el.generatingError = ''
     const size = getCanvasImageSize(state.generate.genRatio, imageSize?.width, imageSize?.height)
     el.width = size.width
     el.height = size.height
@@ -2283,12 +2565,12 @@ async function executeCanvasGenerate() {
     state.generate.genRefs = []
     hideGenPanel()
   } catch (error) {
-    dom.gGenProgress.innerHTML = `<span class="err">${trimError(error)}</span>`
-    setTimeout(() => dom.gGenProgress.classList.add('hidden'), 3000)
+    failedMessage = `生成失败：${trimError(error)}`
+    el.generatingStatus = ''
+    el.generatingError = failedMessage
   } finally {
     state.generate.genRunning = false
-    dom.gGenRun.disabled = false
-    dom.gGenProgress.classList.add('hidden')
+    updateGenPanelBusy(false, failedMessage, { error: Boolean(failedMessage) })
     renderCanvas()
     saveRuntimeState()
   }
@@ -2592,10 +2874,12 @@ async function sendCanvasAiMessage() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-    const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, `ai-${Date.now()}.png`, {
-      kind: 'result',
-      source: 'canvas_ai_sidebar',
-    })
+    const storedResult = data.resultAsset
+      ? { assetId: data.resultAsset.id, mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png' }
+      : await uploadCanvasImageAsset(data.resultDataUrl, `ai-${Date.now()}.png`, {
+        kind: 'result',
+        source: 'canvas_ai_sidebar',
+      })
     const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
 
     assistantMsg.content = `${agentData.reply || '已生成图片'}\n\n图片已添加到画布。`
@@ -3069,6 +3353,7 @@ function renderAll() {
   renderTranslateDropdowns()
   renderTranslate()
   renderProjects()
+  renderAccount()
   renderGenerate()
   renderOutfit()
   renderStyle()
@@ -3265,6 +3550,49 @@ function renderHome() {
   dom.hRecentList.replaceChildren(...cards)
 }
 
+function renderAccount() {
+  if (!dom.accountSummary) return
+  const user = state.account.user
+  const signedIn = Boolean(user)
+  dom.accountSummary.classList.toggle('hidden', !signedIn)
+  dom.accountForm.classList.toggle('hidden', signedIn)
+  dom.accountFormHead?.classList.toggle('hidden', signedIn)
+  dom.accountName.textContent = user?.name || '未登录'
+  dom.accountEmail.textContent = user?.email || ''
+  const accountLabel = signedIn ? user.name || '账号' : '登录 / 注册'
+  if (dom.hAccount) dom.hAccount.textContent = accountLabel
+  if (dom.accountBtn) {
+    const mark = document.createElement('span')
+    mark.className = 'settings-mark'
+    mark.textContent = '账号'
+    dom.accountBtn.replaceChildren(mark, document.createTextNode(` ${accountLabel}`))
+  }
+  dom.accountLogin.disabled = state.account.loading
+  dom.accountRegister.disabled = state.account.loading
+  dom.accountLogout.disabled = state.account.loading
+  const usage = state.account.usage?.byType || {}
+  const usageParts = Object.entries(usage)
+    .map(([key, value]) => `${usageLabel(key)} ${value}`)
+  dom.accountUsage.textContent = signedIn && usageParts.length
+    ? `用量：${usageParts.join(' · ')}`
+    : signedIn
+      ? '用量：暂无记录'
+      : ''
+  dom.accountStatus.textContent = state.account.error || state.account.status || ''
+  dom.accountStatus.classList.toggle('err', Boolean(state.account.error))
+  dom.accountStatus.classList.toggle('ok', Boolean(!state.account.error && state.account.status))
+}
+
+function usageLabel(key) {
+  return ({
+    generate_direct_result: '画布生图',
+    generate_result: 'AI 生图',
+    translate_result: '翻译结果',
+    outfit_result: '换装结果',
+    asset_upload: '上传素材',
+  })[key] || key
+}
+
 function createHomeNewProjectCard() {
   const card = document.createElement('button')
   card.type = 'button'
@@ -3289,6 +3617,11 @@ function renderProjects() {
   dom.pStatus.textContent = loading ? '加载中…' : (error || '')
   dom.pRefresh.disabled = loading
   dom.pNew.disabled = loading && !items.length
+  if (dom.pShared) {
+    dom.pShared.classList.toggle('active', state.projects.filterShared)
+    dom.pShared.disabled = loading || !state.account.user
+    dom.pShared.textContent = state.projects.filterShared ? '全部项目' : '共享项目'
+  }
 
   if (loading && !items.length) {
     dom.pList.replaceChildren(createProjectSkeleton(), createProjectSkeleton(), createProjectSkeleton())
@@ -3311,8 +3644,9 @@ function createProjectSkeleton() {
 }
 
 function createProjectCard(project) {
-  const card = document.createElement('button')
-  card.type = 'button'
+  const card = document.createElement('div')
+  card.tabIndex = 0
+  card.role = 'button'
   card.className = 'project-card'
   card.dataset.projectId = project.id
   card.title = `打开 ${project.title || DEFAULT_CANVAS_PROJECT_TITLE}`
@@ -3338,8 +3672,17 @@ function createProjectCard(project) {
   title.textContent = project.title || DEFAULT_CANVAS_PROJECT_TITLE
   const detail = document.createElement('span')
   const count = Number(project.elementCount || 0)
-  detail.textContent = `${formatRelativeTime(project.updatedAt)} · ${count} 个元素`
+  const role = project.accessRole && project.accessRole !== 'owner' ? ` · ${project.accessRole}` : ''
+  detail.textContent = `${formatRelativeTime(project.updatedAt)} · ${count} 个元素${role}`
   meta.append(title, detail)
+  if (project.accessRole === 'owner') {
+    const share = document.createElement('button')
+    share.type = 'button'
+    share.className = 'project-share-btn'
+    share.dataset.projectShare = project.id
+    share.textContent = '共享'
+    meta.append(share)
+  }
   card.append(meta)
 
   return card
@@ -4138,6 +4481,8 @@ function setActiveView(view, { updateRoute = true } = {}) {
   renderShell()
   if (state.activeView === 'generate') {
     renderGenerate()
+  } else if (state.activeView === 'auth') {
+    renderAccount()
   } else if (state.activeView === 'home') {
     renderHome()
     void loadCanvasProjects()
@@ -4288,10 +4633,11 @@ async function uploadCanvasImageAsset(dataUrl, name, { kind = 'upload', source =
   }
 }
 
-async function hydrateAssetItems(items) {
+async function hydrateAssetItems(items, projectId = '') {
   const hydrated = await Promise.all(items.map(async (item) => {
     try {
-      const data = await getJson(`/api/assets/${encodeURIComponent(item.assetId || item.id)}?includeData=1`)
+      const projectParam = projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''
+      const data = await getJson(`/api/assets/${encodeURIComponent(item.assetId || item.id)}?includeData=1${projectParam}`)
       if (!data?.asset || !data?.dataUrl) return null
       return {
         ...item,
@@ -4393,10 +4739,201 @@ async function openCanvasProject(projectId) {
   }
 }
 
+async function openShareDialog(projectId) {
+  if (!projectId) {
+    await ensureCanvasProjectRecord()
+    projectId = state.generate.projectId
+  }
+  if (!projectId) return
+  if (!state.account.user) {
+    state.account.status = '请先登录后再共享项目'
+    renderAccount()
+    setActiveView('auth')
+    return
+  }
+  state.share.status = ''
+  state.share.loading = true
+  renderShareDialog(projectId)
+  if (!dom.shareDialog.open) dom.shareDialog.showModal()
+  try {
+    await loadProjectMembers(projectId)
+  } catch (error) {
+    state.share.status = trimError(error)
+  } finally {
+    state.share.loading = false
+    renderShareDialog(projectId)
+  }
+}
+
+async function loadProjectMembers(projectId = state.generate.projectId) {
+  const data = await getJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/members`)
+  state.share.members = Array.isArray(data.members) ? data.members : []
+  state.share.invites = Array.isArray(data.invites) ? data.invites : []
+  state.share.owner = data.owner || null
+  state.share.role = data.role || ''
+}
+
+async function inviteProjectMember() {
+  const projectId = state.generate.projectId || dom.shareDialog?.dataset.projectId || ''
+  if (!projectId) return
+  const email = dom.shareEmail.value.trim()
+  const role = dom.shareRole.value
+  state.share.loading = true
+  state.share.status = '正在邀请…'
+  renderShareDialog(projectId)
+  try {
+    const data = await postJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/members`, { email, role })
+    state.share.status = data.inviteUrl
+      ? `邀请已创建：${data.inviteUrl}`
+      : '成员已加入项目'
+    dom.shareEmail.value = ''
+    await loadProjectMembers(projectId)
+    state.projects.loadedSessionId = ''
+  } catch (error) {
+    state.share.status = trimError(error)
+  } finally {
+    state.share.loading = false
+    renderShareDialog(projectId)
+  }
+}
+
+async function updateProjectMemberRole(userId, role) {
+  const projectId = dom.shareDialog?.dataset.projectId || state.generate.projectId || ''
+  if (!projectId || !userId) return
+  state.share.loading = true
+  state.share.status = '正在更新权限…'
+  renderShareDialog(projectId)
+  try {
+    await putJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`, { role })
+    state.share.status = '成员权限已更新'
+    await loadProjectMembers(projectId)
+    state.projects.loadedSessionId = ''
+  } catch (error) {
+    state.share.status = trimError(error)
+  } finally {
+    state.share.loading = false
+    renderShareDialog(projectId)
+  }
+}
+
+async function removeProjectMemberFromProject(userId) {
+  const projectId = dom.shareDialog?.dataset.projectId || state.generate.projectId || ''
+  if (!projectId || !userId) return
+  state.share.loading = true
+  state.share.status = '正在移除成员…'
+  renderShareDialog(projectId)
+  try {
+    await deleteJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`)
+    state.share.status = '成员已移除'
+    await loadProjectMembers(projectId)
+    state.projects.loadedSessionId = ''
+  } catch (error) {
+    state.share.status = trimError(error)
+  } finally {
+    state.share.loading = false
+    renderShareDialog(projectId)
+  }
+}
+
+function renderShareDialog(projectId = state.generate.projectId) {
+  if (!dom.shareDialog) return
+  dom.shareDialog.dataset.projectId = projectId || ''
+  const canManage = state.share.role === 'owner'
+  dom.shareHint.textContent = state.account.user
+    ? canManage
+      ? '邀请成员查看或编辑当前画布项目。'
+      : '你可以查看当前项目成员，只有 owner 可以邀请或修改成员。'
+    : '请先登录后再共享项目。'
+  dom.shareEmail.disabled = !canManage || state.share.loading
+  dom.shareRole.disabled = !canManage || state.share.loading
+  dom.shareInvite.disabled = !canManage || state.share.loading
+  dom.shareStatus.textContent = state.share.status || ''
+  dom.shareStatus.classList.toggle('err', Boolean(state.share.status && /失败|错误|required|permission|access|登录|有效/.test(state.share.status)))
+  const rows = []
+  if (state.share.owner) {
+    rows.push(createShareMemberRow({
+      label: state.share.owner.name || state.share.owner.email,
+      sub: state.share.owner.email,
+      role: 'owner',
+      fixed: true,
+    }))
+  }
+  for (const member of state.share.members) {
+    rows.push(createShareMemberRow({
+      label: member.user?.name || member.user?.email || member.userId,
+      sub: member.user?.email || member.userId,
+      role: member.role,
+      fixed: !canManage,
+      userId: member.userId,
+    }))
+  }
+  for (const invite of state.share.invites) {
+    rows.push(createShareMemberRow({
+      label: invite.email,
+      sub: '待接受邀请',
+      role: invite.role,
+      fixed: true,
+    }))
+  }
+  if (!rows.length) {
+    const empty = document.createElement('div')
+    empty.className = 'share-empty'
+    empty.textContent = state.share.loading ? '正在读取成员…' : '还没有成员'
+    rows.push(empty)
+  }
+  dom.shareMembers.replaceChildren(...rows)
+}
+
+function createShareMemberRow({ label, sub, role, fixed, userId }) {
+  const row = document.createElement('div')
+  row.className = 'share-member-row'
+  const meta = document.createElement('div')
+  const strong = document.createElement('strong')
+  strong.textContent = label
+  const span = document.createElement('span')
+  span.textContent = sub
+  meta.append(strong, span)
+  const badge = document.createElement('span')
+  badge.className = `role-badge role-${role}`
+  badge.textContent = role
+  row.append(meta, badge)
+  if (fixed || !userId) {
+    row.classList.add('fixed')
+    return row
+  }
+
+  const actions = document.createElement('div')
+  actions.className = 'share-member-actions'
+  const roleSelect = document.createElement('select')
+  roleSelect.disabled = state.share.loading
+  for (const option of ['viewer', 'editor']) {
+    const item = document.createElement('option')
+    item.value = option
+    item.textContent = option
+    roleSelect.append(item)
+  }
+  roleSelect.value = role === 'editor' ? 'editor' : 'viewer'
+  roleSelect.addEventListener('change', () => {
+    void updateProjectMemberRole(userId, roleSelect.value)
+  })
+
+  const remove = document.createElement('button')
+  remove.type = 'button'
+  remove.className = 'ghost compact'
+  remove.disabled = state.share.loading
+  remove.textContent = '移除'
+  remove.addEventListener('click', () => {
+    void removeProjectMemberFromProject(userId)
+  })
+  actions.append(roleSelect, remove)
+  row.append(actions)
+  return row
+}
+
 async function loadCanvasProjects({ force = false } = {}) {
   if (!dom.pList) return
   const sessionId = state.runtime.sessionId || ''
-  if (!sessionId) {
+  if (!sessionId && !state.account.user) {
     state.projects.items = []
     state.projects.loading = false
     state.projects.loadedSessionId = ''
@@ -4405,7 +4942,8 @@ async function loadCanvasProjects({ force = false } = {}) {
     renderHome()
     return
   }
-  if (!force && state.projects.loadedSessionId === sessionId && state.projects.items.length) {
+  const loadKey = `${state.account.user?.id || sessionId || 'anon'}:${state.projects.filterShared ? 'shared' : 'all'}`
+  if (!force && state.projects.loadedSessionId === loadKey && state.projects.items.length) {
     renderProjects()
     renderHome()
     return
@@ -4417,11 +4955,13 @@ async function loadCanvasProjects({ force = false } = {}) {
   renderHome()
 
   try {
-    const data = await getJson(`/api/canvas/projects?sessionId=${encodeURIComponent(sessionId)}`)
+    const data = state.projects.filterShared && state.account.user
+      ? await getJson('/api/canvas/projects/shared')
+      : await getJson(`/api/canvas/projects?sessionId=${encodeURIComponent(sessionId)}`)
     const projects = Array.isArray(data.projects) ? data.projects : []
     const enriched = await Promise.all(projects.map(enrichCanvasProjectCard))
     state.projects.items = enriched.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
-    state.projects.loadedSessionId = sessionId
+    state.projects.loadedSessionId = loadKey
   } catch (error) {
     state.projects.error = trimError(error)
   } finally {
@@ -4440,7 +4980,7 @@ async function enrichCanvasProjectCard(project) {
     return {
       ...project,
       elementCount: visibleElements.length,
-      previewUrl: firstImage?.content || (firstImage?.assetId ? assetResultUrl(firstImage.assetId) : ''),
+      previewUrl: firstImage?.content || (firstImage?.assetId ? assetResultUrl(firstImage.assetId, project.id) : ''),
     }
   } catch {
     return {
@@ -4560,7 +5100,7 @@ async function hydrateCanvasElements(elements) {
     assetId: el.assetId,
     name: el.name,
     mime: el.mime || 'image/png',
-  })))
+  })), state.generate.projectId)
   const byAssetId = new Map(hydratedImages.map((item) => [item.assetId || item.id, item]))
 
   return elements.map((el) => {
@@ -4646,8 +5186,9 @@ async function restoreRuntimeState() {
   }
 }
 
-function assetResultUrl(assetId) {
-  return `/api/results/${encodeURIComponent(assetId)}`
+function assetResultUrl(assetId, projectId = '') {
+  const projectParam = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+  return `/api/results/${encodeURIComponent(assetId)}${projectParam}`
 }
 
 function formatBatchProgress(job) {
@@ -4974,6 +5515,18 @@ async function putJson(url, body) {
   return data
 }
 
+async function deleteJson(url) {
+  const response = await fetch(url, { method: 'DELETE' })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`)
+    error.status = response.status
+    error.payload = data
+    throw error
+  }
+  return data
+}
+
 async function fetchSseEvents(url) {
   const response = await fetch(url, {
     headers: {
@@ -5209,16 +5762,6 @@ function normalizeTheme(value) {
   return value === 'light' ? 'light' : 'dark'
 }
 
-function normalizeAspectRatio(value, fallback = '1:1') {
-  const ratio = String(value || '').trim()
-  return ['1:1', '4:3', '3:4', '16:9', '9:16'].includes(ratio) ? ratio : fallback
-}
-
-function normalizeCanvasResolution(value, fallback = '1k') {
-  const resolution = String(value || '').trim().toLowerCase()
-  return CANVAS_RESOLUTIONS.has(resolution) ? resolution : fallback
-}
-
 function applyTheme() {
   state.theme = normalizeTheme(state.theme)
   document.documentElement.dataset.theme = state.theme
@@ -5226,15 +5769,6 @@ function applyTheme() {
 
 function loadKeys() {
   return readJson(KEY_STORAGE, {})
-}
-
-function readJson(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key)
-    return raw ? JSON.parse(raw) : fallback
-  } catch {
-    return fallback
-  }
 }
 
 function getLanguage(code) {
@@ -5247,59 +5781,6 @@ function getModel(id) {
 
 function getGarmentRoleLabel(role) {
   return GARMENT_ROLE_OPTIONS.find((item) => item.value === role)?.label || role
-}
-
-function splitDataUrl(dataUrl) {
-  const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/)
-  if (!match) return null
-  return {
-    mime: match[1],
-    base64: match[2],
-  }
-}
-
-function normalizeView(view) {
-  return ['home', 'translate', 'generate', 'projects', 'outfit', 'style'].includes(view) ? view : 'home'
-}
-
-function basename(name = '') {
-  return String(name).replace(/\.[^.]+$/, '')
-}
-
-function formatTimestamp(ts) {
-  if (!ts) return ''
-  const d = new Date(ts)
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function formatRelativeTime(ts) {
-  if (!ts) return '刚刚编辑'
-  const time = new Date(ts).getTime()
-  if (!Number.isFinite(time)) return '刚刚编辑'
-  const diff = Date.now() - time
-  const minute = 60 * 1000
-  const hour = 60 * minute
-  const day = 24 * hour
-  if (diff < minute) return '刚刚编辑'
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前编辑`
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前编辑`
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前编辑`
-  return new Date(ts).toLocaleDateString('zh-CN')
-}
-
-function sanitizeFileName(name = '') {
-  return String(name).replace(/[\\/:*?"<>|]+/g, '-')
-}
-
-function ensureImageExtension(name = '', href = '') {
-  const normalized = String(name || 'image').trim() || 'image'
-  if (/\.(png|jpg|jpeg|webp|gif)$/i.test(normalized)) return normalized
-  const mime = splitDataUrl(href)?.mime || ''
-  if (/jpeg/i.test(mime)) return `${normalized}.jpg`
-  if (/webp/i.test(mime)) return `${normalized}.webp`
-  if (/gif/i.test(mime)) return `${normalized}.gif`
-  return `${normalized}.png`
 }
 
 function getCanvasImageSize(aspectRatio = '1:1', width, height) {
@@ -5323,22 +5804,6 @@ function getCanvasImageSize(aspectRatio = '1:1', width, height) {
     width: Math.round(clamp(nextWidth, 180, 420)),
     height: Math.round(clamp(nextHeight, 180, 420)),
   }
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function rectsIntersect(a, b) {
-  return a.x1 <= b.x2 && a.x2 >= b.x1 && a.y1 <= b.y2 && a.y2 >= b.y1
-}
-
-function unique(values) {
-  return [...new Set(values)]
-}
-
-function trimError(error) {
-  return String(error?.message || error || 'Unknown error').trim().slice(0, 1600)
 }
 
 function pairKey(modelId, garmentId) {
@@ -5566,8 +6031,4 @@ function restoreOutfitResults(store) {
       }
     }
   }
-}
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }

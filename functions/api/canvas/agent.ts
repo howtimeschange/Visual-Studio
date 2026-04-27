@@ -2,6 +2,7 @@ import {
   Env, DEFAULT_BASE, VISION_MODEL,
   json, corsPreflight, resolveKeys, callTextModel,
 } from '../../_shared'
+import { getAuthContext } from '../../_lib/auth'
 import { ensureSession } from '../../_lib/v2-store'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
@@ -14,7 +15,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: 'Invalid JSON' }, 400)
   }
 
-  const session = await ensureSession(env, body?.sessionId)
+  const auth = await getAuthContext(env, request)
+  const session = await ensureSession(env, body?.sessionId, auth.user?.id || null)
   const message = String(body?.message || '').trim()
   if (!message) return json({ error: 'message required' }, 400)
 

@@ -1,3 +1,5 @@
+/lovart/auth / 200
+/lovart/auth/* / 200
 /lovart/canvas / 200
 /lovart/canvas/* / 200
 /lovart/projects / 200

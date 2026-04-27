@@ -5,7 +5,18 @@ import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
 } from '../_shared'
-import { ensureSession, getAssetDataUrl } from '../_lib/v2-store'
+import {
+  createAsset,
+  createJob,
+  createJobItems,
+  createUsageEvent,
+  ensureSession,
+  getAssetDataUrl,
+  updateJob,
+  updateJobItem,
+} from '../_lib/v2-store'
+import { publishEvent } from '../_lib/v2-events'
+import { getAuthContext } from '../_lib/auth'
 
 type RefRole = 'character' | 'subject' | 'style' | 'scene' | 'other'
 
@@ -26,14 +37,16 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   try {
-    return json(await handleDirectGenerate(env, body))
+    const auth = await getAuthContext(env, request)
+    return json(await handleDirectGenerate(env, { ...body, _authUserId: auth.user?.id || null }))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Generate failed') }, error?.status || 502)
   }
 }
 
 async function handleDirectGenerate(env: Env, body: any) {
-  const session = await ensureSession(env, body?.sessionId)
+  const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
+  const session = await ensureSession(env, body?.sessionId, userId)
   const modelId = String(body?.modelId || 'nano-banana-2')
   const prompt = String(body?.prompt || '').trim()
   const aspectRatio = normalizeAspectRatio(body?.aspectRatio)
@@ -46,57 +59,142 @@ async function handleDirectGenerate(env: Env, body: any) {
   if (!prompt) throw createError('prompt required', 400)
   if (!MODEL_MAP[modelId]) throw createError(`Unknown modelId: ${modelId}`, 400)
 
+  const job = await createJob(env, {
+    sessionId: session.id,
+    userId,
+    type: 'generate_batch',
+    status: 'running',
+    configJson: {
+      modelId,
+      prompt,
+      aspectRatio,
+      resolution,
+      useDesignAgent,
+      referenceAssetIds: referenceEntries.map((entry) => entry.assetId),
+    },
+    summaryJson: {},
+    progressTotal: 1,
+    progressDone: 0,
+    progressFailed: 0,
+  })
+  const [item] = await createJobItems(env, job.id, [{
+    jobId: job.id,
+    itemType: 'generate_batch_item',
+    status: 'running',
+    inputJson: { prompt, aspectRatio, resolution, modelId },
+    outputJson: {},
+    attemptCount: 1,
+    errorCode: null,
+    errorMessage: null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  }])
+  await publishEvent(env, 'job', job.id, 'status', { status: 'running', type: job.type })
+
   const clientKeys = body?.clientKeys || {}
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const { visionKey, genKey } = resolveKeys(modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
-  if (!genKey) throw createError(`Missing API key for ${modelId}`, 400)
 
-  // Load reference images
-  const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
-  for (const entry of referenceEntries) {
-    const dataUrl = await getAssetDataUrl(env, String(entry.assetId))
-    if (!dataUrl) continue
-    const { base64, mime } = splitDataUrl(dataUrl)
-    if (!base64) continue
-    refImages.push({
-      base64,
-      mime,
-      role: entry.role || 'other',
-      label: entry.label || '',
+  try {
+    if (!genKey) throw createError(`Missing API key for ${modelId}`, 400)
+
+    // Load reference images
+    const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
+    for (const entry of referenceEntries) {
+      const dataUrl = await getAssetDataUrl(env, String(entry.assetId))
+      if (!dataUrl) continue
+      const { base64, mime } = splitDataUrl(dataUrl)
+      if (!base64) continue
+      refImages.push({
+        base64,
+        mime,
+        role: entry.role || 'other',
+        label: entry.label || '',
+      })
+    }
+
+    let finalPrompt = prompt
+
+    if (useDesignAgent && visionKey) {
+      // Design Agent mode: use vision model to refine prompt, but still pass images directly
+      const refined = await refineWithDesignAgent(baseUrl, visionKey, prompt, refImages, aspectRatio, resolution)
+      if (refined) finalPrompt = refined
+    }
+
+    // Build the final prompt with role annotations
+    const fullPrompt = buildDirectPrompt(finalPrompt, refImages, aspectRatio, resolution)
+
+    // Pass all reference images directly to the image model
+    const images = refImages.map((img) => ({ base64: img.base64, mime: img.mime }))
+
+    const result = await callImageModel(
+      baseUrl,
+      genKey,
+      MODEL_MAP[modelId],
+      images,
+      fullPrompt,
+      imageModelOptions,
+    )
+
+    if (!result.ok) throw createError(result.error, result.status)
+
+    const resultAsset = await createAsset(env, {
+      sessionId: session.id,
+      userId,
+      kind: 'result',
+      source: 'generate_direct',
+      dataUrl: result.dataUrl,
+      filename: `${job.id}.png`,
+      bucketKind: 'result',
     })
-  }
 
-  let finalPrompt = prompt
+    await updateJobItem(env, job.id, item.id, {
+      status: 'completed',
+      outputJson: { resultAssetId: resultAsset.id },
+      finishedAt: new Date().toISOString(),
+    })
+    await updateJob(env, job.id, {
+      status: 'completed',
+      progressDone: 1,
+      summaryJson: { resultAssetId: resultAsset.id },
+    })
+    await publishEvent(env, 'job', job.id, 'job_completed', { status: 'completed', resultAssetId: resultAsset.id })
+    await createUsageEvent(env, {
+      userId,
+      sessionId: session.id,
+      jobId: job.id,
+      eventType: 'generate_direct_result',
+      amount: 1,
+      provider: '1xm.ai',
+      modelId,
+    })
 
-  if (useDesignAgent && visionKey) {
-    // Design Agent mode: use vision model to refine prompt, but still pass images directly
-    const refined = await refineWithDesignAgent(baseUrl, visionKey, prompt, refImages, aspectRatio, resolution)
-    if (refined) finalPrompt = refined
-  }
-
-  // Build the final prompt with role annotations
-  const fullPrompt = buildDirectPrompt(finalPrompt, refImages, aspectRatio, resolution)
-
-  // Pass all reference images directly to the image model
-  const images = refImages.map((img) => ({ base64: img.base64, mime: img.mime }))
-
-  const result = await callImageModel(
-    baseUrl,
-    genKey,
-    MODEL_MAP[modelId],
-    images,
-    fullPrompt,
-    imageModelOptions,
-  )
-
-  if (!result.ok) throw createError(result.error, result.status)
-
-  return {
-    sessionId: session.id,
-    resultDataUrl: result.dataUrl,
-    aspectRatio,
-    resolution,
+    return {
+      sessionId: session.id,
+      jobId: job.id,
+      resultAsset,
+      resultDataUrl: result.dataUrl,
+      aspectRatio,
+      resolution,
+    }
+  } catch (error: any) {
+    await updateJobItem(env, job.id, item.id, {
+      status: 'failed',
+      errorCode: 'generate_direct_failed',
+      errorMessage: String(error?.message || 'Generate failed'),
+      finishedAt: new Date().toISOString(),
+    })
+    await updateJob(env, job.id, {
+      status: 'failed',
+      progressFailed: 1,
+      summaryJson: { error: String(error?.message || 'Generate failed') },
+    })
+    await publishEvent(env, 'job', job.id, 'job_completed', {
+      status: 'failed',
+      error: String(error?.message || 'Generate failed'),
+    })
+    throw error
   }
 }
 
