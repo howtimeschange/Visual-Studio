@@ -106,7 +106,7 @@ let runtimeStateReady = false
 const state = {
   activeView: 'home',
   openDropdown: null,
-  theme: 'dark',
+  theme: 'light',
   keys: {},
   runtime: {
     sessionId: '',
@@ -6532,7 +6532,7 @@ function getSelectedSettingsTheme() {
 }
 
 function normalizeTheme(value) {
-  return value === 'light' ? 'light' : 'dark'
+  return value === 'dark' ? 'dark' : 'light'
 }
 
 function applyTheme() {
