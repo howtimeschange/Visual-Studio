@@ -343,9 +343,9 @@
         <div class="ai-sidebar-messages" id="g-ai-messages"></div>
         <div class="ai-sidebar-bottom">
           <div class="ai-sidebar-refs" id="g-ai-ref-list"></div>
-          <div class="ai-sidebar-controls">
-            <select id="g-ai-model" class="input ai-sidebar-select"></select>
-            <select id="g-ai-ratio" class="input ai-sidebar-select">
+          <div class="ai-sidebar-controls" aria-describedby="g-ai-controls-help">
+            <select id="g-ai-model" class="input ai-sidebar-select" aria-label="图像模型"></select>
+            <select id="g-ai-ratio" class="input ai-sidebar-select" aria-label="画幅比例">
               <option value="1:1">1:1</option>
               <option value="4:3">4:3</option>
               <option value="3:4">3:4</option>
@@ -357,9 +357,10 @@
               <option value="2k">2k</option>
               <option value="4k">4k</option>
             </select>
-            <button type="button" id="g-ai-upload" class="ai-sidebar-upload-btn" title="上传参考图">&#x1F5BC; 参考图</button>
+            <button type="button" id="g-ai-upload" class="input ai-sidebar-upload-btn" title="上传参考图">参考图</button>
             <input type="file" id="g-ai-file-input" accept="image/*" multiple hidden />
           </div>
+          <p class="ai-sidebar-help" id="g-ai-controls-help">模型 / 比例 / 清晰度控制出图；参考图用于本轮生成。</p>
           <div class="ai-sidebar-input">
             <textarea id="g-input" placeholder="描述你想要的画面，AI 会生成并放到画布上…" rows="2"></textarea>
             <button id="g-send" class="primary ai-sidebar-send">发送</button>
