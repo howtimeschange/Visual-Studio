@@ -1,7 +1,7 @@
 import { Env, json, corsPreflight } from '../../../_shared'
 import { getAuthContext } from '../../../_lib/auth'
 import { assertCanEditProject, assertCanReadProject } from '../../../_lib/permissions'
-import { updateCanvasProject } from '../../../_lib/v2-store'
+import { deleteCanvasProject, updateCanvasProject } from '../../../_lib/v2-store'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
@@ -34,5 +34,25 @@ export const onRequestPut: PagesFunction<Env> = async ({ request, env, params })
     return json({ project })
   } catch (error: any) {
     return json({ error: String(error?.message || 'Update project failed') }, error?.status || 502)
+  }
+}
+
+export const onRequestDelete: PagesFunction<Env> = async ({ request, env, params }) => {
+  try {
+    const projectId = String(params?.id || '')
+    const sessionId = new URL(request.url).searchParams.get('sessionId') || ''
+    const auth = await getAuthContext(env, request)
+    const access = await assertCanEditProject(env, projectId, auth.user?.id || null)
+    if (access.project?.ownerUserId && access.role !== 'owner') {
+      return json({ error: 'Owner permission required' }, 403)
+    }
+    if (!access.project?.ownerUserId && access.project?.sessionId !== sessionId) {
+      return json({ error: 'No access to this project' }, 403)
+    }
+    const deleted = await deleteCanvasProject(env, projectId)
+    if (!deleted) return json({ error: 'Canvas project not found' }, 404)
+    return json({ ok: true })
+  } catch (error: any) {
+    return json({ error: String(error?.message || 'Delete project failed') }, error?.status || 502)
   }
 }

@@ -1173,6 +1173,35 @@ export async function updateCanvasProject(envOrProjectId: any, projectIdOrPatch:
   return next
 }
 
+export async function deleteCanvasProject(envOrProjectId: any, maybeProjectId?: string): Promise<boolean> {
+  const { env, id } = resolveEnvAndId(envOrProjectId, maybeProjectId)
+  const project = await getCanvasProject(env, id)
+  if (!project) return false
+
+  const db = dbFor(env)
+  if (db) {
+    await db.batch([
+      db.prepare('DELETE FROM canvas_project_elements WHERE project_id = ?').bind(id),
+      db.prepare('DELETE FROM project_members WHERE project_id = ?').bind(id),
+      db.prepare('DELETE FROM project_invites WHERE project_id = ?').bind(id),
+      db.prepare('DELETE FROM canvas_projects WHERE id = ?').bind(id),
+    ])
+  } else {
+    memoryState.canvasProjectElements.delete(id)
+    for (const [key, member] of [...memoryState.projectMembers.entries()]) {
+      if (member.projectId === id) memoryState.projectMembers.delete(key)
+    }
+    for (const [inviteId, invite] of [...memoryState.projectInvites.entries()]) {
+      if (invite.projectId !== id) continue
+      memoryState.projectInvites.delete(inviteId)
+      memoryState.projectInvitesByToken.delete(invite.token)
+    }
+    memoryState.canvasProjects.delete(id)
+  }
+
+  return true
+}
+
 export async function listCanvasProjectElements(envOrProjectId: any, maybeProjectId?: string): Promise<CanvasProjectElementRecord[]> {
   const { env, id } = resolveEnvAndId(envOrProjectId, maybeProjectId)
   const db = dbFor(env)

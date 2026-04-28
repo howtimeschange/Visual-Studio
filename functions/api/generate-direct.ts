@@ -232,6 +232,8 @@ function buildDirectPrompt(
     '3:4': 'portrait (3:4)',
     '16:9': 'widescreen (16:9)',
     '9:16': 'tall/vertical (9:16)',
+    '1:4': 'extra tall vertical strip (1:4)',
+    '1:8': 'ultra tall vertical strip (1:8)',
   } as Record<string, string>)[aspectRatio]
   if (ratioHint) {
     parts.push(`Aspect ratio: ${ratioHint}`)
@@ -290,7 +292,7 @@ The references will be passed directly as images — you only need to describe t
 
 function normalizeAspectRatio(value: unknown): string {
   const ratio = String(value || '').trim()
-  return ['1:1', '4:3', '3:4', '16:9', '9:16'].includes(ratio) ? ratio : '1:1'
+  return ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(ratio) ? ratio : '1:1'
 }
 
 function normalizeResolution(value: unknown): string {

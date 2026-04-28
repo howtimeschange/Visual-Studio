@@ -64,6 +64,11 @@ const REFERENCE_ROLES = [
   { value: 'other', label: '其他参考' },
 ]
 
+const AI_STREAM_CHUNK_SIZE = 2
+const AI_STREAM_DELAY_MS = 16
+const AI_STREAM_PUNCTUATION_DELAY_MS = 80
+const AI_HISTORY_LIMIT = 40
+const AI_HISTORY_INLINE_DATA_URL_LIMIT = 220_000
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 
@@ -72,6 +77,8 @@ const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
 const LEGACY_TRANSLATE_PREF_STORAGE = 'img-translator:prefs:v1'
 const RUNTIME_STORAGE = 'img-translator:runtime:v2'
 const RESULTS_STORAGE = 'img-translator:results:v1'
+const AUTH_RETURN_STORAGE = 'img-translator:auth-return:v1'
+const CANVAS_AI_HISTORY_STORAGE = 'img-translator:canvas-ai-history:v1'
 const CANVAS_GUIDE_STORAGE = 'img-translator:canvas-guide:v1'
 const CANVAS_AI_FIRST_OPEN_STORAGE = 'img-translator:canvas-ai-opened:v1'
 const DEFAULT_CANVAS_PROJECT_TITLE = '未命名画布'
@@ -172,6 +179,9 @@ const state = {
     loadedSessionId: '',
     error: '',
     filterShared: false,
+    deleting: false,
+    deleteTargetId: '',
+    deleteStatus: '',
   },
   account: {
     user: null,
@@ -333,6 +343,12 @@ const dom = {
   shareInvite: $('#share-invite'),
   shareStatus: $('#share-status'),
   shareMembers: $('#share-members'),
+  projectDeleteDialog: $('#project-delete-dialog'),
+  projectDeleteForm: $('#project-delete-form'),
+  projectDeleteTitle: $('#project-delete-title'),
+  projectDeleteMeta: $('#project-delete-meta'),
+  projectDeleteConfirm: $('#project-delete-confirm'),
+  projectDeleteStatus: $('#project-delete-status'),
   oModel: $('#o-model'),
   oGarmentType: $('#o-garment-type'),
   oConcurrency: $('#o-concurrency'),
@@ -388,6 +404,11 @@ const dom = {
   lightboxCaption: $('#lightbox-caption'),
   lightboxDownload: $('#lightbox-download'),
   lightboxClose: $('#lightbox-close'),
+  promptDialog: $('#prompt-dialog'),
+  promptForm: $('#prompt-form'),
+  promptContent: $('#prompt-content'),
+  promptCopy: $('#prompt-copy'),
+  promptCopyStatus: $('#prompt-copy-status'),
 }
 
 init()
@@ -406,6 +427,7 @@ function init() {
   bindSettings()
   bindAccount()
   bindLightbox()
+  bindPromptDialog()
   bindHome()
   bindTranslate()
   bindProjects()
@@ -434,6 +456,60 @@ function canvasProjectIdFromLocation() {
   return new URLSearchParams(window.location.search).get('id') || ''
 }
 
+function currentRoutePath() {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`
+}
+
+function sanitizeAuthReturnPath(value) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  let url
+  try {
+    url = new URL(value, window.location.origin)
+  } catch {
+    return ''
+  }
+  if (url.origin !== window.location.origin) return ''
+  const path = `${url.pathname}${url.search}${url.hash}`
+  if (!path.startsWith('/') || path.startsWith('//')) return ''
+  if (url.pathname.replace(/\/+$/, '') === '/lovart/auth') return ''
+  return path || '/'
+}
+
+function getAuthReturnTarget() {
+  const params = new URLSearchParams(window.location.search)
+  const queryTarget = sanitizeAuthReturnPath(params.get('returnTo') || '')
+  if (queryTarget) return queryTarget
+  if (window.location.pathname.replace(/\/+$/, '') === '/lovart/auth') return '/'
+  return sanitizeAuthReturnPath(sessionStorage.getItem(AUTH_RETURN_STORAGE) || '') || '/'
+}
+
+function setAuthReturnTarget(value) {
+  const target = sanitizeAuthReturnPath(value)
+  if (!target) return ''
+  sessionStorage.setItem(AUTH_RETURN_STORAGE, target)
+  return target
+}
+
+function clearAuthReturnTarget() {
+  sessionStorage.removeItem(AUTH_RETURN_STORAGE)
+}
+
+function showAuthView({ returnTo = currentRoutePath(), invite = '', replace = false } = {}) {
+  const target = setAuthReturnTarget(returnTo) || '/'
+  const params = new URLSearchParams()
+  if (invite) params.set('invite', invite)
+  if (target) params.set('returnTo', target)
+  const path = `/lovart/auth${params.toString() ? `?${params.toString()}` : ''}`
+  window.history[replace ? 'replaceState' : 'pushState']({}, '', path)
+  setActiveView('auth', { updateRoute: false })
+}
+
+function redirectAfterAuth() {
+  const target = getAuthReturnTarget()
+  clearAuthReturnTarget()
+  window.location.assign(target || '/')
+}
+
 function hydrateStoredState() {
   state.keys = loadKeys()
   const runtime = sanitizeRuntimeState(loadRuntimeState())
@@ -441,6 +517,7 @@ function hydrateStoredState() {
   state.translate.jobId = runtime.translate.jobId
   state.translate.items = runtime.translate.items
   state.generate.elements = runtime.generate.elements || []
+  state.generate.aiMessages = runtime.generate.aiMessages?.length ? runtime.generate.aiMessages : loadAiHistory()
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0
@@ -551,6 +628,7 @@ function saveRuntimeState(options = {}) {
       projectId: state.generate.projectId || '',
       projectTitle: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
       elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
+      aiMessages: state.generate.aiMessages.slice(-AI_HISTORY_LIMIT).map((msg) => serializeAiMessage(msg)).filter(Boolean),
       scale: state.generate.scale,
       panX: state.generate.panX,
       panY: state.generate.panY,
@@ -575,11 +653,22 @@ function saveRuntimeState(options = {}) {
       })),
     },
   }))
+  saveAiHistory()
   if (persistCanvas) scheduleCanvasProjectSave()
 }
 
 function loadRuntimeState() {
   return readJson(RUNTIME_STORAGE, {})
+}
+
+function loadAiHistory() {
+  return sanitizeAiMessages(readJson(CANVAS_AI_HISTORY_STORAGE, []))
+}
+
+function saveAiHistory() {
+  const messages = state.generate.aiMessages.slice(-AI_HISTORY_LIMIT).map((msg) => serializeAiMessage(msg)).filter(Boolean)
+  if (!messages.length) return
+  localStorage.setItem(CANVAS_AI_HISTORY_STORAGE, JSON.stringify(messages))
 }
 
 function sanitizeRuntimeState(raw = {}) {
@@ -614,6 +703,7 @@ function sanitizeRuntimeState(raw = {}) {
         ? raw.generate.projectTitle.trim()
         : DEFAULT_CANVAS_PROJECT_TITLE,
       elements: generateElements,
+      aiMessages: sanitizeAiMessages(raw.generate?.aiMessages),
       scale: Number(raw.generate?.scale) || 1,
       panX: Number(raw.generate?.panX) || 0,
       panY: Number(raw.generate?.panY) || 0,
@@ -719,6 +809,87 @@ function serializeCanvasElement(el) {
     linkedElements: Array.isArray(el.linkedElements) ? unique(el.linkedElements.map(String).filter(Boolean)) : [],
     connectorStyle: el.connectorStyle || 'bezier',
   }
+}
+
+function serializeAiMessage(msg = {}) {
+  const role = msg.role === 'user' || msg.role === 'assistant' ? msg.role : ''
+  if (!role) return null
+  return {
+    id: msg.id || crypto.randomUUID(),
+    role,
+    content: typeof msg.content === 'string' && msg.content
+      ? msg.content
+      : (msg.loading ? `${msg.loadingText || 'AI 正在处理'}…` : ''),
+    steps: Array.isArray(msg.steps) ? msg.steps.map(String).filter(Boolean).slice(0, 8) : [],
+    refs: Array.isArray(msg.refs) ? msg.refs.map(serializeAiMessageRef).filter(Boolean).slice(0, 12) : [],
+    imageAssetId: typeof msg.imageAssetId === 'string' ? msg.imageAssetId : '',
+    imageName: typeof msg.imageName === 'string' ? msg.imageName : '',
+    imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
+    imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
+    aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+  }
+}
+
+function serializeAiMessageRef(ref = {}) {
+  const assetId = typeof ref.assetId === 'string' ? ref.assetId : ''
+  const dataUrl = shouldInlineHistoryDataUrl(ref.dataUrl) ? ref.dataUrl : ''
+  if (!assetId && !dataUrl) return null
+  return {
+    assetId,
+    dataUrl,
+    name: typeof ref.name === 'string' ? ref.name : '',
+    mime: typeof ref.mime === 'string' ? ref.mime : '',
+  }
+}
+
+function sanitizeAiMessages(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((msg) => {
+      const role = msg?.role === 'user' || msg?.role === 'assistant' ? msg.role : ''
+      if (!role) return null
+      return {
+        id: typeof msg.id === 'string' ? msg.id : crypto.randomUUID(),
+        role,
+        content: typeof msg.content === 'string' ? msg.content : '',
+        steps: Array.isArray(msg.steps) ? msg.steps.map(String).filter(Boolean).slice(0, 8) : [],
+        refs: sanitizeAiMessageRefs(msg.refs),
+        imageAssetId: typeof msg.imageAssetId === 'string' ? msg.imageAssetId : '',
+        imageName: typeof msg.imageName === 'string' ? msg.imageName : '',
+        imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
+        imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
+        aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+        loading: false,
+        loadingText: '',
+        streaming: false,
+      }
+    })
+    .filter(Boolean)
+    .slice(-AI_HISTORY_LIMIT)
+}
+
+function sanitizeAiMessageRefs(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((ref) => {
+      const assetId = typeof ref?.assetId === 'string' ? ref.assetId : ''
+      const dataUrl = shouldInlineHistoryDataUrl(ref?.dataUrl) ? ref.dataUrl : ''
+      if (!assetId && !dataUrl) return null
+      return {
+        assetId,
+        dataUrl,
+        name: typeof ref?.name === 'string' ? ref.name : '',
+        mime: typeof ref?.mime === 'string' ? ref.mime : '',
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 12)
+}
+
+function shouldInlineHistoryDataUrl(value) {
+  return typeof value === 'string'
+    && value.startsWith('data:image/')
+    && value.length <= AI_HISTORY_INLINE_DATA_URL_LIMIT
 }
 
 function sanitizeCanvasPath(value) {
@@ -861,7 +1032,7 @@ function bindSettings() {
 
 function bindAccount() {
   const openAccountPage = () => {
-    setActiveView('auth')
+    showAuthView()
     renderAccount()
     if (!state.account.user) {
       requestAnimationFrame(() => dom.accountEmailInput?.focus())
@@ -886,7 +1057,7 @@ function bindAccount() {
   })
 }
 
-async function loadAccount() {
+async function loadAccount({ handleInvite = true } = {}) {
   try {
     const data = await getJson('/api/auth/me')
     state.account.user = data.user || null
@@ -896,19 +1067,22 @@ async function loadAccount() {
     state.account.error = trimError(error)
   } finally {
     renderAccount()
-    void handlePendingInvite()
+    if (handleInvite) void handlePendingInvite()
   }
 }
 
 async function handlePendingInvite() {
   const token = new URLSearchParams(window.location.search).get('invite') || ''
-  if (!token) return
+  if (!token) return false
   if (!state.account.user) {
     state.account.status = '请先登录或注册后接受项目邀请'
     renderAccount()
-    setActiveView('auth')
-    window.history.replaceState({}, '', `/lovart/auth?invite=${encodeURIComponent(token)}`)
-    return
+    showAuthView({
+      returnTo: '/lovart/projects',
+      invite: token,
+      replace: true,
+    })
+    return true
   }
   try {
     const data = await postJson(`/api/canvas/invites/${encodeURIComponent(token)}/accept`, {})
@@ -917,11 +1091,13 @@ async function handlePendingInvite() {
     await loadCanvasProjects({ force: true })
     window.history.replaceState({}, '', '/lovart/projects')
     if (data.projectId) void openCanvasProject(data.projectId)
+    clearAuthReturnTarget()
   } catch (error) {
     state.account.error = trimError(error)
     renderAccount()
-    setActiveView('auth')
+    showAuthView({ invite: token, replace: true })
   }
+  return true
 }
 
 async function submitAccountAuth(mode) {
@@ -942,9 +1118,11 @@ async function submitAccountAuth(mode) {
     state.account.user = data.user || null
     state.account.status = state.account.user ? '已登录' : ''
     dom.accountPasswordInput.value = ''
-    await loadAccount()
+    await loadAccount({ handleInvite: false })
     state.projects.loadedSessionId = ''
     void loadCanvasProjects({ force: true })
+    const handledInvite = await handlePendingInvite()
+    if (!handledInvite) redirectAfterAuth()
   } catch (error) {
     state.account.error = trimError(error)
   } finally {
@@ -1054,8 +1232,7 @@ function bindHome() {
       void startNewCanvasProject()
       return
     }
-    const card = event.target.closest('[data-project-id]')
-    if (card) void openCanvasProject(card.dataset.projectId)
+    handleProjectCardCollectionClick(event)
   })
 }
 
@@ -1076,17 +1253,43 @@ function bindProjects() {
     renderProjects()
   })
   dom.pList?.addEventListener('click', (event) => {
-    const share = event.target.closest('[data-project-share]')
-    if (share) {
-      event.preventDefault()
-      event.stopPropagation()
-      void openShareDialog(share.dataset.projectShare)
-      return
-    }
-    const card = event.target.closest('[data-project-id]')
-    if (!card) return
-    void openCanvasProject(card.dataset.projectId)
+    handleProjectCardCollectionClick(event)
   })
+
+  dom.projectDeleteConfirm?.addEventListener('click', () => {
+    void deleteCanvasProjectFromDialog()
+  })
+  dom.projectDeleteDialog?.addEventListener('close', () => {
+    if (state.projects.deleting) return
+    state.projects.deleteTargetId = ''
+    state.projects.deleteStatus = ''
+  })
+}
+
+function handleProjectCardCollectionClick(event) {
+  const target = event.target instanceof Element ? event.target : null
+  if (!target) return false
+
+  const del = target.closest('[data-project-delete]')
+  if (del) {
+    event.preventDefault()
+    event.stopPropagation()
+    openProjectDeleteDialog(del.dataset.projectDelete)
+    return true
+  }
+
+  const share = target.closest('[data-project-share]')
+  if (share) {
+    event.preventDefault()
+    event.stopPropagation()
+    void openShareDialog(share.dataset.projectShare)
+    return true
+  }
+
+  const card = target.closest('[data-project-id]')
+  if (!card) return false
+  void openCanvasProject(card.dataset.projectId)
+  return true
 }
 
 function bindShare() {
@@ -1683,6 +1886,19 @@ function showContextMenu(e, elementId) {
     genFrom.addEventListener('click', () => { connectFlow(elementId); hideContextMenu() })
     menu.append(genFrom)
 
+    const prompt = getCanvasElementPrompt(el)
+    if (prompt) {
+      const viewPrompt = document.createElement('button')
+      viewPrompt.type = 'button'
+      viewPrompt.className = 'context-menu-item'
+      viewPrompt.textContent = '查看prompt'
+      viewPrompt.addEventListener('click', () => {
+        openPromptDialog(prompt)
+        hideContextMenu()
+      })
+      menu.append(viewPrompt)
+    }
+
     const download = document.createElement('button')
     download.type = 'button'
     download.className = 'context-menu-item'
@@ -1740,8 +1956,30 @@ function addImageToCanvas(dataUrl, name, x, y, meta = {}) {
     assetId: meta.assetId || '',
     aspectRatio: normalizeAspectRatio(meta.aspectRatio || ''),
     resolution: normalizeCanvasResolution(meta.resolution || ''),
+    generatingPrompt: typeof meta.prompt === 'string' ? meta.prompt : '',
   }
   state.generate.elements.push(el)
+  state.generate.selectedIds = [el.id]
+  return el
+}
+
+function replaceCanvasElementWithImage(el, dataUrl, name, meta = {}) {
+  if (!el) return null
+  const size = getCanvasImageSize(meta.aspectRatio, meta.width, meta.height)
+  el.type = 'image'
+  el.content = dataUrl
+  el.name = name || el.name || 'image'
+  el.mime = meta.mime || splitDataUrl(dataUrl)?.mime || 'image/png'
+  el.assetId = meta.assetId || ''
+  el.aspectRatio = normalizeAspectRatio(meta.aspectRatio || '')
+  el.resolution = normalizeCanvasResolution(meta.resolution || '')
+  el.generatingPrompt = typeof meta.prompt === 'string' && meta.prompt.trim()
+    ? meta.prompt
+    : (el.generatingPrompt || '')
+  el.generatingStatus = ''
+  el.generatingError = ''
+  el.width = size.width
+  el.height = size.height
   state.generate.selectedIds = [el.id]
   return el
 }
@@ -1811,6 +2049,31 @@ function addGeneratorToCanvas(x, y, refImageId) {
   state.generate.elements.push(el)
   state.generate.selectedIds = [el.id]
   showGenPanel(el.id)
+  return el
+}
+
+function addGeneratingPlaceholderToCanvas({ prompt = '', aspectRatio = state.generate.genRatio, resolution = state.generate.genResolution } = {}) {
+  markCanvasGuideSeen()
+  const size = getCanvasImageSize(aspectRatio)
+  const cx = (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - size.width / 2
+  const cy = (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - size.height / 2
+  const el = {
+    id: crypto.randomUUID(),
+    type: 'image-generator',
+    x: cx,
+    y: cy,
+    width: size.width,
+    height: size.height,
+    content: '',
+    referenceImageId: null,
+    generatingPrompt: prompt,
+    generatingStatus: '正在调用图像模型生成图片…',
+    generatingError: '',
+    aspectRatio: normalizeAspectRatio(aspectRatio),
+    resolution: normalizeCanvasResolution(resolution),
+  }
+  state.generate.elements.push(el)
+  state.generate.selectedIds = [el.id]
   return el
 }
 
@@ -2003,10 +2266,21 @@ function updateCanvasGeneratorNode(node, el) {
   placeholder.classList.toggle('error', hasError)
   placeholder.replaceChildren()
 
-  const icon = document.createElement('span')
-  icon.className = isLoading ? 'spinner canvas-gen-spinner' : 'canvas-gen-icon'
-  if (!isLoading) icon.textContent = hasError ? '!' : '\u2726'
-  placeholder.append(icon)
+  if (isLoading) {
+    const skeleton = document.createElement('div')
+    skeleton.className = 'canvas-gen-skeleton'
+    for (const className of ['hero', 'line', 'short']) {
+      const bar = document.createElement('span')
+      bar.className = className
+      skeleton.append(bar)
+    }
+    placeholder.append(skeleton)
+  } else {
+    const icon = document.createElement('span')
+    icon.className = 'canvas-gen-icon'
+    icon.textContent = hasError ? '!' : '\u2726'
+    placeholder.append(icon)
+  }
 
   const label = document.createElement('span')
   label.className = 'canvas-gen-label'
@@ -2076,6 +2350,20 @@ function createCanvasElementActions(el) {
   size.textContent = `${Math.round(el.width)} × ${Math.round(el.height)}`
   actions.append(size)
 
+  const prompt = getCanvasElementPrompt(el)
+  if (prompt) {
+    const viewPrompt = document.createElement('button')
+    viewPrompt.type = 'button'
+    viewPrompt.className = 'canvas-el-action'
+    viewPrompt.textContent = '查看prompt'
+    viewPrompt.addEventListener('mousedown', (event) => event.stopPropagation())
+    viewPrompt.addEventListener('click', (event) => {
+      event.stopPropagation()
+      openPromptDialog(prompt)
+    })
+    actions.append(viewPrompt)
+  }
+
   const flow = document.createElement('button')
   flow.type = 'button'
   flow.className = 'canvas-el-action'
@@ -2114,6 +2402,19 @@ function createCanvasElementActions(el) {
   actions.append(remove)
 
   return actions
+}
+
+function getCanvasElementPrompt(el) {
+  return String(el?.generatingPrompt || el?.prompt || '').trim()
+}
+
+function openPromptDialog(prompt) {
+  const value = String(prompt || '').trim()
+  if (!value || !dom.promptDialog || !dom.promptContent) return
+  dom.promptContent.value = value
+  if (dom.promptCopyStatus) dom.promptCopyStatus.textContent = ''
+  dom.promptDialog.showModal()
+  requestAnimationFrame(() => dom.promptContent.focus())
 }
 
 function getLinkedCanvasElementIds() {
@@ -2526,15 +2827,33 @@ async function executeCanvasGenerate() {
       }
     }
 
+    let finalPrompt = prompt
+    if (state.generate.genUseAgent) {
+      setCanvasGenerateStatus(el, '正在整理画面提示词…')
+      const agentData = await postJson('/api/canvas/agent', {
+        sessionId: state.runtime.sessionId || undefined,
+        message: prompt,
+        history: [],
+        canvasContext: getCanvasAgentContext(),
+        modelId: state.generate.genModel,
+        aspectRatio: state.generate.genRatio,
+        resolution: state.generate.genResolution,
+        hasReferenceImages: refImages.length > 0,
+        clientKeys: { ...state.keys },
+      })
+      state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
+      finalPrompt = String(agentData.prompt || '').trim() || prompt
+    }
+
     setCanvasGenerateStatus(el, '正在调用图像模型生成图片…')
     const data = await postJson('/api/generate-direct', {
       sessionId: state.runtime.sessionId || undefined,
       modelId: state.generate.genModel,
-      prompt,
+      prompt: finalPrompt,
       referenceImages: refImages,
       aspectRatio: state.generate.genRatio,
       resolution: state.generate.genResolution,
-      useDesignAgent: state.generate.genUseAgent,
+      useDesignAgent: false,
       clientKeys: { ...state.keys },
     })
 
@@ -2548,19 +2867,15 @@ async function executeCanvasGenerate() {
       })
     const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
 
-    // Replace generator with image element
-    el.type = 'image'
-    el.content = data.resultDataUrl
-    el.name = `generated-${el.id}`
-    el.mime = storedResult.mime
-    el.assetId = storedResult.assetId
-    el.aspectRatio = state.generate.genRatio
-    el.resolution = state.generate.genResolution
-    el.generatingStatus = ''
-    el.generatingError = ''
-    const size = getCanvasImageSize(state.generate.genRatio, imageSize?.width, imageSize?.height)
-    el.width = size.width
-    el.height = size.height
+    replaceCanvasElementWithImage(el, data.resultDataUrl, `generated-${el.id}`, {
+      assetId: storedResult.assetId,
+      mime: storedResult.mime,
+      aspectRatio: state.generate.genRatio,
+      resolution: state.generate.genResolution,
+      prompt: finalPrompt,
+      width: imageSize?.width,
+      height: imageSize?.height,
+    })
 
     state.generate.genRefs = []
     hideGenPanel()
@@ -2667,6 +2982,10 @@ function renderAiRefList() {
 }
 
 function renderAiMessages() {
+  if (dom.gSend) {
+    dom.gSend.disabled = state.generate.aiRunning
+    dom.gSend.textContent = state.generate.aiRunning ? '处理中' : '发送'
+  }
   if (state.generate.aiMessages.length === 0) {
     dom.gAiMessages.replaceChildren(createAiWelcomeNode())
     dom.gAiMessages.scrollTop = 0
@@ -2697,7 +3016,25 @@ function renderAiMessages() {
 
     const bubble = document.createElement('div')
     bubble.className = 'msg-bubble'
-    bubble.textContent = msg.content
+    if (msg.loading) bubble.classList.add('loading')
+    if (msg.streaming) bubble.classList.add('streaming')
+    const contentText = String(msg.content || '')
+    if (contentText) {
+      const content = document.createElement('div')
+      content.className = 'msg-content'
+      content.append(document.createTextNode(contentText))
+      if (msg.streaming) {
+        const caret = document.createElement('span')
+        caret.className = 'msg-typing-caret'
+        content.append(caret)
+      }
+      bubble.append(content)
+    }
+    if (msg.loading) {
+      bubble.append(createAiLoadingNode(msg.loadingText || 'AI 正在思考'))
+    } else if (!contentText) {
+      bubble.textContent = ''
+    }
     node.append(bubble)
     if (Array.isArray(msg.steps) && msg.steps.length) {
       const steps = document.createElement('ul')
@@ -2726,6 +3063,62 @@ function renderAiMessages() {
     return node
   }))
   dom.gAiMessages.scrollTop = dom.gAiMessages.scrollHeight
+}
+
+function createAiLoadingNode(text) {
+  const row = document.createElement('div')
+  row.className = 'msg-loading'
+  const spinner = document.createElement('span')
+  spinner.className = 'spinner'
+  const label = document.createElement('span')
+  label.textContent = text
+  const dots = document.createElement('span')
+  dots.className = 'msg-loading-dots'
+  for (let i = 0; i < 3; i += 1) {
+    dots.append(document.createElement('span'))
+  }
+  row.append(spinner, label, dots)
+  return row
+}
+
+function setAiMessageLoading(msg, loadingText) {
+  msg.loading = true
+  msg.loadingText = loadingText
+  msg.streaming = false
+  renderAiMessages()
+}
+
+async function streamAiMessageContent(msg, text, { fromCurrent = false } = {}) {
+  const finalText = String(text || '')
+  const currentText = String(msg.content || '')
+  const startText = fromCurrent && finalText.startsWith(currentText) ? currentText : ''
+  msg.loading = false
+  msg.loadingText = ''
+  msg.streaming = true
+  msg.content = startText
+  renderAiMessages()
+
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  if (reducedMotion || finalText.length <= startText.length) {
+    msg.content = finalText
+    msg.streaming = false
+    renderAiMessages()
+    return
+  }
+
+  let index = startText.length
+  while (index < finalText.length) {
+    index = Math.min(index + AI_STREAM_CHUNK_SIZE, finalText.length)
+    msg.content = finalText.slice(0, index)
+    renderAiMessages()
+    const lastChar = finalText[index - 1]
+    const delay = /[，。！？；：\n,.!?;:]/.test(lastChar) ? AI_STREAM_PUNCTUATION_DELAY_MS : AI_STREAM_DELAY_MS
+    await wait(delay)
+  }
+
+  msg.content = finalText
+  msg.streaming = false
+  renderAiMessages()
 }
 
 function createAiWelcomeNode() {
@@ -2803,27 +3196,44 @@ async function sendCanvasAiMessage() {
     .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
     .map((msg) => ({ role: msg.role, content: msg.content || '' }))
     .slice(-8)
+  const aiModelId = dom.gAiModel.value || state.generate.genModel
+  const aiAspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
+  const aiResolution = normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution)
+  let canvasPendingEl = null
 
   const userMsg = {
     id: crypto.randomUUID(),
     role: 'user',
     content: requestText,
-    refs: state.generate.aiRefs.map((r) => ({ dataUrl: r.dataUrl, name: r.name })),
+    refs: state.generate.aiRefs.map((r) => ({ assetId: r.assetId || '', dataUrl: r.dataUrl, name: r.name, mime: r.mime || 'image/png' })),
   }
-  const assistantMsg = { id: crypto.randomUUID(), role: 'assistant', content: '正在理解画布和需求…', steps: [] }
+  const assistantMsg = {
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    content: '',
+    loading: true,
+    loadingText: '正在理解画布和需求',
+    steps: [],
+  }
   state.generate.aiMessages.push(userMsg)
   dom.gInput.value = ''
   state.generate.aiRunning = true
   state.generate.aiMessages.push(assistantMsg)
   renderAiMessages()
+  saveRuntimeState({ persistCanvas: false })
 
   try {
     // 上传参考图
     const refImages = []
-    for (const ref of state.generate.aiRefs) {
+    if (state.generate.aiRefs.length) {
+      setAiMessageLoading(assistantMsg, '正在读取参考图')
+    }
+    for (const [index, ref] of state.generate.aiRefs.entries()) {
       if (ref.assetId) {
+        if (userMsg.refs[index]) userMsg.refs[index].assetId = ref.assetId
         refImages.push({ assetId: ref.assetId, role: 'subject' })
       } else if (ref.dataUrl) {
+        setAiMessageLoading(assistantMsg, `正在上传参考图 ${refImages.length + 1}/${state.generate.aiRefs.length}`)
         const uploaded = await postJson('/api/assets/upload', {
           sessionId: state.runtime.sessionId || undefined,
           kind: 'upload',
@@ -2834,23 +3244,29 @@ async function sendCanvasAiMessage() {
         })
         state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
         ref.assetId = uploaded.asset.id
+        if (userMsg.refs[index]) {
+          userMsg.refs[index].assetId = uploaded.asset.id
+          userMsg.refs[index].mime = uploaded.asset.mime || userMsg.refs[index].mime || 'image/png'
+        }
         refImages.push({ assetId: uploaded.asset.id, role: 'subject' })
       }
     }
 
+    setAiMessageLoading(assistantMsg, '正在整理设计思路')
     const agentData = await postJson('/api/canvas/agent', {
       sessionId: state.runtime.sessionId || undefined,
       message: requestText,
       history,
       canvasContext: getCanvasAgentContext(),
-      modelId: dom.gAiModel.value || state.generate.genModel,
-      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio),
-      resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution),
+      modelId: aiModelId,
+      aspectRatio: aiAspectRatio,
+      resolution: aiResolution,
       hasReferenceImages: refImages.length > 0,
       clientKeys: { ...state.keys },
     })
     state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
-    assistantMsg.content = agentData.reply || '我已经整理好设计方向。'
+    const replyText = agentData.reply || '我已经整理好设计方向。'
+    await streamAiMessageContent(assistantMsg, replyText)
     assistantMsg.steps = Array.isArray(agentData.steps) ? agentData.steps : []
     renderAiMessages()
 
@@ -2859,16 +3275,22 @@ async function sendCanvasAiMessage() {
       return
     }
 
-    assistantMsg.content = `${assistantMsg.content}\n\n正在按这个方向生成图片…`
-    renderAiMessages()
+    const generationPrompt = agentData.prompt || requestText
+    setAiMessageLoading(assistantMsg, '正在生成图片并放到画布')
+    canvasPendingEl = addGeneratingPlaceholderToCanvas({
+      prompt: generationPrompt,
+      aspectRatio: aiAspectRatio,
+      resolution: aiResolution,
+    })
+    renderCanvas()
 
     const data = await postJson('/api/generate-direct', {
       sessionId: state.runtime.sessionId || undefined,
-      modelId: dom.gAiModel.value || state.generate.genModel,
-      prompt: agentData.prompt || requestText,
+      modelId: aiModelId,
+      prompt: generationPrompt,
       referenceImages: refImages,
-      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio),
-      resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution),
+      aspectRatio: aiAspectRatio,
+      resolution: aiResolution,
       useDesignAgent: false,
       clientKeys: { ...state.keys },
     })
@@ -2882,24 +3304,51 @@ async function sendCanvasAiMessage() {
       })
     const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
 
-    assistantMsg.content = `${agentData.reply || '已生成图片'}\n\n图片已添加到画布。`
     assistantMsg.imageDataUrl = data.resultDataUrl
-    assistantMsg.aspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
+    assistantMsg.imageAssetId = storedResult.assetId
+    assistantMsg.imageMime = storedResult.mime
+    assistantMsg.imageName = `ai-${Date.now()}`
+    assistantMsg.aspectRatio = aiAspectRatio
 
-    addImageToCanvas(data.resultDataUrl, `ai-${Date.now()}`, undefined, undefined, {
-      assetId: storedResult.assetId,
-      mime: storedResult.mime,
-      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio),
-      resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution),
-      width: imageSize?.width,
-      height: imageSize?.height,
-    })
+    if (canvasPendingEl && state.generate.elements.includes(canvasPendingEl) && canvasPendingEl.type === 'image-generator') {
+      replaceCanvasElementWithImage(canvasPendingEl, data.resultDataUrl, assistantMsg.imageName, {
+        assetId: storedResult.assetId,
+        mime: storedResult.mime,
+        aspectRatio: aiAspectRatio,
+        resolution: aiResolution,
+        prompt: generationPrompt,
+        width: imageSize?.width,
+        height: imageSize?.height,
+      })
+    } else {
+      addImageToCanvas(data.resultDataUrl, assistantMsg.imageName, undefined, undefined, {
+        assetId: storedResult.assetId,
+        mime: storedResult.mime,
+        aspectRatio: aiAspectRatio,
+        resolution: aiResolution,
+        prompt: generationPrompt,
+        width: imageSize?.width,
+        height: imageSize?.height,
+      })
+    }
     state.generate.aiRefs = []
     renderAiRefList()
     renderCanvas()
+    await streamAiMessageContent(assistantMsg, `${replyText}\n\n图片已添加到画布。`, { fromCurrent: true })
     saveRuntimeState()
   } catch (error) {
-    assistantMsg.content = `处理失败：${trimError(error)}`
+    const message = trimError(error)
+    assistantMsg.loading = false
+    assistantMsg.streaming = false
+    assistantMsg.loadingText = ''
+    assistantMsg.content = `处理失败：${message}`
+    if (canvasPendingEl && state.generate.elements.includes(canvasPendingEl) && canvasPendingEl.type === 'image-generator') {
+      canvasPendingEl.generatingStatus = ''
+      canvasPendingEl.generatingError = `处理失败：${message}`
+      renderCanvas()
+      saveRuntimeState()
+    }
+    saveRuntimeState({ persistCanvas: false })
   } finally {
     state.generate.aiRunning = false
     renderAiMessages()
@@ -3389,6 +3838,21 @@ function bindLightbox() {
   })
 }
 
+function bindPromptDialog() {
+  dom.promptCopy?.addEventListener('click', async () => {
+    const text = dom.promptContent?.value || ''
+    if (!text) return
+    await copyTextToClipboard(text)
+    const original = dom.promptCopy.textContent
+    dom.promptCopy.textContent = '已复制'
+    if (dom.promptCopyStatus) dom.promptCopyStatus.textContent = 'Prompt 已复制'
+    window.setTimeout(() => {
+      dom.promptCopy.textContent = original
+      if (dom.promptCopyStatus) dom.promptCopyStatus.textContent = ''
+    }, 1400)
+  })
+}
+
 function renderTranslateDropdowns() {
   renderSourceDropdown()
   renderTargetDropdown()
@@ -3675,17 +4139,36 @@ function createProjectCard(project) {
   const role = project.accessRole && project.accessRole !== 'owner' ? ` · ${project.accessRole}` : ''
   detail.textContent = `${formatRelativeTime(project.updatedAt)} · ${count} 个元素${role}`
   meta.append(title, detail)
+
+  const actions = document.createElement('div')
+  actions.className = 'project-card-actions'
   if (project.accessRole === 'owner') {
     const share = document.createElement('button')
     share.type = 'button'
     share.className = 'project-share-btn'
     share.dataset.projectShare = project.id
     share.textContent = '共享'
-    meta.append(share)
+    actions.append(share)
+  }
+  if (canDeleteProject(project)) {
+    const del = document.createElement('button')
+    del.type = 'button'
+    del.className = 'project-delete-btn'
+    del.dataset.projectDelete = project.id
+    del.title = `删除 ${project.title || DEFAULT_CANVAS_PROJECT_TITLE}`
+    del.textContent = '删除'
+    actions.append(del)
+  }
+  if (actions.childElementCount) {
+    meta.append(actions)
   }
   card.append(meta)
 
   return card
+}
+
+function canDeleteProject(project) {
+  return !project.accessRole || project.accessRole === 'owner' || project.accessRole === 'legacy'
 }
 
 function renderOutfit() {
@@ -4656,6 +5139,54 @@ async function hydrateAssetItems(items, projectId = '') {
   return hydrated.filter(Boolean)
 }
 
+async function hydrateAiMessages(messages) {
+  const assetRefs = []
+  for (const msg of messages) {
+    if (msg.imageAssetId && !msg.imageDataUrl) {
+      assetRefs.push({
+        id: msg.imageAssetId,
+        assetId: msg.imageAssetId,
+        name: msg.imageName || msg.imageAssetId,
+        mime: msg.imageMime || 'image/png',
+      })
+    }
+    for (const ref of msg.refs || []) {
+      if (ref.assetId && !ref.dataUrl) {
+        assetRefs.push({
+          id: ref.assetId,
+          assetId: ref.assetId,
+          name: ref.name || ref.assetId,
+          mime: ref.mime || 'image/png',
+        })
+      }
+    }
+  }
+
+  if (!assetRefs.length) return messages
+  const hydrated = await hydrateAssetItems(assetRefs, state.generate.projectId)
+  const byAssetId = new Map(hydrated.map((item) => [item.assetId || item.id, item]))
+
+  return messages.map((msg) => {
+    const next = { ...msg }
+    if (next.imageAssetId && !next.imageDataUrl) {
+      const image = byAssetId.get(next.imageAssetId)
+      if (image?.dataUrl) {
+        next.imageDataUrl = image.dataUrl
+        next.imageMime = image.mime || next.imageMime
+        next.imageName = next.imageName || image.name
+      }
+    }
+    next.refs = (next.refs || []).map((ref) => {
+      if (!ref.assetId || ref.dataUrl) return ref
+      const image = byAssetId.get(ref.assetId)
+      return image?.dataUrl
+        ? { ...ref, dataUrl: image.dataUrl, mime: image.mime || ref.mime, name: ref.name || image.name }
+        : ref
+    })
+    return next
+  })
+}
+
 function renderCanvasProjectMeta() {
   if (dom.gProjectTitle && document.activeElement !== dom.gProjectTitle) {
     dom.gProjectTitle.value = state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
@@ -4739,6 +5270,75 @@ async function openCanvasProject(projectId) {
   }
 }
 
+function openProjectDeleteDialog(projectId) {
+  const project = state.projects.items.find((item) => item.id === projectId)
+  if (!project || !dom.projectDeleteDialog) return
+  if (!canDeleteProject(project)) {
+    state.projects.error = '只有项目 owner 可以删除画布'
+    renderProjects()
+    return
+  }
+  state.projects.deleteTargetId = project.id
+  state.projects.deleteStatus = ''
+  renderProjectDeleteDialog()
+  if (!dom.projectDeleteDialog.open) dom.projectDeleteDialog.showModal()
+}
+
+function renderProjectDeleteDialog() {
+  if (!dom.projectDeleteDialog) return
+  const project = state.projects.items.find((item) => item.id === state.projects.deleteTargetId)
+  const title = project?.title || DEFAULT_CANVAS_PROJECT_TITLE
+  const count = Number(project?.elementCount || 0)
+  dom.projectDeleteTitle.textContent = title
+  dom.projectDeleteMeta.textContent = project
+    ? `${formatRelativeTime(project.updatedAt)} · ${count} 个元素`
+    : ''
+  dom.projectDeleteConfirm.disabled = state.projects.deleting || !project
+  dom.projectDeleteStatus.textContent = state.projects.deleteStatus || ''
+  dom.projectDeleteStatus.classList.toggle('err', Boolean(state.projects.deleteStatus && !state.projects.deleting))
+  dom.projectDeleteStatus.classList.toggle('run', state.projects.deleting)
+}
+
+async function deleteCanvasProjectFromDialog() {
+  const projectId = state.projects.deleteTargetId
+  if (!projectId || state.projects.deleting) return
+  const project = state.projects.items.find((item) => item.id === projectId)
+  if (!project || !canDeleteProject(project)) return
+
+  state.projects.deleting = true
+  state.projects.deleteStatus = '正在删除画布…'
+  renderProjectDeleteDialog()
+
+  try {
+    const sessionParam = state.runtime.sessionId
+      ? `?sessionId=${encodeURIComponent(state.runtime.sessionId)}`
+      : ''
+    await deleteJson(`/api/canvas/projects/${encodeURIComponent(projectId)}${sessionParam}`)
+    state.projects.items = state.projects.items.filter((item) => item.id !== projectId)
+    state.projects.loadedSessionId = ''
+    state.projects.error = ''
+    if (state.generate.projectId === projectId) {
+      state.generate.projectId = ''
+      state.generate.projectTitle = DEFAULT_CANVAS_PROJECT_TITLE
+      state.generate.elements = []
+      state.generate.selectedIds = []
+      state.generate.projectSaveStatus = ''
+      saveRuntimeState({ persistCanvas: false })
+    }
+    dom.projectDeleteDialog?.close()
+    state.projects.deleteTargetId = ''
+    state.projects.deleteStatus = ''
+    renderProjects()
+    renderHome()
+  } catch (error) {
+    state.projects.deleteStatus = trimError(error)
+    renderProjectDeleteDialog()
+  } finally {
+    state.projects.deleting = false
+    renderProjectDeleteDialog()
+  }
+}
+
 async function openShareDialog(projectId) {
   if (!projectId) {
     await ensureCanvasProjectRecord()
@@ -4748,7 +5348,7 @@ async function openShareDialog(projectId) {
   if (!state.account.user) {
     state.account.status = '请先登录后再共享项目'
     renderAccount()
-    setActiveView('auth')
+    showAuthView()
     return
   }
   state.share.status = ''
@@ -5119,6 +5719,7 @@ async function hydrateCanvasElements(elements) {
 async function restoreRuntimeState() {
   restoringRuntimeState = true
   const runtime = sanitizeRuntimeState(loadRuntimeState())
+  const aiHistory = runtime.generate.aiMessages?.length ? runtime.generate.aiMessages : loadAiHistory()
   const routeProjectId = state.activeView === 'generate' ? canvasProjectIdFromLocation() : ''
   state.runtime.sessionId = runtime.sessionId
   state.translate.jobId = runtime.translate.jobId
@@ -5138,6 +5739,7 @@ async function restoreRuntimeState() {
     }
   }
   state.generate.elements = await hydrateCanvasElements(canvasElements)
+  state.generate.aiMessages = await hydrateAiMessages(aiHistory)
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0
@@ -5688,6 +6290,22 @@ async function downloadAsset(href, name) {
       URL.revokeObjectURL(link.href)
     }
   }
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  document.body.append(textarea)
+  textarea.select()
+  document.execCommand('copy')
+  textarea.remove()
 }
 
 function pruneOutfitResults() {

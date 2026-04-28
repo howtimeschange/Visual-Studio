@@ -34,7 +34,7 @@ POST /api/generate-direct
 {
   sessionId, modelId, prompt,
   referenceImages: [{ assetId, role }],
-  aspectRatio: "1:1" | "4:3" | "3:4" | "16:9" | "9:16",
+  aspectRatio: "1:1" | "4:3" | "3:4" | "16:9" | "9:16" | "1:4" | "1:8",
   useDesignAgent: boolean,
   clientKeys
 }

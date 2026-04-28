@@ -3,7 +3,7 @@ const KNOWN_VIEWS = new Set(['home', 'auth', 'translate', 'generate', 'projects'
 
 export function normalizeAspectRatio(value, fallback = '1:1') {
   const ratio = String(value || '').trim()
-  return ['1:1', '4:3', '3:4', '16:9', '9:16'].includes(ratio) ? ratio : fallback
+  return ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(ratio) ? ratio : fallback
 }
 
 export function normalizeCanvasResolution(value, fallback = '1k') {

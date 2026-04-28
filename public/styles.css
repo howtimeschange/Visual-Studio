@@ -112,10 +112,10 @@
   --text-soft: oklch(40% 0.012 250);
   --muted:     oklch(58% 0.01 250);
 
-  --accent:      oklch(56% 0.16 255);
-  --accent-soft: color-mix(in oklch, var(--accent) 10%, var(--bg-2));
-  --accent-hover: oklch(50% 0.17 255);
-  --primary-fg: oklch(99% 0.003 250);
+  --accent:      oklch(78% 0.14 65);
+  --accent-soft: color-mix(in oklch, var(--accent) 13%, var(--bg-2));
+  --accent-hover: oklch(72% 0.15 65);
+  --primary-fg: oklch(15% 0.02 65);
 
   --ok:     oklch(58% 0.13 155);
   --warn:   oklch(63% 0.13 80);
@@ -263,7 +263,7 @@ body[data-view="auth"] .main {
   place-items: center;
   border-radius: var(--radius-xs);
   background: var(--accent);
-  color: var(--bg);
+  color: var(--primary-fg);
   font-size: 11px;
   font-weight: 700;
   flex-shrink: 0;
@@ -492,21 +492,7 @@ body[data-view="generate"] .main {
 }
 
 .home-title {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-md);
-}
-
-.home-title-mark {
-  display: grid;
-  width: 48px;
-  height: 48px;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--text);
-  color: var(--bg);
-  font-weight: 800;
+  text-align: center;
 }
 
 .home-title h1 {
@@ -530,7 +516,7 @@ body[data-view="generate"] .main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: var(--space-sm);
-  align-items: end;
+  align-items: center;
   width: min(100%, 720px);
   padding: var(--space-sm);
   border: 1px solid var(--line);
@@ -540,6 +526,7 @@ body[data-view="generate"] .main {
 }
 
 .home-prompt-card textarea {
+  align-self: center;
   min-height: 46px;
   max-height: 92px;
   padding: 11px 10px 9px 14px;
@@ -556,6 +543,8 @@ body[data-view="generate"] .main {
 }
 
 .home-prompt-card .primary {
+  align-self: center;
+  justify-self: end;
   min-height: 42px;
   padding-inline: 18px;
   border-radius: 999px;
@@ -845,10 +834,16 @@ body[data-view="generate"] .main {
     box-shadow var(--duration-fast) var(--ease);
 }
 
-.project-card:hover {
+.project-card:hover,
+.project-card:focus-visible {
   transform: translateY(-2px);
   border-color: var(--line-strong);
   box-shadow: var(--shadow-md);
+}
+
+.project-card:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--accent) 70%, white);
+  outline-offset: 2px;
 }
 
 .project-thumb {
@@ -883,7 +878,7 @@ body[data-view="generate"] .main {
 
 .project-meta {
   display: grid;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -899,6 +894,41 @@ body[data-view="generate"] .main {
 .project-meta span {
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.project-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding-top: var(--space-xs);
+}
+
+.project-share-btn,
+.project-delete-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.project-share-btn:hover {
+  border-color: color-mix(in oklch, var(--accent) 40%, var(--line-strong));
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.project-delete-btn:hover {
+  border-color: color-mix(in oklch, var(--danger) 45%, var(--line-strong));
+  background: color-mix(in oklch, var(--danger) 10%, var(--bg-3));
+  color: var(--danger);
 }
 
 .projects-empty {
@@ -1263,6 +1293,16 @@ button.primary {
 
 button.primary:hover {
   background: var(--accent-hover);
+}
+
+button.primary.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: oklch(98% 0.004 30);
+}
+
+button.primary.danger:hover {
+  background: color-mix(in oklch, var(--danger) 84%, oklch(20% 0.02 30));
 }
 
 button.primary:disabled {
@@ -1958,6 +1998,7 @@ button.ghost:disabled,
 }
 
 .canvas-el-generator {
+  position: relative;
   display: grid;
   place-items: center;
   gap: var(--space-sm);
@@ -1968,12 +2009,35 @@ button.ghost:disabled,
   text-align: center;
   min-width: 200px;
   min-height: 200px;
+  overflow: hidden;
 }
 
 .canvas-el-generator.loading {
   border-color: var(--accent);
   background: color-mix(in oklch, var(--accent) 9%, var(--bg-3));
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent);
+}
+
+.canvas-el-generator > * {
+  position: relative;
+  z-index: 1;
+}
+
+.canvas-el-generator.loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      115deg,
+      transparent 0%,
+      color-mix(in oklch, var(--accent) 8%, transparent) 30%,
+      color-mix(in oklch, var(--accent) 18%, transparent) 48%,
+      color-mix(in oklch, var(--accent) 8%, transparent) 66%,
+      transparent 100%
+    );
+  transform: translateX(-120%);
+  animation: skeleton-sweep 1.7s var(--ease) infinite;
 }
 
 .canvas-el-generator.error {
@@ -2002,6 +2066,39 @@ button.ghost:disabled,
   gap: var(--space-sm);
   color: var(--text-soft);
   font-size: var(--text-xs);
+}
+
+.canvas-gen-skeleton {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: min(76%, 220px);
+  gap: var(--space-sm);
+}
+
+.canvas-gen-skeleton span {
+  display: block;
+  min-height: 12px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in oklch, var(--text) 8%, transparent) 0%,
+      color-mix(in oklch, var(--accent) 22%, transparent) 42%,
+      color-mix(in oklch, var(--text) 8%, transparent) 82%
+    );
+  background-size: 220% 100%;
+  animation: skeleton-flow 1.45s var(--ease) infinite;
+}
+
+.canvas-gen-skeleton .hero {
+  min-height: 48px;
+  border-radius: var(--radius-sm);
+}
+
+.canvas-gen-skeleton .short {
+  width: 62%;
+  justify-self: center;
 }
 
 .canvas-gen-spinner {
@@ -2501,13 +2598,13 @@ button.ghost:disabled,
 
 :root[data-theme="light"] .gen-panel-run,
 :root[data-theme="light"] .ai-sidebar-send {
-  background: var(--text);
-  color: var(--bg-2);
+  background: var(--accent);
+  color: var(--primary-fg);
 }
 
 :root[data-theme="light"] .gen-panel-run:hover,
 :root[data-theme="light"] .ai-sidebar-send:hover {
-  background: color-mix(in oklch, var(--text) 88%, var(--accent));
+  background: var(--accent-hover);
 }
 
 :root[data-theme="light"] .gen-panel-run:disabled,
@@ -2554,9 +2651,49 @@ button.ghost:disabled,
 .msg { display: grid; gap: var(--space-xs); }
 .msg.user { justify-items: end; }
 .msg.assistant { justify-items: start; }
-.msg-bubble { max-width: 100%; padding: 8px 12px; border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-word; font-size: var(--text-sm); line-height: 1.5; }
+.msg-bubble { max-width: 100%; padding: 8px 12px; border-radius: var(--radius-sm); word-break: break-word; font-size: var(--text-sm); line-height: 1.5; }
 .msg.user .msg-bubble { background: color-mix(in oklch, var(--accent) 8%, var(--bg-3)); border-top-right-radius: 3px; }
 .msg.assistant .msg-bubble { background: var(--bg-3); border: 1px solid var(--line); border-top-left-radius: 3px; }
+.msg-content { white-space: pre-wrap; }
+.msg-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+}
+.msg-content + .msg-loading {
+  margin-top: var(--space-xs);
+}
+.msg-loading .spinner {
+  width: 13px;
+  height: 13px;
+  color: var(--accent);
+}
+.msg-loading-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+.msg-loading-dots span {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.35;
+  animation: ai-dot-pulse 1.15s var(--ease) infinite;
+}
+.msg-loading-dots span:nth-child(2) { animation-delay: 140ms; }
+.msg-loading-dots span:nth-child(3) { animation-delay: 280ms; }
+.msg-typing-caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 2px;
+  border-right: 2px solid var(--accent);
+  transform: translateY(2px);
+  animation: typing-caret-blink 850ms steps(2, end) infinite;
+}
 .msg-steps {
   display: grid;
   gap: 4px;
@@ -3432,6 +3569,38 @@ dialog .hint {
   width: min(720px, calc(100vw - 32px));
 }
 
+.confirm-dialog {
+  width: min(480px, calc(100vw - 32px));
+}
+
+#project-delete-form {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.confirm-panel {
+  display: grid;
+  gap: 4px;
+  padding: var(--space-md);
+  border: 1px solid color-mix(in oklch, var(--danger) 28%, var(--line));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--danger) 8%, var(--bg-3));
+}
+
+.confirm-label {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.confirm-panel strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-section {
   display: grid;
   gap: var(--space-md);
@@ -3655,6 +3824,34 @@ dialog input {
   width: 100%;
 }
 
+#prompt-dialog {
+  width: min(680px, calc(100vw - 32px));
+}
+
+#prompt-form {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.prompt-dialog-content {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  max-height: 48dvh;
+  resize: vertical;
+  font-family: var(--font-mono);
+  line-height: 1.55;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.prompt-copy-status {
+  margin-right: auto;
+  align-self: center;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+}
+
 .dialog-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3808,6 +4005,48 @@ button.compact {
   }
 }
 
+@keyframes skeleton-sweep {
+  to {
+    transform: translateX(120%);
+  }
+}
+
+@keyframes skeleton-flow {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+@keyframes ai-dot-pulse {
+  0%,
+  70%,
+  100% {
+    opacity: 0.28;
+    transform: translateY(0);
+  }
+
+  35% {
+    opacity: 0.9;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes typing-caret-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+
+  46%,
+  100% {
+    opacity: 0;
+  }
+}
+
 /* ═══════════════ RESPONSIVE ═══════════════ */
 
 @media (max-width: 1180px) {
@@ -3929,11 +4168,6 @@ button.compact {
   .auth-layout {
     grid-template-columns: 1fr;
     gap: var(--space-xl);
-  }
-
-  .home-title {
-    align-items: center;
-    flex-direction: column;
   }
 
   .home-prompt-card {

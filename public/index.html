@@ -79,7 +79,6 @@
 
       <div class="home-hero">
         <div class="home-title">
-          <div class="home-title-mark">VS</div>
           <h1>输入想法，进入视觉工作台</h1>
         </div>
         <p>从一个设计需求开始创建画布，或直接进入已经落地的批处理工具。</p>
@@ -352,6 +351,8 @@
               <option value="3:4">3:4</option>
               <option value="16:9">16:9</option>
               <option value="9:16">9:16</option>
+              <option value="1:4">1:4</option>
+              <option value="1:8">1:8</option>
             </select>
             <select id="g-ai-resolution" class="input ai-sidebar-select" aria-label="生成分辨率">
               <option value="1k">1k</option>
@@ -389,6 +390,8 @@
             <option value="3:4">3:4</option>
             <option value="16:9">16:9</option>
             <option value="9:16">9:16</option>
+            <option value="1:4">1:4</option>
+            <option value="1:8">1:8</option>
           </select>
           <select id="g-gen-resolution" class="input gen-panel-select" aria-label="生成分辨率">
             <option value="1k">1k</option>
@@ -711,6 +714,28 @@
   </form>
 </dialog>
 
+<dialog id="project-delete-dialog" class="confirm-dialog">
+  <form method="dialog" id="project-delete-form">
+    <div class="dialog-copy">
+      <h3>删除画布</h3>
+      <p class="hint">删除后，这个画布项目会从项目管理中移除，画布内容不可恢复。</p>
+    </div>
+
+    <section class="confirm-panel">
+      <span class="confirm-label">将要删除</span>
+      <strong id="project-delete-title">未命名画布</strong>
+      <span id="project-delete-meta" class="muted"></span>
+    </section>
+
+    <div id="project-delete-status" class="status"></div>
+
+    <div class="dialog-actions">
+      <button type="submit" class="ghost">取消</button>
+      <button type="button" id="project-delete-confirm" class="primary danger">确认删除</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="share-dialog">
   <form method="dialog" id="share-form">
     <div class="dialog-copy">
@@ -743,6 +768,21 @@
     </section>
 
     <div class="dialog-actions">
+      <button type="submit" class="ghost">关闭</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="prompt-dialog" class="prompt-dialog">
+  <form method="dialog" id="prompt-form">
+    <div class="dialog-copy">
+      <h3>生成 Prompt</h3>
+      <p class="hint">这张图片生成时使用的 prompt，可复制后继续复用。</p>
+    </div>
+    <textarea id="prompt-content" class="prompt-dialog-content" readonly spellcheck="false"></textarea>
+    <div class="dialog-actions">
+      <span id="prompt-copy-status" class="prompt-copy-status" aria-live="polite"></span>
+      <button type="button" id="prompt-copy" class="primary">复制 Prompt</button>
       <button type="submit" class="ghost">关闭</button>
     </div>
   </form>
