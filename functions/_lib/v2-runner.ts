@@ -57,6 +57,41 @@ async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.min(max, Math.max(min, numeric))
+}
+
+async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
+  let index = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const item = items[index]
+      index += 1
+      await worker(item)
+    }
+  })
+  await Promise.all(workers)
+}
+
+function queueProgressPublisher(env: Env, jobId: string) {
+  let chain = Promise.resolve()
+  return {
+    publish() {
+      chain = chain
+        .catch(() => undefined)
+        .then(async () => {
+          const nextJob = await updateJobCounts(env, jobId)
+          if (nextJob) await publishJobProgress(env, nextJob)
+        })
+    },
+    async drain() {
+      await chain.catch(() => undefined)
+    },
+  }
+}
+
 async function maybeSealClientKeys(env: Env, jobId: string, clientKeys: ClientKeys): Promise<string | null> {
   if (!clientKeys || Object.keys(clientKeys).length === 0) return null
   const ciphertext = await sealJson(clientKeys, env.CREDENTIAL_KEK)
@@ -85,7 +120,7 @@ async function publishJobProgress(env: Env, job: JobRecord) {
 }
 
 async function updateJobCounts(env: Env, jobId: string): Promise<JobRecord | null> {
-  const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
+  const items = await listJobItems(env, jobId)
   const progressDone = items.filter((item) => item.status === 'completed').length
   const progressFailed = items.filter((item) => item.status === 'failed').length
   return updateJob(env, jobId, { progressDone, progressFailed })
@@ -222,9 +257,12 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  for (const item of items) {
+  const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 6, 2)
+  const progress = queueProgressPublisher(env, jobId)
+
+  await runPool(items, concurrency, async (item) => {
     const job = await getJob(env, jobId)
-    if (!job || job.status === 'cancelled') break
+    if (!job || job.status === 'cancelled') return
 
     await updateJobItem(env, jobId, item.id, {
       status: 'running',
@@ -297,8 +335,15 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
       })
     }
 
-    const nextJob = await updateJobCounts(env, jobId)
-    if (nextJob) await publishJobProgress(env, nextJob)
+    progress.publish()
+  })
+
+  await progress.drain()
+
+  const latestJob = await getJob(env, jobId)
+  if (latestJob?.status === 'cancelled') {
+    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+    return
   }
 
   const finalItems = await listJobItems(env, jobId)
@@ -351,6 +396,7 @@ export async function submitOutfitBatch(
       modelId: body?.modelId || 'nano-banana-pro',
       instructions: body?.instructions || '',
       garmentRoles: garments.map((item: any) => `${item.assetId}:${item.role || 'full_outfit'}`).sort(),
+      concurrency: clampInt(body?.concurrency, 1, 4, 2),
       sealedCredentialId,
       configHash: await stableHash({
         modelId: body?.modelId || 'nano-banana-pro',
@@ -399,10 +445,13 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await updateJob(env, jobId, { status: 'running' })
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
-  const items = await listJobItems(env, jobId)
-  for (const item of items) {
+  const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
+  const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 4, 2)
+  const progress = queueProgressPublisher(env, jobId)
+
+  await runPool(items, concurrency, async (item) => {
     const job = await getJob(env, jobId)
-    if (!job || job.status === 'cancelled') break
+    if (!job || job.status === 'cancelled') return
 
     await updateJobItem(env, jobId, item.id, {
       status: 'running',
@@ -489,8 +538,15 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
       })
     }
 
-    const nextJob = await updateJobCounts(env, jobId)
-    if (nextJob) await publishJobProgress(env, nextJob)
+    progress.publish()
+  })
+
+  await progress.drain()
+
+  const latestJob = await getJob(env, jobId)
+  if (latestJob?.status === 'cancelled') {
+    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+    return
   }
 
   const finalItems = await listJobItems(env, jobId)
@@ -795,7 +851,8 @@ export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
   if (job.type === 'translate_batch') {
     const items = (await listJobItems(env, job.id)).filter((item) => item.status === 'failed')
     await requeueItems(env, job.id, items)
-    await updateJob(env, job.id, { status: 'queued', progressFailed: 0 })
+    await updateJob(env, job.id, { status: 'queued' })
+    await updateJobCounts(env, job.id)
     await scheduleJobExecution(env, job, waitUntil, 'retry')
     return { jobId: job.id, type: job.type }
   }
@@ -803,7 +860,8 @@ export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
   if (job.type === 'outfit_batch') {
     const items = (await listJobItems(env, job.id)).filter((item) => item.status === 'failed')
     await requeueItems(env, job.id, items)
-    await updateJob(env, job.id, { status: 'queued', progressFailed: 0 })
+    await updateJob(env, job.id, { status: 'queued' })
+    await updateJobCounts(env, job.id)
     await scheduleJobExecution(env, job, waitUntil, 'retry')
     return { jobId: job.id, type: job.type }
   }
@@ -834,9 +892,16 @@ export async function retryJobItem(env: Env, jobId: string, itemId: string, wait
   if (!['translate_batch', 'outfit_batch'].includes(job.type)) {
     throw createRunnerError(`Item retry not supported for ${job.type}`, 400)
   }
+  if (item.status !== 'failed') {
+    throw createRunnerError('Only failed items can be retried', 400)
+  }
+  if (!['partial_failed', 'failed'].includes(job.status)) {
+    throw createRunnerError('Wait for the batch to finish before retrying an item', 409)
+  }
 
   await requeueItems(env, job.id, [item])
   await updateJob(env, job.id, { status: 'queued' })
+  await updateJobCounts(env, job.id)
 
   await scheduleJobExecution(env, job, waitUntil, 'retry')
 

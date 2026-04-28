@@ -4487,7 +4487,7 @@ async function executeOutfitJob({ model, look, key, runConfig, signature }) {
 }
 
 async function retryTranslateJob(itemId, language) {
-  if (isTranslateBusy()) return
+  if (!canRetryTranslateItem()) return
   const item = state.translate.items.find((entry) => entry.id === itemId)
   if (!item) return
   const result = item.results?.[language]
@@ -4511,7 +4511,7 @@ async function retryTranslateJob(itemId, language) {
 }
 
 async function retryOutfitJob(modelId, lookId) {
-  if (isOutfitBusy()) return
+  if (!canRetryOutfitItem()) return
   const model = state.outfit.models.find((entry) => entry.id === modelId)
   const look = buildOutfitLooks().find((entry) => entry.id === lookId)
   const result = state.outfit.results[pairKey(modelId, lookId)]
@@ -4604,16 +4604,32 @@ function shouldAutoRetry(error) {
   return status >= 500 || status === 408 || status === 409 || status === 425 || status === 429
 }
 
-function isTranslateBusy() {
-  return state.translate.running || state.translate.items.some((item) =>
+function hasTranslateActiveItems() {
+  return state.translate.items.some((item) =>
     Object.values(item.results).some((result) => result?.status === 'queue' || result?.status === 'running'),
   )
 }
 
-function isOutfitBusy() {
-  return state.outfit.running || Object.values(state.outfit.results).some((result) =>
+function hasOutfitActiveItems() {
+  return Object.values(state.outfit.results).some((result) =>
     result?.status === 'queue' || result?.status === 'running',
   )
+}
+
+function isTranslateBusy() {
+  return state.translate.running || hasTranslateActiveItems()
+}
+
+function isOutfitBusy() {
+  return state.outfit.running || hasOutfitActiveItems()
+}
+
+function canRetryTranslateItem() {
+  return !hasTranslateActiveItems()
+}
+
+function canRetryOutfitItem() {
+  return !hasOutfitActiveItems()
 }
 
 function getRunningLabel(base, attempt = 1) {
@@ -4761,7 +4777,8 @@ function createTranslateResultCell(item, language, signature) {
     retry.type = 'button'
     retry.className = 'retry-btn'
     retry.textContent = '重试'
-    retry.disabled = isTranslateBusy()
+    retry.disabled = !canRetryTranslateItem()
+    if (retry.disabled) retry.title = '当前批量任务结束后可重试'
     retry.addEventListener('click', () => {
       retryTranslateJob(item.id, language)
     })
@@ -4866,7 +4883,8 @@ function createOutfitResultCell(model, look, signature) {
     retry.type = 'button'
     retry.className = 'retry-btn'
     retry.textContent = '重试'
-    retry.disabled = isOutfitBusy()
+    retry.disabled = !canRetryOutfitItem()
+    if (retry.disabled) retry.title = '当前批量任务结束后可重试'
     retry.addEventListener('click', () => {
       retryOutfitJob(model.id, look.id)
     })
