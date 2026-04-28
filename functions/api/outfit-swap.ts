@@ -15,6 +15,8 @@ import {
   Env, DEFAULT_BASE, MODEL_MAP, VISION_MODEL,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
 } from '../_shared'
+import { getAuthContext } from '../_lib/auth'
+import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
@@ -64,7 +66,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try { body = await request.json() } catch { return json({ error: 'Invalid JSON' }, 400) }
 
   try {
-    return json(await executeOutfitSwap(body, env))
+    const auth = await getAuthContext(env, request)
+    const clientKeys = await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
+    return json(await executeOutfitSwap({ ...body, clientKeys }, env))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Outfit swap failed') }, error?.status || 502)
   }

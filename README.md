@@ -170,7 +170,7 @@ wrangler pages deploy public --project-name=image-translator
 - `Nano Banana Pro Key`
 - `GPT Image 2 Key`
 
-这些 Key 只保存在当前浏览器的 `localStorage` 中。
+未登录时，这些 Key 只保存在当前浏览器的 `localStorage` 中。登录后可以在设置里将 API Keys 加密保存到账号；后端只向前端返回保存状态和尾号，不返回完整 Key。账号级 Key 使用 `CREDENTIAL_KEK` 加密后写入 D1。
 
 ### 服务端可选 secrets
 

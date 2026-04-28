@@ -640,7 +640,7 @@
   <form method="dialog" id="settings-form">
     <div class="dialog-copy">
       <h3>设置</h3>
-      <p class="hint">API Key 与页面风格都只保存在当前浏览器。服务端可配置默认 Key，前端填写后优先生效。</p>
+      <p class="hint">API Key 可保存在当前浏览器；登录后也可以加密保存到账号，换设备后继续使用。</p>
     </div>
 
     <section class="settings-section">
@@ -680,10 +680,11 @@
       <div class="settings-section-head settings-section-head-inline">
         <div>
           <h4>API Keys</h4>
-          <p>这些 Key 仅用于当前浏览器发起的任务，不会写入项目文件。</p>
+          <p>本机 Key 会优先于账号 Key；账号 Key 只显示保存状态，不回传完整内容。</p>
         </div>
         <a class="settings-api-link" href="https://1xm.ai/" target="_blank" rel="noopener noreferrer">获取API KEY</a>
       </div>
+      <div id="settings-account-status" class="settings-key-status"></div>
       <div class="dialog-grid">
         <label class="dialog-field">
           <span class="dialog-label">Vision / Design Agent Key <span class="muted">（OCR · 参考图分析 · 设计 Agent · gemini-3-flash-preview）</span></span>
@@ -705,10 +706,15 @@
           <input id="k-gptimage" type="password" autocomplete="off" placeholder="sk-..." />
         </label>
       </div>
+      <label class="settings-account-save">
+        <input id="settings-save-account" type="checkbox" />
+        <span>登录后同时加密保存到账号</span>
+      </label>
     </section>
 
     <div class="dialog-actions">
-      <button type="button" id="settings-clear" class="ghost">清空 Key</button>
+      <button type="button" id="settings-clear" class="ghost">清空本机 Key</button>
+      <button type="button" id="settings-clear-account" class="ghost">清空账号 Key</button>
       <button type="submit" class="primary">保存</button>
     </div>
   </form>
@@ -802,6 +808,6 @@
   </div>
 </dialog>
 
-<script type="module" src="/app.js?v=20260427-5"></script>
+<script type="module" src="/app.js?v=20260428-1"></script>
 </body>
 </html>

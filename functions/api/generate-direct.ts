@@ -17,6 +17,7 @@ import {
 } from '../_lib/v2-store'
 import { publishEvent } from '../_lib/v2-events'
 import { getAuthContext } from '../_lib/auth'
+import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
 type RefRole = 'character' | 'subject' | 'style' | 'scene' | 'other'
 
@@ -38,7 +39,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   try {
     const auth = await getAuthContext(env, request)
-    return json(await handleDirectGenerate(env, { ...body, _authUserId: auth.user?.id || null }))
+    const userId = auth.user?.id || null
+    const clientKeys = await mergeUserClientKeys(env, userId, body?.clientKeys || {})
+    return json(await handleDirectGenerate(env, { ...body, clientKeys, _authUserId: userId }))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Generate failed') }, error?.status || 502)
   }

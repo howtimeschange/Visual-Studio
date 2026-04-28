@@ -63,6 +63,15 @@ export interface UserRecord {
   updatedAt: string
 }
 
+export interface UserApiKeysRecord {
+  userId: string
+  ciphertext: string
+  keyVersion: string
+  summaryJson: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
 export interface AuthSessionRecord {
   id: string
   userId: string

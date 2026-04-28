@@ -16,6 +16,7 @@ import type {
   ProjectMemberRecord,
   ProjectRole,
   UsageEventRecord,
+  UserApiKeysRecord,
   UserRecord,
 } from '../../packages/contracts/v2'
 import { createId, nowIso } from '../../packages/core/id'
@@ -42,6 +43,7 @@ type MemoryState = {
   projectInvites: Map<string, ProjectInviteRecord>
   projectInvitesByToken: Map<string, string>
   usageEvents: UsageEventRecord[]
+  userApiKeys: Map<string, UserApiKeysRecord>
   sealedCredentials: Map<string, SealedCredentialRecord>
 }
 
@@ -64,6 +66,7 @@ const memoryState: MemoryState = {
   projectInvites: new Map(),
   projectInvitesByToken: new Map(),
   usageEvents: [],
+  userApiKeys: new Map(),
   sealedCredentials: new Map(),
 }
 
@@ -165,6 +168,17 @@ function rowToAuthSession(row: any): AuthSessionRecord {
     createdAt: String(row.created_at),
     expiresAt: String(row.expires_at),
     lastSeenAt: String(row.last_seen_at),
+  }
+}
+
+function rowToUserApiKeys(row: any): UserApiKeysRecord {
+  return {
+    userId: String(row.user_id || ''),
+    ciphertext: String(row.ciphertext || ''),
+    keyVersion: String(row.key_version || 'v1'),
+    summaryJson: parseJson<Record<string, unknown>>(row.summary_json, {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
   }
 }
 
@@ -449,6 +463,69 @@ export async function deleteAuthSession(env: any, tokenHash: string): Promise<vo
   const id = memoryState.authSessionsByTokenHash.get(tokenHash)
   if (id) memoryState.authSessions.delete(id)
   memoryState.authSessionsByTokenHash.delete(tokenHash)
+}
+
+export async function getUserApiKeys(env: any, userId: string): Promise<UserApiKeysRecord | null> {
+  const db = dbFor(env)
+  if (db) {
+    const row = await db.prepare('SELECT * FROM user_api_keys WHERE user_id = ?').bind(userId).first<any>()
+    return row ? rowToUserApiKeys(row) : null
+  }
+  return memoryState.userApiKeys.get(userId) || null
+}
+
+export async function upsertUserApiKeys(
+  env: any,
+  input: {
+    userId: string
+    ciphertext: string
+    summaryJson: Record<string, unknown>
+  },
+): Promise<UserApiKeysRecord> {
+  const now = nowIso()
+  const existing = await getUserApiKeys(env, input.userId)
+  const record: UserApiKeysRecord = {
+    userId: input.userId,
+    ciphertext: input.ciphertext,
+    keyVersion: 'v1',
+    summaryJson: input.summaryJson || {},
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  }
+
+  const db = dbFor(env)
+  if (db) {
+    await db.prepare(`
+      INSERT INTO user_api_keys (user_id, ciphertext, key_version, summary_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        ciphertext = excluded.ciphertext,
+        key_version = excluded.key_version,
+        summary_json = excluded.summary_json,
+        updated_at = excluded.updated_at
+    `).bind(
+      record.userId,
+      record.ciphertext,
+      record.keyVersion,
+      stringifyJson(record.summaryJson),
+      record.createdAt,
+      record.updatedAt,
+    ).run()
+  } else {
+    memoryState.userApiKeys.set(record.userId, record)
+  }
+  return record
+}
+
+export async function deleteUserApiKeys(env: any, userId: string): Promise<boolean> {
+  const existing = await getUserApiKeys(env, userId)
+  const db = dbFor(env)
+  if (db) {
+    await db.prepare('DELETE FROM user_api_keys WHERE user_id = ?').bind(userId).run()
+  } else {
+    memoryState.userApiKeys.delete(userId)
+  }
+  return Boolean(existing)
 }
 
 export async function ensureSession(env: any, sessionId?: string, userId?: string | null): Promise<SessionRecord> {

@@ -3,6 +3,7 @@ import {
   json, corsPreflight, resolveKeys, callTextModel,
 } from '../../_shared'
 import { getAuthContext } from '../../_lib/auth'
+import { mergeUserClientKeys } from '../../_lib/user-api-keys'
 import { ensureSession } from '../../_lib/v2-store'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
@@ -22,7 +23,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const modelId = String(body?.modelId || 'nano-banana-2')
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
-  const { visionKey } = resolveKeys(modelId, env, body?.clientKeys || {})
+  const clientKeys = await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
+  const { visionKey } = resolveKeys(modelId, env, clientKeys)
   const fallback = buildFallbackAgentResult(body, message)
 
   if (!visionKey) {

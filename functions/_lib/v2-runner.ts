@@ -33,6 +33,7 @@ import {
 } from './v2-store'
 import { publishEvent } from './v2-events'
 import { createJobQueueMessage, dispatchQueuedJob } from './v2-queue'
+import { loadUserClientKeys } from './user-api-keys'
 import { executeTranslate } from '../api/translate'
 import { executeOutfitSwap } from '../api/outfit-swap'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
@@ -104,6 +105,12 @@ async function loadClientKeys(env: Env, credentialId?: string | null): Promise<C
   const record = await getSealedCredential(env, credentialId)
   if (!record) return {}
   return unsealJson<ClientKeys>(record.ciphertext, env.CREDENTIAL_KEK)
+}
+
+async function loadJobClientKeys(env: Env, job: JobRecord): Promise<ClientKeys> {
+  const sealedKeys = await loadClientKeys(env, String(job.configJson?.sealedCredentialId || ''))
+  if (Object.keys(sealedKeys).length > 0) return sealedKeys
+  return loadUserClientKeys(env, job.userId || null)
 }
 
 async function finalizeCredential(env: Env, credentialId?: string | null): Promise<void> {
@@ -252,7 +259,7 @@ export async function submitTranslateBatch(
 async function runTranslateBatchJob(env: Env, jobId: string) {
   const initialJob = await getJob(env, jobId)
   if (!initialJob) return
-  const clientKeys = await loadClientKeys(env, String(initialJob.configJson?.sealedCredentialId || ''))
+  const clientKeys = await loadJobClientKeys(env, initialJob)
   await updateJob(env, jobId, { status: 'running' })
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
@@ -441,7 +448,7 @@ export async function submitOutfitBatch(
 async function runOutfitBatchJob(env: Env, jobId: string) {
   const initialJob = await getJob(env, jobId)
   if (!initialJob) return
-  const clientKeys = await loadClientKeys(env, String(initialJob.configJson?.sealedCredentialId || ''))
+  const clientKeys = await loadJobClientKeys(env, initialJob)
   await updateJob(env, jobId, { status: 'running' })
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
@@ -668,7 +675,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   const turn = await getConversationTurn(env, turnId)
   if (!turn) return
 
-  const clientKeys = await loadClientKeys(env, String(job.configJson?.sealedCredentialId || ''))
+  const clientKeys = await loadJobClientKeys(env, job)
   await updateJob(env, jobId, { status: 'running' })
   await updateConversationTurn(env, turn.id, { status: 'running' })
   await publishEvent(env, 'job', job.id, 'status', { status: 'running', turnId: turn.id })

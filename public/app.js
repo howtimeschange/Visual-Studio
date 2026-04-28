@@ -186,6 +186,8 @@ const state = {
   account: {
     user: null,
     usage: null,
+    apiKeys: { keys: {}, updatedAt: '' },
+    apiKeysLoadedFor: '',
     loading: false,
     error: '',
     status: '',
@@ -241,6 +243,9 @@ const dom = {
   settingsDialog: $('#settings-dialog'),
   settingsForm: $('#settings-form'),
   settingsClear: $('#settings-clear'),
+  settingsClearAccount: $('#settings-clear-account'),
+  settingsSaveAccount: $('#settings-save-account'),
+  settingsAccountStatus: $('#settings-account-status'),
   sourceDropdown: $('[data-dd="source-lang"]'),
   sourceValue: $('#source-lang-value'),
   sourceMenu: $('#source-lang-menu'),
@@ -994,30 +999,22 @@ function bindSettings() {
   dom.settingsBtn.addEventListener('click', () => {
     hydrateSettingsForm()
     dom.settingsDialog.showModal()
+    void loadAccountApiKeys({ force: true })
   })
 
   dom.settingsForm.addEventListener('submit', (event) => {
-    event.preventDefault()
-    state.keys = {
-      visionApiKey: $('#k-vision').value.trim(),
-      banana2ApiKey: $('#k-banana2').value.trim(),
-      bananaProApiKey: $('#k-bananapro').value.trim(),
-      gptImageApiKey: $('#k-gptimage').value.trim(),
-    }
-    for (const key of Object.keys(state.keys)) {
-      if (!state.keys[key]) delete state.keys[key]
-    }
-    state.theme = getSelectedSettingsTheme()
-    applyTheme()
-    localStorage.setItem(KEY_STORAGE, JSON.stringify(state.keys))
-    savePrefs()
-    dom.settingsDialog.close()
+    void saveSettingsForm(event)
   })
 
   dom.settingsClear.addEventListener('click', () => {
     localStorage.removeItem(KEY_STORAGE)
     state.keys = {}
     hydrateSettingsForm()
+    setSettingsKeyStatus('已清空本机保存的 Key')
+  })
+
+  dom.settingsClearAccount?.addEventListener('click', () => {
+    void clearAccountApiKeys()
   })
 
   for (const input of $$('input[name="settings-theme"]')) {
@@ -1027,6 +1024,94 @@ function bindSettings() {
       applyTheme()
       savePrefs()
     })
+  }
+}
+
+async function saveSettingsForm(event) {
+  event.preventDefault()
+  const nextKeys = getKeyFormValues()
+  state.keys = nextKeys
+  state.theme = getSelectedSettingsTheme()
+  applyTheme()
+  localStorage.setItem(KEY_STORAGE, JSON.stringify(state.keys))
+  savePrefs()
+
+  if (dom.settingsSaveAccount?.checked && state.account.user && hasAnyClientKey(nextKeys)) {
+    try {
+      setSettingsKeyStatus('正在保存账号 Key…')
+      const data = await putJson('/api/account/api-keys', { keys: nextKeys })
+      state.account.apiKeys = data.apiKeys || { keys: {}, updatedAt: '' }
+      state.account.apiKeysLoadedFor = state.account.user.id
+    } catch (error) {
+      setSettingsKeyStatus(trimError(error), 'err')
+      return
+    }
+  }
+
+  dom.settingsDialog.close()
+}
+
+function getKeyFormValues() {
+  const keys = {
+    visionApiKey: $('#k-vision').value.trim(),
+    banana2ApiKey: $('#k-banana2').value.trim(),
+    bananaProApiKey: $('#k-bananapro').value.trim(),
+    gptImageApiKey: $('#k-gptimage').value.trim(),
+  }
+  for (const key of Object.keys(keys)) {
+    if (!keys[key]) delete keys[key]
+  }
+  return keys
+}
+
+function hasAnyClientKey(keys) {
+  return Object.values(keys || {}).some(Boolean)
+}
+
+function setSettingsKeyStatus(message, tone = '') {
+  if (!dom.settingsAccountStatus) return
+  dom.settingsAccountStatus.textContent = message || ''
+  dom.settingsAccountStatus.classList.toggle('err', tone === 'err')
+}
+
+async function clearAccountApiKeys() {
+  if (!state.account.user) {
+    setSettingsKeyStatus('登录后才能清空账号 Key', 'err')
+    return
+  }
+  try {
+    setSettingsKeyStatus('正在清空账号 Key…')
+    const data = await deleteJson('/api/account/api-keys')
+    state.account.apiKeys = data.apiKeys || { keys: {}, updatedAt: '' }
+    state.account.apiKeysLoadedFor = state.account.user.id
+    hydrateSettingsForm()
+    setSettingsKeyStatus('已清空账号 Key')
+  } catch (error) {
+    setSettingsKeyStatus(trimError(error), 'err')
+  }
+}
+
+async function loadAccountApiKeys({ force = false } = {}) {
+  if (!state.account.user) {
+    state.account.apiKeys = { keys: {}, updatedAt: '' }
+    state.account.apiKeysLoadedFor = ''
+    hydrateSettingsForm({ preserveKeyInputs: dom.settingsDialog?.open })
+    return
+  }
+  if (!force && state.account.apiKeysLoadedFor === state.account.user.id) {
+    hydrateSettingsForm({ preserveKeyInputs: dom.settingsDialog?.open })
+    return
+  }
+  let errorMessage = ''
+  try {
+    const data = await getJson('/api/account/api-keys')
+    state.account.apiKeys = data.apiKeys || { keys: {}, updatedAt: '' }
+    state.account.apiKeysLoadedFor = state.account.user.id
+  } catch (error) {
+    errorMessage = trimError(error)
+  } finally {
+    hydrateSettingsForm({ preserveKeyInputs: dom.settingsDialog?.open })
+    if (errorMessage) setSettingsKeyStatus(errorMessage, 'err')
   }
 }
 
@@ -1044,6 +1129,7 @@ function bindAccount() {
   dom.authSettings?.addEventListener('click', () => {
     hydrateSettingsForm()
     dom.settingsDialog.showModal()
+    void loadAccountApiKeys({ force: true })
   })
 
   dom.accountLogin?.addEventListener('click', () => {
@@ -1063,6 +1149,12 @@ async function loadAccount({ handleInvite = true } = {}) {
     state.account.user = data.user || null
     state.account.usage = data.usage || null
     state.account.error = ''
+    if (state.account.user) {
+      await loadAccountApiKeys()
+    } else {
+      state.account.apiKeys = { keys: {}, updatedAt: '' }
+      state.account.apiKeysLoadedFor = ''
+    }
   } catch (error) {
     state.account.error = trimError(error)
   } finally {
@@ -1118,6 +1210,7 @@ async function submitAccountAuth(mode) {
     state.account.user = data.user || null
     state.account.status = state.account.user ? '已登录' : ''
     dom.accountPasswordInput.value = ''
+    await loadAccountApiKeys({ force: true })
     await loadAccount({ handleInvite: false })
     state.projects.loadedSessionId = ''
     void loadCanvasProjects({ force: true })
@@ -1139,6 +1232,8 @@ async function logoutAccount() {
     await postJson('/api/auth/logout', {})
     state.account.user = null
     state.account.usage = null
+    state.account.apiKeys = { keys: {}, updatedAt: '' }
+    state.account.apiKeysLoadedFor = ''
     state.account.status = '已退出登录'
     state.projects.loadedSessionId = ''
     void loadCanvasProjects({ force: true })
@@ -6371,16 +6466,58 @@ function createDropdownItem({ primary, secondary, selected, multiple }) {
   return button
 }
 
-function hydrateSettingsForm() {
-  hydrateKeyForm()
+function hydrateSettingsForm({ preserveKeyInputs = false } = {}) {
+  hydrateKeyForm({ preserveKeyInputs })
   hydrateThemeForm()
+  renderSettingsAccountKeys()
 }
 
-function hydrateKeyForm() {
-  $('#k-vision').value = state.keys.visionApiKey || ''
-  $('#k-banana2').value = state.keys.banana2ApiKey || ''
-  $('#k-bananapro').value = state.keys.bananaProApiKey || ''
-  $('#k-gptimage').value = state.keys.gptImageApiKey || ''
+function hydrateKeyForm({ preserveKeyInputs = false } = {}) {
+  hydrateKeyInput('k-vision', 'visionApiKey', preserveKeyInputs)
+  hydrateKeyInput('k-banana2', 'banana2ApiKey', preserveKeyInputs)
+  hydrateKeyInput('k-bananapro', 'bananaProApiKey', preserveKeyInputs)
+  hydrateKeyInput('k-gptimage', 'gptImageApiKey', preserveKeyInputs)
+}
+
+function hydrateKeyInput(id, keyName, preserveValue = false) {
+  const input = $(`#${id}`)
+  if (!input) return
+  if (!preserveValue) input.value = state.keys[keyName] || ''
+  const saved = state.account.apiKeys?.keys?.[keyName]
+  input.placeholder = saved?.saved
+    ? `已保存到账号${saved.last4 ? `（尾号 ${saved.last4}）` : ''}`
+    : 'sk-...'
+}
+
+function renderSettingsAccountKeys() {
+  if (!dom.settingsSaveAccount || !dom.settingsClearAccount || !dom.settingsAccountStatus) return
+  const loggedIn = Boolean(state.account.user)
+  dom.settingsSaveAccount.disabled = !loggedIn
+  dom.settingsSaveAccount.checked = loggedIn
+  dom.settingsClearAccount.disabled = !loggedIn || !hasSavedAccountKeys()
+
+  if (!loggedIn) {
+    setSettingsKeyStatus('登录后可将 API Keys 加密保存到账号')
+    return
+  }
+
+  const saved = Object.values(state.account.apiKeys?.keys || {}).filter((item) => item?.saved)
+  if (!saved.length) {
+    setSettingsKeyStatus('账号尚未保存 API Keys')
+    return
+  }
+
+  const details = saved
+    .map((item) => `${item.label || 'Key'}${item.last4 ? ` · ${item.last4}` : ''}`)
+    .join('；')
+  const updated = state.account.apiKeys?.updatedAt
+    ? `，更新于 ${formatTimestamp(state.account.apiKeys.updatedAt)}`
+    : ''
+  setSettingsKeyStatus(`账号已保存：${details}${updated}`)
+}
+
+function hasSavedAccountKeys() {
+  return Object.values(state.account.apiKeys?.keys || {}).some((item) => item?.saved)
 }
 
 function hydrateThemeForm() {

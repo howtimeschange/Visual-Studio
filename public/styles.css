@@ -3671,6 +3671,31 @@ dialog .hint {
   outline: none;
 }
 
+.settings-key-status {
+  min-height: 20px;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.settings-key-status.err {
+  color: var(--danger);
+}
+
+dialog .settings-account-save {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+dialog .settings-account-save input {
+  width: auto;
+  margin: 0;
+}
+
 .theme-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
