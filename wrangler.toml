@@ -39,6 +39,10 @@ queue = "visual-studio-translate-jobs"
 binding = "VS_OUTFIT_JOBS_QUEUE"
 queue = "visual-studio-outfit-jobs"
 
+[[queues.producers]]
+binding = "VS_JOBS_QUEUE"
+queue = "visual-studio-jobs"
+
 [vars]
 VS_QUEUE_EXECUTION_MODE = "queue"
 # RELAY_BASE_URL = "https://api.1xm.ai/v1"

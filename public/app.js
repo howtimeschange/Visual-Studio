@@ -82,6 +82,8 @@ const RUNTIME_FALLBACK_ELEMENT_LIMIT = 80
 const RUNTIME_FALLBACK_SUBJECT_REF_LIMIT = 12
 const RUNTIME_MIGRATION_NOTICE_MS = 5200
 const CANVAS_SAVE_DEBOUNCE_MS = 2200
+const CANVAS_GENERATE_POLL_INTERVAL_MS = 1600
+const CANVAS_GENERATE_POLL_TIMEOUT_MS = 25 * 60 * 1000
 
 const KEY_STORAGE = 'img-translator:keys:v1'
 const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
@@ -4034,6 +4036,79 @@ function setCanvasGenerateStatus(el, message) {
   renderCanvas()
 }
 
+function shouldUseAsyncCanvasGenerate(modelId, resolution, refImages = []) {
+  return modelId === 'gpt-image-2'
+    && (normalizeCanvasResolution(resolution) === '4k' || refImages.length > 0)
+}
+
+async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
+  if (!shouldUseAsyncCanvasGenerate(payload.modelId, payload.resolution, payload.referenceImages || [])) {
+    return postJson('/api/generate-direct', payload)
+  }
+
+  onStatus?.('正在提交 4K 生成任务…')
+  const submitted = await postJson('/api/jobs/generate-direct', payload)
+  state.runtime.sessionId = submitted.sessionId || state.runtime.sessionId
+  onStatus?.('4K 任务已提交，正在等待生成完成…')
+  return waitForCanvasGenerateJob(submitted.jobId, {
+    projectId: state.generate.projectId,
+    onStatus,
+  })
+}
+
+async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.projectId, onStatus = null } = {}) {
+  if (!jobId) throw new Error('生成任务 id 缺失')
+  const startedAt = Date.now()
+  let lastStatus = ''
+
+  while (Date.now() - startedAt < CANVAS_GENERATE_POLL_TIMEOUT_MS) {
+    const [jobData, itemsData] = await Promise.all([
+      getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
+      getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
+    ])
+    const job = jobData.job || {}
+    const item = Array.isArray(itemsData.items) ? itemsData.items[0] : null
+    const status = item?.status || job.status || ''
+
+    if (status && status !== lastStatus) {
+      lastStatus = status
+      onStatus?.(formatCanvasGenerateJobStatus(status))
+    }
+
+    if (status === 'completed') {
+      const resultAssetId = String(item?.outputJson?.resultAssetId || job.summaryJson?.resultAssetId || '').trim()
+      if (!resultAssetId) throw new Error('生成完成但缺少结果资源')
+      const assetData = await getJson(`/api/assets/${encodeURIComponent(resultAssetId)}?includeData=1${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`)
+      if (!assetData?.dataUrl) throw new Error('生成结果读取失败')
+      return {
+        sessionId: state.runtime.sessionId,
+        jobId,
+        resultAsset: assetData.asset,
+        resultDataUrl: assetData.dataUrl,
+      }
+    }
+
+    if (status === 'failed' || status === 'cancelled') {
+      const message = item?.errorMessage || job.summaryJson?.error || (status === 'cancelled' ? '生成任务已取消' : '生成任务失败')
+      throw new Error(message)
+    }
+
+    await wait(CANVAS_GENERATE_POLL_INTERVAL_MS)
+  }
+
+  throw new Error('生成任务等待超时，请稍后在项目中查看结果')
+}
+
+function formatCanvasGenerateJobStatus(status) {
+  return ({
+    queued: '任务排队中…',
+    running: '图像模型正在生成 4K 图片…',
+    completed: '正在读取生成结果…',
+    failed: '生成任务失败',
+    cancelled: '生成任务已取消',
+  })[status] || '正在等待生成任务…'
+}
+
 async function executeCanvasGenerate() {
   const targetId = state.generate.genTargetId
   const el = state.generate.elements.find((item) => item.id === targetId)
@@ -4091,7 +4166,7 @@ async function executeCanvasGenerate() {
     }
 
     setCanvasGenerateStatus(el, '正在调用图像模型生成图片…')
-    const data = await postJson('/api/generate-direct', {
+    const data = await requestCanvasGenerate({
       sessionId: state.runtime.sessionId || undefined,
       modelId: state.generate.genModel,
       prompt: finalPrompt,
@@ -4100,6 +4175,8 @@ async function executeCanvasGenerate() {
       resolution: state.generate.genResolution,
       useDesignAgent: false,
       clientKeys: { ...state.keys },
+    }, {
+      onStatus: (message) => setCanvasGenerateStatus(el, message),
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
@@ -4494,7 +4571,7 @@ async function sendCanvasAiMessage() {
   state.generate.aiRunning = true
   state.generate.aiMessages.push(assistantMsg)
   renderAiMessages()
-  saveRuntimeState({ persistCanvas: false })
+  saveRuntimeState()
 
   try {
     // 上传参考图
@@ -4558,7 +4635,7 @@ async function sendCanvasAiMessage() {
     })
     renderCanvas()
 
-    const data = await postJson('/api/generate-direct', {
+    const data = await requestCanvasGenerate({
       sessionId: state.runtime.sessionId || undefined,
       modelId: aiModelId,
       prompt: generationPrompt,
@@ -4567,6 +4644,8 @@ async function sendCanvasAiMessage() {
       resolution: aiResolution,
       useDesignAgent: false,
       clientKeys: { ...state.keys },
+    }, {
+      onStatus: (message) => setAiMessageLoading(assistantMsg, message),
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId

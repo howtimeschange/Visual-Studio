@@ -22,6 +22,7 @@ async function importRunner() {
           createJobItems,
           createSealedCredential,
           ensureSession,
+          getAssetDataUrl,
           getJob,
           getSealedCredential,
           listEvents,
@@ -77,6 +78,63 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
       { banana2ApiKey: 'job-api-key' },
     )
   } finally {
+    await cleanup()
+  }
+})
+
+test('submitGenerateDirectJob queues 4k canvas generation and runner stores the result asset', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return new Response(JSON.stringify({ data: [{ b64_json: 'YXN5bmMtNGstaW1hZ2U=' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const submitted = await mod.submitGenerateDirectJob(env, {
+      sessionId: 'session_canvas_direct_async',
+      modelId: 'gpt-image-2',
+      prompt: 'make a 4k widescreen campaign poster',
+      aspectRatio: '16:9',
+      resolution: '4k',
+      clientKeys: { gptImageApiKey: 'job-gpt-image-key' },
+    })
+
+    assert.equal(submitted.sessionId, 'session_canvas_direct_async')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].jobId, submitted.jobId)
+    assert.equal(sent[0].jobType, 'generate_batch')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    const payload = JSON.parse(calls[0].init.body)
+
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(payload.size, '3840x2160')
+    assert.equal(payload.quality, 'high')
+    assert.equal(Boolean(item.outputJson.resultAssetId), true)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,YXN5bmMtNGstaW1hZ2U=',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
     await cleanup()
   }
 })

@@ -50,17 +50,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 async function handleDirectGenerate(env: Env, body: any) {
   const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
   const session = await ensureSession(env, body?.sessionId, userId)
-  const modelId = String(body?.modelId || 'nano-banana-2')
-  const prompt = String(body?.prompt || '').trim()
-  const aspectRatio = normalizeAspectRatio(body?.aspectRatio)
-  const resolution = normalizeResolution(body?.resolution)
-  const useDesignAgent = Boolean(body?.useDesignAgent)
-  const referenceEntries: RefEntry[] = Array.isArray(body?.referenceImages)
-    ? body.referenceImages.filter((r: any) => r?.assetId)
-    : []
+  const request = normalizeDirectGenerateRequest(body)
 
-  if (!prompt) throw createError('prompt required', 400)
-  if (!MODEL_MAP[modelId]) throw createError(`Unknown modelId: ${modelId}`, 400)
+  if (!request.prompt) throw createError('prompt required', 400)
+  if (!MODEL_MAP[request.modelId]) throw createError(`Unknown modelId: ${request.modelId}`, 400)
 
   const job = await createJob(env, {
     sessionId: session.id,
@@ -68,12 +61,8 @@ async function handleDirectGenerate(env: Env, body: any) {
     type: 'generate_batch',
     status: 'running',
     configJson: {
-      modelId,
-      prompt,
-      aspectRatio,
-      resolution,
-      useDesignAgent,
-      referenceAssetIds: referenceEntries.map((entry) => entry.assetId),
+      ...request,
+      referenceAssetIds: request.referenceEntries.map((entry) => entry.assetId),
     },
     summaryJson: {},
     progressTotal: 1,
@@ -84,7 +73,12 @@ async function handleDirectGenerate(env: Env, body: any) {
     jobId: job.id,
     itemType: 'generate_batch_item',
     status: 'running',
-    inputJson: { prompt, aspectRatio, resolution, modelId },
+    inputJson: {
+      prompt: request.prompt,
+      aspectRatio: request.aspectRatio,
+      resolution: request.resolution,
+      modelId: request.modelId,
+    },
     outputJson: {},
     attemptCount: 1,
     errorCode: null,
@@ -95,54 +89,9 @@ async function handleDirectGenerate(env: Env, body: any) {
   await publishEvent(env, 'job', job.id, 'status', { status: 'running', type: job.type })
 
   const clientKeys = body?.clientKeys || {}
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
-  const { visionKey, genKey } = resolveKeys(modelId, env, clientKeys)
-  const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
-  imageModelOptions.aspectRatio = aspectRatio
-  imageModelOptions.resolution = resolution
 
   try {
-    if (!genKey) throw createError(`Missing API key for ${modelId}`, 400)
-
-    // Load reference images
-    const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
-    for (const entry of referenceEntries) {
-      const dataUrl = await getAssetDataUrl(env, String(entry.assetId))
-      if (!dataUrl) continue
-      const { base64, mime } = splitDataUrl(dataUrl)
-      if (!base64) continue
-      refImages.push({
-        base64,
-        mime,
-        role: entry.role || 'other',
-        label: entry.label || '',
-      })
-    }
-
-    let finalPrompt = prompt
-
-    if (useDesignAgent && visionKey) {
-      // Design Agent mode: use vision model to refine prompt, but still pass images directly
-      const refined = await refineWithDesignAgent(baseUrl, visionKey, prompt, refImages, aspectRatio, resolution)
-      if (refined) finalPrompt = refined
-    }
-
-    // Build the final prompt with role annotations
-    const fullPrompt = buildDirectPrompt(finalPrompt, refImages, aspectRatio, resolution)
-
-    // Pass all reference images directly to the image model
-    const images = refImages.map((img) => ({ base64: img.base64, mime: img.mime }))
-
-    const result = await callImageModel(
-      baseUrl,
-      genKey,
-      MODEL_MAP[modelId],
-      images,
-      fullPrompt,
-      imageModelOptions,
-    )
-
-    if (!result.ok) throw createError(result.error, result.status)
+    const result = await executeDirectGenerate(env, request, clientKeys)
 
     const resultAsset = await createAsset(env, {
       sessionId: session.id,
@@ -172,7 +121,7 @@ async function handleDirectGenerate(env: Env, body: any) {
       eventType: 'generate_direct_result',
       amount: 1,
       provider: '1xm.ai',
-      modelId,
+      modelId: request.modelId,
     })
 
     return {
@@ -180,8 +129,8 @@ async function handleDirectGenerate(env: Env, body: any) {
       jobId: job.id,
       resultAsset,
       resultDataUrl: result.dataUrl,
-      aspectRatio,
-      resolution,
+      aspectRatio: request.aspectRatio,
+      resolution: request.resolution,
     }
   } catch (error: any) {
     await updateJobItem(env, job.id, item.id, {
@@ -201,6 +150,80 @@ async function handleDirectGenerate(env: Env, body: any) {
     })
     throw error
   }
+}
+
+export function normalizeDirectGenerateRequest(body: any) {
+  const referenceEntries: RefEntry[] = Array.isArray(body?.referenceImages)
+    ? body.referenceImages.filter((r: any) => r?.assetId)
+    : []
+
+  return {
+    modelId: String(body?.modelId || 'nano-banana-2'),
+    prompt: String(body?.prompt || '').trim(),
+    aspectRatio: normalizeAspectRatio(body?.aspectRatio),
+    resolution: normalizeResolution(body?.resolution),
+    useDesignAgent: Boolean(body?.useDesignAgent),
+    referenceEntries,
+  }
+}
+
+export async function executeDirectGenerate(
+  env: Env,
+  request: ReturnType<typeof normalizeDirectGenerateRequest>,
+  clientKeys: any = {},
+): Promise<{ dataUrl: string; finalPrompt: string }> {
+  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const { visionKey, genKey } = resolveKeys(request.modelId, env, clientKeys)
+  const imageModelOptions = resolveImageModelOptions(request.modelId, env, clientKeys)
+  imageModelOptions.aspectRatio = request.aspectRatio
+  imageModelOptions.resolution = request.resolution
+
+  if (!request.prompt) throw createError('prompt required', 400)
+  if (!MODEL_MAP[request.modelId]) throw createError(`Unknown modelId: ${request.modelId}`, 400)
+  if (!genKey) throw createError(`Missing API key for ${request.modelId}`, 400)
+
+  const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
+  for (const entry of request.referenceEntries) {
+    const dataUrl = await getAssetDataUrl(env, String(entry.assetId))
+    if (!dataUrl) continue
+    const { base64, mime } = splitDataUrl(dataUrl)
+    if (!base64) continue
+    refImages.push({
+      base64,
+      mime,
+      role: entry.role || 'other',
+      label: entry.label || '',
+    })
+  }
+
+  let finalPrompt = request.prompt
+
+  if (request.useDesignAgent && visionKey) {
+    const refined = await refineWithDesignAgent(
+      baseUrl,
+      visionKey,
+      request.prompt,
+      refImages,
+      request.aspectRatio,
+      request.resolution,
+    )
+    if (refined) finalPrompt = refined
+  }
+
+  const fullPrompt = buildDirectPrompt(finalPrompt, refImages, request.aspectRatio, request.resolution)
+  const images = refImages.map((img) => ({ base64: img.base64, mime: img.mime }))
+
+  const result = await callImageModel(
+    baseUrl,
+    genKey,
+    MODEL_MAP[request.modelId],
+    images,
+    fullPrompt,
+    imageModelOptions,
+  )
+
+  if (!result.ok) throw createError(result.error, result.status)
+  return { dataUrl: result.dataUrl, finalPrompt }
 }
 
 function buildDirectPrompt(

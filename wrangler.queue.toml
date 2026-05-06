@@ -31,3 +31,9 @@ queue = "visual-studio-outfit-jobs"
 max_batch_size = 4
 max_batch_timeout = 10
 max_retries = 3
+
+[[queues.consumers]]
+queue = "visual-studio-jobs"
+max_batch_size = 2
+max_batch_timeout = 10
+max_retries = 3

@@ -38,6 +38,7 @@ import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
 import { executeTranslate } from '../api/translate'
 import { executeOutfitSwap } from '../api/outfit-swap'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
+import { executeDirectGenerate, normalizeDirectGenerateRequest } from '../api/generate-direct'
 
 type WaitUntil = (promise: Promise<unknown>) => void
 
@@ -888,6 +889,159 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   }
 }
 
+export async function submitGenerateDirectJob(
+  env: Env,
+  body: any,
+  waitUntil?: WaitUntil,
+) {
+  const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
+  const session = await ensureSession(env, body?.sessionId, userId)
+  const request = normalizeDirectGenerateRequest(body)
+  if (!request.prompt) throw createRunnerError('prompt required', 400)
+
+  const jobId = createId('job')
+  const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
+  const job = await createJob(env, {
+    id: jobId,
+    sessionId: session.id,
+    userId,
+    type: 'generate_batch',
+    status: 'queued',
+    configJson: {
+      ...request,
+      referenceAssetIds: request.referenceEntries.map((entry) => entry.assetId),
+      sealedCredentialId,
+      configHash: await stableHash({
+        ...request,
+        referenceAssetIds: request.referenceEntries.map((entry) => entry.assetId),
+      }),
+    },
+    summaryJson: {},
+    progressTotal: 1,
+    progressDone: 0,
+    progressFailed: 0,
+  })
+
+  await createJobItems(env, job.id, [{
+    jobId: job.id,
+    itemType: 'generate_batch_item',
+    status: 'queued',
+    inputJson: {
+      prompt: request.prompt,
+      aspectRatio: request.aspectRatio,
+      resolution: request.resolution,
+      modelId: request.modelId,
+    },
+    outputJson: {},
+    attemptCount: 0,
+    errorCode: null,
+    errorMessage: null,
+    startedAt: null,
+    finishedAt: null,
+  }])
+
+  await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type })
+  await publishJobProgress(env, job)
+
+  await scheduleJobExecution(env, job, waitUntil, 'submit', body?.clientKeys || {})
+
+  return { jobId: job.id, sessionId: session.id, itemCount: 1 }
+}
+
+async function runGenerateBatchJob(env: Env, jobId: string) {
+  const initialJob = await getJob(env, jobId)
+  if (!initialJob) return
+  if (STOPPED_JOB_STATUSES.has(initialJob.status)) return
+  const clientKeys = await loadJobClientKeys(env, initialJob)
+  await updateJob(env, jobId, { status: 'running' })
+  await publishEvent(env, 'job', jobId, 'status', { status: 'running', type: initialJob.type })
+
+  const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
+  const item = items[0]
+  if (!item) return
+
+  await updateJobItem(env, jobId, item.id, {
+    status: 'running',
+    attemptCount: item.attemptCount + 1,
+    startedAt: nowIso(),
+    errorCode: null,
+    errorMessage: null,
+  })
+  await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
+
+  try {
+    const request = normalizeDirectGenerateRequest({
+      ...initialJob.configJson,
+      referenceImages: initialJob.configJson.referenceEntries,
+    })
+    const { result, attempts } = await runWithAutoRetry(() => executeDirectGenerate(env, request, clientKeys))
+    const resultAsset = await createAsset(env, {
+      sessionId: initialJob.sessionId,
+      userId: initialJob.userId || null,
+      kind: 'result',
+      source: 'generate_direct',
+      dataUrl: result.dataUrl,
+      filename: `${initialJob.id}.png`,
+      bucketKind: 'result',
+    })
+
+    await updateJobItem(env, jobId, item.id, {
+      status: 'completed',
+      attemptCount: attempts,
+      outputJson: {
+        resultAssetId: resultAsset.id,
+        finalPrompt: result.finalPrompt,
+      },
+      finishedAt: nowIso(),
+    })
+    await updateJob(env, jobId, {
+      status: 'completed',
+      progressDone: 1,
+      summaryJson: { resultAssetId: resultAsset.id },
+    })
+    await publishEvent(env, 'item', item.id, 'item_completed', {
+      jobId,
+      resultAssetId: resultAsset.id,
+    })
+    await publishEvent(env, 'job', jobId, 'job_completed', {
+      status: 'completed',
+      resultAssetId: resultAsset.id,
+    })
+    await createUsageEvent(env, {
+      userId: initialJob.userId || null,
+      sessionId: initialJob.sessionId,
+      jobId,
+      eventType: 'generate_direct_result',
+      amount: 1,
+      provider: '1xm.ai',
+      modelId: String(initialJob.configJson.modelId || ''),
+    })
+  } catch (error: any) {
+    await updateJobItem(env, jobId, item.id, {
+      status: 'failed',
+      attemptCount: Number(error?.attempts || item.attemptCount || 1),
+      errorCode: 'generate_direct_failed',
+      errorMessage: String(error?.message || 'Generate failed'),
+      finishedAt: nowIso(),
+    })
+    await updateJob(env, jobId, {
+      status: 'failed',
+      progressFailed: 1,
+      summaryJson: { error: String(error?.message || 'Generate failed') },
+    })
+    await publishEvent(env, 'item', item.id, 'item_failed', {
+      jobId,
+      error: String(error?.message || 'Generate failed'),
+    })
+    await publishEvent(env, 'job', jobId, 'job_completed', {
+      status: 'failed',
+      error: String(error?.message || 'Generate failed'),
+    })
+  } finally {
+    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+  }
+}
+
 async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
   const latestJob = await getJob(env, job.id)
   if (latestJob?.status === 'paused') {
@@ -964,6 +1118,8 @@ export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: C
       await runOutfitBatchJob(env, job.id)
     } else if (job.type === 'generate_turn') {
       await runGenerateTurnJob(env, job.id)
+    } else if (job.type === 'generate_batch') {
+      await runGenerateBatchJob(env, job.id)
     } else {
       await updateJob(env, job.id, {
         status: 'failed',

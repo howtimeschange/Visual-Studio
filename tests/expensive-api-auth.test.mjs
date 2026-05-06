@@ -56,6 +56,7 @@ test('expensive POST APIs require a logged-in user before spending upstream call
       clientKeys: { bananaProApiKey: 'key' },
     }],
     ['functions/api/jobs/generate-turn.ts', { userMessage: 'make a poster', clientKeys: { banana2ApiKey: 'key' } }],
+    ['functions/api/jobs/generate-direct.ts', { prompt: 'make a 4k poster', clientKeys: { gptImageApiKey: 'key' } }],
     ['functions/api/jobs/translate-batch.ts', { assetIds: ['asset_1'], targetLanguages: ['ja'], clientKeys: { banana2ApiKey: 'key' } }],
     ['functions/api/jobs/outfit-batch.ts', { modelAssetIds: ['asset_1'], garments: [{ assetId: 'asset_2' }], clientKeys: { bananaProApiKey: 'key' } }],
     ['functions/api/jobs/recover.ts', {}],
