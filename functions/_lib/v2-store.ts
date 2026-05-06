@@ -95,6 +95,41 @@ function isMissingUsageCostColumn(error: unknown): boolean {
   return /no column named|has no column|no such column/i.test(String((error as any)?.message || error || ''))
 }
 
+const DEFAULT_AUTH_SESSION_TOUCH_INTERVAL_MS = 2 * 60_000
+
+function isoTimeMs(value: unknown): number {
+  const ms = Date.parse(String(value || ''))
+  return Number.isFinite(ms) ? ms : 0
+}
+
+function authSessionTouchIntervalMs(value: unknown): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric)) return DEFAULT_AUTH_SESSION_TOUCH_INTERVAL_MS
+  return Math.max(0, numeric)
+}
+
+function shouldTouchAuthSession(lastSeenAt: unknown, now: string, minIntervalMs: number): boolean {
+  if (minIntervalMs <= 0) return true
+  const lastMs = isoTimeMs(lastSeenAt)
+  const nowMs = isoTimeMs(now)
+  if (!lastMs || !nowMs) return true
+  return nowMs - lastMs >= minIntervalMs
+}
+
+function stableStringifyJson(value: unknown): string {
+  if (value === null || value === undefined) return 'null'
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringifyJson(item)).join(',')}]`
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringifyJson(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  return stableStringifyJson(left) === stableStringifyJson(right)
+}
+
 function inferMimeFromDataUrl(dataUrl: string): string {
   const match = String(dataUrl || '').match(/^data:(image\/[^;]+);base64,/i)
   return match?.[1] || 'image/png'
@@ -443,8 +478,13 @@ export async function getAuthSessionByTokenHash(env: any, tokenHash: string): Pr
   return id ? memoryState.authSessions.get(id) || null : null
 }
 
-export async function touchAuthSession(env: any, sessionId: string): Promise<void> {
-  const now = nowIso()
+export async function touchAuthSession(env: any, sessionId: string, opts: {
+  lastSeenAt?: string | null
+  now?: string
+  minIntervalMs?: number
+} = {}): Promise<void> {
+  const now = opts.now || nowIso()
+  if (!shouldTouchAuthSession(opts.lastSeenAt, now, authSessionTouchIntervalMs(opts.minIntervalMs))) return
   const db = dbFor(env)
   if (db) {
     await db.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?').bind(now, sessionId).run()
@@ -1257,6 +1297,12 @@ export async function updateCanvasProject(envOrProjectId: any, projectIdOrPatch:
     metadataJson: patch.metadataJson || current.metadataJson,
     updatedAt: nowIso(),
   }
+  const unchanged = current.sessionId === next.sessionId
+    && (current.ownerUserId || null) === (next.ownerUserId || null)
+    && current.title === next.title
+    && current.createdAt === next.createdAt
+    && jsonValuesEqual(current.metadataJson, next.metadataJson)
+  if (unchanged) return current
 
   const db = dbFor(env)
   if (db) {
@@ -1334,6 +1380,10 @@ export async function replaceCanvasProjectElements(
   const project = await getCanvasProject(env, projectId)
   if (!project) return null
   const now = nowIso()
+  const currentRecords = await listCanvasProjectElements(env, projectId)
+  if (jsonValuesEqual(currentRecords.map((record) => record.dataJson), elements)) {
+    return currentRecords
+  }
   const records = elements.map((element, index) => {
     return {
       id: createId('cel'),

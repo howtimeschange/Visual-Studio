@@ -115,7 +115,7 @@ export async function getAuthContext(env: Env, request: Request): Promise<AuthCo
   }
   const user = await getUser(env, session.userId)
   if (!user) return { user: null }
-  await touchAuthSession(env, session.id)
+  await touchAuthSession(env, session.id, { lastSeenAt: session.lastSeenAt })
   return { user: toPublicUser(user) }
 }
 

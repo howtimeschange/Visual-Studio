@@ -81,6 +81,7 @@ const RUNTIME_FALLBACK_ITEM_LIMIT = 24
 const RUNTIME_FALLBACK_ELEMENT_LIMIT = 80
 const RUNTIME_FALLBACK_SUBJECT_REF_LIMIT = 12
 const RUNTIME_MIGRATION_NOTICE_MS = 5200
+const CANVAS_SAVE_DEBOUNCE_MS = 2200
 
 const KEY_STORAGE = 'img-translator:keys:v1'
 const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
@@ -119,6 +120,7 @@ let canvasSaveTimer = 0
 let canvasSaveInFlight = null
 let canvasSavePending = false
 let canvasProjectCreateInFlight = null
+let canvasLastSavedSignature = ''
 let restoringRuntimeState = false
 let runtimeStateReady = false
 
@@ -6852,6 +6854,7 @@ async function startNewCanvasProject({ initialPrompt = '' } = {}) {
   state.generate.projectTitle = initialPrompt ? initialPrompt.slice(0, 36) : DEFAULT_CANVAS_PROJECT_TITLE
   state.generate.projectMetadata = {}
   state.generate.projectSaveStatus = ''
+  canvasLastSavedSignature = ''
   state.generate.elements = []
   const aiSession = createAiSessionRecord()
   state.generate.aiSessionId = aiSession.id
@@ -6900,6 +6903,7 @@ async function openCanvasProject(projectId) {
     ensureCurrentAiSession()
     state.generate.aiMessages = await hydrateAiMessages(resolveCanvasAiHistory(snapshot.project, projectId))
     persistCurrentAiSession()
+    canvasLastSavedSignature = getCanvasProjectSaveSignature(createCanvasProjectSaveSnapshot())
     state.generate.aiRefs = []
     state.generate.selectedIds = []
     state.generate.scale = 1
@@ -6972,6 +6976,7 @@ async function deleteCanvasProjectFromDialog() {
       state.generate.projectId = ''
       state.generate.projectTitle = DEFAULT_CANVAS_PROJECT_TITLE
       state.generate.projectMetadata = {}
+      canvasLastSavedSignature = ''
       state.generate.elements = []
       state.generate.aiSessionId = ''
       state.generate.aiSessions = []
@@ -7253,7 +7258,28 @@ function scheduleCanvasProjectSave() {
   window.clearTimeout(canvasSaveTimer)
   canvasSaveTimer = window.setTimeout(() => {
     void persistCanvasProject()
-  }, 450)
+  }, CANVAS_SAVE_DEBOUNCE_MS)
+}
+
+function createCanvasProjectSaveSnapshot() {
+  return {
+    title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+    metadataJson: {
+      ...state.generate.projectMetadata,
+      aiSessionId: state.generate.aiSessionId || '',
+      aiSessions: serializeAiSessions(state.generate.aiSessions),
+      aiMessages: getSerializedAiHistory(),
+    },
+    elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
+  }
+}
+
+function getCanvasProjectSaveSignature(snapshot) {
+  try {
+    return JSON.stringify(snapshot)
+  } catch {
+    return ''
+  }
 }
 
 async function ensureCanvasProjectRecord() {
@@ -7275,6 +7301,7 @@ async function ensureCanvasProjectRecord() {
     state.generate.projectId = data.project?.id || ''
     state.generate.projectTitle = data.project?.title || state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
     state.generate.projectMetadata = getProjectMetadata(data.project)
+    canvasLastSavedSignature = ''
     if (state.activeView === 'generate' && state.generate.projectId && window.location.pathname === '/lovart/canvas' && !canvasProjectIdFromLocation()) {
       window.history.replaceState({}, '', `/lovart/canvas?id=${encodeURIComponent(state.generate.projectId)}`)
     }
@@ -7296,6 +7323,9 @@ async function persistCanvasProject() {
     canvasSavePending = true
     return canvasSaveInFlight
   }
+  const snapshot = createCanvasProjectSaveSnapshot()
+  const signature = getCanvasProjectSaveSignature(snapshot)
+  if (signature && signature === canvasLastSavedSignature && state.generate.projectSaveStatus === 'saved') return null
 
   canvasSaveInFlight = (async () => {
     state.generate.projectSaveStatus = 'saving'
@@ -7306,13 +7336,8 @@ async function persistCanvasProject() {
       const projectUrl = `/api/canvas/projects/${encodeURIComponent(state.generate.projectId)}`
       const projectBody = {
         sessionId: state.runtime.sessionId || undefined,
-        title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
-        metadataJson: {
-          ...state.generate.projectMetadata,
-          aiSessionId: state.generate.aiSessionId || '',
-          aiSessions: serializeAiSessions(state.generate.aiSessions),
-          aiMessages: getSerializedAiHistory(),
-        },
+        title: snapshot.title,
+        metadataJson: snapshot.metadataJson,
       }
 
       try {
@@ -7325,8 +7350,9 @@ async function persistCanvasProject() {
 
       await putJson(`/api/canvas/projects/${encodeURIComponent(state.generate.projectId)}/elements`, {
         sessionId: state.runtime.sessionId || undefined,
-        elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
+        elements: snapshot.elements,
       })
+      canvasLastSavedSignature = signature || getCanvasProjectSaveSignature(snapshot)
       state.generate.projectSaveStatus = 'saved'
       state.projects.loadedSessionId = ''
     } catch {
@@ -7428,6 +7454,9 @@ async function restoreRuntimeState() {
   ensureCurrentAiSession()
   if (aiHistory.length) state.generate.aiMessages = await hydrateAiMessages(aiHistory)
   persistCurrentAiSession()
+  canvasLastSavedSignature = state.generate.projectSaveStatus === 'saved'
+    ? getCanvasProjectSaveSignature(createCanvasProjectSaveSnapshot())
+    : ''
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0

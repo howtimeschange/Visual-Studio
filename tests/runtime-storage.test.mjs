@@ -41,6 +41,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     RUNTIME_FALLBACK_ITEM_LIMIT: 24,
     RUNTIME_FALLBACK_ELEMENT_LIMIT: 80,
     RUNTIME_FALLBACK_SUBJECT_REF_LIMIT: 12,
+    CANVAS_SAVE_DEBOUNCE_MS: 2200,
     CANVAS_SHAPES: new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right']),
     state: {
       runtime: { sessionId: 'session-1' },
@@ -54,6 +55,8 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
       generate: {
         projectId: 'project-1',
         projectTitle: '测试项目',
+        projectMetadata: {},
+        projectSaveStatus: 'saved',
         elements: [],
         aiSessionId: 'session-a',
         aiSessions: [],
@@ -97,6 +100,8 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         ? String(value).trim().toLowerCase()
         : fallback
     ),
+    serializeAiSessions: (value) => value || [],
+    getSerializedAiHistory: () => [],
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
     crypto: {
       randomUUID: () => `test-id-${++idCounter}`,
@@ -129,6 +134,8 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'createRuntimeStorageSnapshot',
     'createCompactRuntimeStorageSnapshot',
     'writeRuntimeStorageSnapshot',
+    'createCanvasProjectSaveSnapshot',
+    'getCanvasProjectSaveSignature',
     'loadRuntimeState',
     'canvasAiHistoryStorageKey',
     'migrateLegacyRuntimeStorage',
@@ -262,4 +269,25 @@ test('migrateLegacyRuntimeStorage skips already compact runtime storage', async 
 
   assert.deepEqual(JSON.parse(JSON.stringify(info)), { migrated: false, compacted: false, aiHistory: false, styleHistory: false })
   assert.equal(harness.writes.length, 0)
+})
+
+test('canvas save signatures are stable for unchanged project snapshots', async () => {
+  const harness = await createRuntimeHarness()
+  harness.state.generate.elements = [{
+    id: 'el-1',
+    type: 'image',
+    assetId: 'asset-1',
+    content: '',
+    x: 10,
+    y: 20,
+  }]
+
+  const first = harness.getCanvasProjectSaveSignature(harness.createCanvasProjectSaveSnapshot())
+  const second = harness.getCanvasProjectSaveSignature(harness.createCanvasProjectSaveSnapshot())
+
+  assert.equal(first, second)
+
+  harness.state.generate.elements[0].x = 11
+  const changed = harness.getCanvasProjectSaveSignature(harness.createCanvasProjectSaveSnapshot())
+  assert.notEqual(changed, first)
 })
