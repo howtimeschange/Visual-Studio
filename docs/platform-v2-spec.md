@@ -498,6 +498,8 @@ Cloudflare Pages Functions
 | `nano-banana-pro` | `gemini-3-pro-image-preview` |
 | `gpt-image-2` | `gpt-image-2` |
 
+`gpt-image-2` 通过 1xm.ai Images API 调用：无参考图走 `/v1/images/generations`，有参考图或编辑走 `/v1/images/edits` multipart。它不走 `/v1/chat/completions`。
+
 固定视觉模型：
 
 - `gemini-3-flash-preview`

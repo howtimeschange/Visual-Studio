@@ -13,6 +13,9 @@ export interface Env {
   VS_ADMIN_EMAILS?: string
   VS_ADMIN_USER_IDS?: string
   VS_QUEUE_EXECUTION_MODE?: string
+  VS_IMAGE_REQUEST_TIMEOUT_MS?: string
+  VS_TEXT_REQUEST_TIMEOUT_MS?: string
+  VS_IMAGE_FETCH_TIMEOUT_MS?: string
   VS_DB?: D1Database
   VS_INPUTS_BUCKET?: R2Bucket
   VS_RESULTS_BUCKET?: R2Bucket
@@ -22,6 +25,11 @@ export interface Env {
 
 export const DEFAULT_BASE = 'https://api.1xm.ai/v1'
 export const VISION_MODEL = 'gemini-3-flash-preview'
+const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 300_000
+const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = 90_000
+const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 60_000
+const MIN_TIMEOUT_MS = 1_000
+const MAX_TIMEOUT_MS = 900_000
 
 export const MODEL_MAP: Record<string, string> = {
   'nano-banana-2': 'gemini-3.1-flash-image-preview',
@@ -72,6 +80,8 @@ export function resolveImageModelOptions(modelId: string, env: Env, clientKeys: 
     group: modelId === 'gpt-image-2'
       ? String(clientKeys.gptImageGroup || env.GPT_IMAGE_GROUP || '').trim()
       : '',
+    timeoutMs: normalizeTimeoutMs(env.VS_IMAGE_REQUEST_TIMEOUT_MS, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS),
+    imageFetchTimeoutMs: normalizeTimeoutMs(env.VS_IMAGE_FETCH_TIMEOUT_MS, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
   }
 }
 
@@ -86,41 +96,37 @@ export async function callImageModel(
   modelName: string,
   images: ImagePart[],
   prompt: string,
-  opts: { group?: string } = {},
+  opts: { group?: string; timeoutMs?: number; imageFetchTimeoutMs?: number } = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
+  if (modelName === 'gpt-image-2') {
+    return callGptImage2Model(baseUrl, apiKey, modelName, images, prompt, opts)
+  }
+
   const content: any[] = images.map((img) => ({
     type: 'image_url',
     image_url: { url: `data:${img.mime};base64,${img.base64}` },
   }))
   content.push({
     type: 'text',
-    text: modelName === 'gpt-image-2'
-      ? `${prompt}\n\nGenerate image only. Do not return explanation text.`
-      : prompt,
+    text: prompt,
   })
 
-  const payload = modelName === 'gpt-image-2'
-    ? {
-        model: modelName,
-        messages: [{ role: 'user', content }],
-        stream: false,
-        ...(opts.group ? { group: opts.group } : {}),
-      }
-    : {
-        model: modelName,
-        messages: [{ role: 'user', content }],
-        temperature: 0.2,
-      }
+  const payload = {
+    model: modelName,
+    messages: [{ role: 'user', content }],
+    temperature: 0.2,
+  }
 
   try {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
+    const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(payload),
-    })
+    }, timeoutMs)
 
     if (!res.ok) {
       const errBody = await res.text()
@@ -128,14 +134,110 @@ export async function callImageModel(
     }
     const data = await res.json<any>()
     const imageSource = extractImageFromResponse(data)
-    const dataUrl = imageSource ? await coerceImageSourceToDataUrl(imageSource) : null
+    const dataUrl = imageSource
+      ? await coerceImageSourceToDataUrl(
+        imageSource,
+        normalizeTimeoutMs(opts.imageFetchTimeoutMs, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
+      )
+      : null
     if (!dataUrl) {
       return { ok: false, error: 'Model returned no image.', status: 502 }
     }
     return { ok: true, dataUrl }
   } catch (e: any) {
+    if (isTimeoutError(e)) {
+      return { ok: false, error: `Upstream image request timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
+    }
     return { ok: false, error: e?.message ?? 'fetch failed', status: 502 }
   }
+}
+
+async function callGptImage2Model(
+  baseUrl: string,
+  apiKey: string,
+  modelName: string,
+  images: ImagePart[],
+  prompt: string,
+  opts: { timeoutMs?: number; imageFetchTimeoutMs?: number } = {},
+): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
+  const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
+  const hasImages = images.length > 0
+  const endpoint = hasImages ? 'images/edits' : 'images/generations'
+  const request = hasImages
+    ? buildGptImage2EditRequest(modelName, images, prompt)
+    : buildGptImage2GenerationRequest(modelName, prompt)
+
+  try {
+    const res = await fetchWithTimeout(`${baseUrl}/${endpoint}`, {
+      method: 'POST',
+      headers: {
+        ...request.headers,
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: request.body,
+    }, timeoutMs)
+
+    if (!res.ok) {
+      const errBody = await res.text()
+      return { ok: false, error: `Upstream ${res.status}: ${errBody.slice(0, 500)}`, status: res.status }
+    }
+
+    const data = await res.json<any>()
+    const imageSource = extractImageFromResponse(data)
+    const dataUrl = imageSource
+      ? await coerceImageSourceToDataUrl(
+        imageSource,
+        normalizeTimeoutMs(opts.imageFetchTimeoutMs, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
+      )
+      : null
+    if (!dataUrl) {
+      return { ok: false, error: 'Model returned no image.', status: 502 }
+    }
+    return { ok: true, dataUrl }
+  } catch (e: any) {
+    if (isTimeoutError(e)) {
+      return { ok: false, error: `Upstream image request timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
+    }
+    return { ok: false, error: e?.message ?? 'fetch failed', status: 502 }
+  }
+}
+
+function buildGptImage2GenerationRequest(modelName: string, prompt: string): {
+  headers: Record<string, string>
+  body: string
+} {
+  return {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: modelName,
+      prompt,
+      n: 1,
+      size: 'auto',
+      quality: 'high',
+      output_format: 'png',
+    }),
+  }
+}
+
+function buildGptImage2EditRequest(modelName: string, images: ImagePart[], prompt: string): {
+  headers: Record<string, string>
+  body: FormData
+} {
+  const form = new FormData()
+  form.set('model', modelName)
+  form.set('prompt', prompt)
+  form.set('n', '1')
+  form.set('size', 'auto')
+  form.set('quality', 'high')
+  form.set('output_format', 'png')
+
+  images.forEach((image, index) => {
+    const mime = normalizeImageMime(image.mime) || 'image/png'
+    const extension = extensionForImageMime(mime)
+    form.append('image[]', base64ToBlob(image.base64, mime), `reference-${index + 1}.${extension}`)
+  })
+
+  return { headers: {}, body: form }
 }
 
 export async function callTextModel(
@@ -146,7 +248,7 @@ export async function callTextModel(
   opts: { maxTokens?: number; temperature?: number } = {},
 ): Promise<string | null> {
   try {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -158,7 +260,7 @@ export async function callTextModel(
         temperature: opts.temperature ?? 0.3,
         max_tokens: opts.maxTokens ?? 1500,
       }),
-    })
+    }, normalizeTimeoutMs((opts as { timeoutMs?: number }).timeoutMs, DEFAULT_TEXT_REQUEST_TIMEOUT_MS))
     if (!res.ok) return null
     const data = await res.json<any>()
     const raw = data.choices?.[0]?.message?.content
@@ -262,19 +364,61 @@ function collectImageSources(content: any): string[] {
   return sources
 }
 
-async function coerceImageSourceToDataUrl(source: string): Promise<string | null> {
+async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IMAGE_FETCH_TIMEOUT_MS): Promise<string | null> {
   if (!source) return null
   if (source.startsWith('data:')) return source
   if (!/^https?:\/\//i.test(source)) return source
 
   try {
-    const res = await fetch(source)
+    const res = await fetchWithTimeout(source, {}, timeoutMs)
     if (!res.ok) return source
     const mime = normalizeImageMime(res.headers.get('content-type')) || guessMimeFromUrl(source) || 'image/png'
     const buffer = await res.arrayBuffer()
     return `data:${mime};base64,${arrayBufferToBase64(buffer)}`
   } catch {
     return source
+  }
+}
+
+function normalizeTimeoutMs(value: unknown, fallback: number): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, numeric))
+}
+
+function createTimeoutError(timeoutMs: number) {
+  const error = new Error(`Request timed out after ${timeoutMs}ms`) as Error & { code?: string; timeoutMs?: number }
+  error.code = 'REQUEST_TIMEOUT'
+  error.timeoutMs = timeoutMs
+  return error
+}
+
+function isTimeoutError(error: unknown): error is Error & { code: string; timeoutMs: number } {
+  return Boolean(error && typeof error === 'object' && (error as { code?: string }).code === 'REQUEST_TIMEOUT')
+}
+
+function formatDuration(timeoutMs: number): string {
+  if (timeoutMs >= 60_000 && timeoutMs % 60_000 === 0) return `${timeoutMs / 60_000} minutes`
+  if (timeoutMs >= 1_000 && timeoutMs % 1_000 === 0) return `${timeoutMs / 1_000} seconds`
+  return `${timeoutMs}ms`
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<Response>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(createTimeoutError(timeoutMs))
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([
+      fetch(input, { ...init, signal: controller.signal }),
+      timeout,
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -291,6 +435,22 @@ function guessMimeFromUrl(url: string): string | null {
   if (clean.endsWith('.webp')) return 'image/webp'
   if (clean.endsWith('.gif')) return 'image/gif'
   return null
+}
+
+function extensionForImageMime(mime: string): string {
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg'
+  if (mime === 'image/webp') return 'webp'
+  if (mime === 'image/gif') return 'gif'
+  return 'png'
+}
+
+function base64ToBlob(base64: string, mime: string): Blob {
+  const binary = atob(String(base64 || ''))
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new Blob([bytes], { type: mime })
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

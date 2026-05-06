@@ -46,6 +46,8 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 | `nano-banana-pro` | `gemini-3-pro-image-preview` |
 | `gpt-image-2` | `gpt-image-2` |
 
+`gpt-image-2` 使用 1xm.ai 的 OpenAI-compatible Images API：纯文本生图走 `/v1/images/generations`，带参考图或编辑走 `/v1/images/edits` multipart；不要走 chat completions。
+
 ## 架构
 
 ```text
@@ -179,7 +181,6 @@ wrangler pages secret put VISION_API_KEY     --project-name=image-translator
 wrangler pages secret put BANANA2_API_KEY    --project-name=image-translator
 wrangler pages secret put BANANA_PRO_API_KEY --project-name=image-translator
 wrangler pages secret put GPT_IMAGE_API_KEY  --project-name=image-translator
-wrangler pages secret put GPT_IMAGE_GROUP    --project-name=image-translator
 wrangler pages secret put RELAY_BASE_URL     --project-name=image-translator
 wrangler pages secret put CREDENTIAL_KEK     --project-name=image-translator
 wrangler pages secret put ADMIN_EMAILS       --project-name=image-translator
