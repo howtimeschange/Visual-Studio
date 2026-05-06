@@ -1529,19 +1529,58 @@ button.ghost:disabled,
 
 .job-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-sm);
-  min-height: 48px;
-  padding: var(--space-sm);
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-3);
 }
 
+.job-card-thumbs {
+  display: flex;
+  width: 74px;
+  min-width: 74px;
+  align-items: center;
+}
+
+.job-card-thumbs img,
+.job-card-thumbs span {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  object-fit: cover;
+}
+
+.job-card-thumbs img + img {
+  margin-left: -9px;
+}
+
+.job-card-thumbs span {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.job-list .job-card {
+  border-radius: 0;
+  border-width: 0 0 1px;
+  background: transparent;
+}
+
+.job-list .job-card:first-child {
+  border-top-width: 1px;
+}
+
 .job-card.current {
   border-color: color-mix(in oklch, var(--accent) 42%, var(--line));
-  background: color-mix(in oklch, var(--accent-soft) 34%, var(--bg-3));
+  background: color-mix(in oklch, var(--accent-soft) 18%, transparent);
 }
 
 .job-card.live:not(.current) {
@@ -1558,7 +1597,7 @@ button.ghost:disabled,
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: var(--space-xs);
+  gap: 8px;
 }
 
 .job-card-meta strong,
@@ -1569,6 +1608,7 @@ button.ghost:disabled,
 }
 
 .job-card-meta strong {
+  flex: 0 1 auto;
   font-size: var(--text-sm);
 }
 
@@ -1576,6 +1616,10 @@ button.ghost:disabled,
 .job-card-error {
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.job-card-time {
+  color: var(--text-soft);
 }
 
 .job-status {
@@ -1611,18 +1655,19 @@ button.ghost:disabled,
 }
 
 .job-card-actions {
-  grid-column: 1 / -1;
+  align-self: center;
+  flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-start;
-  gap: var(--space-xs);
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .job-mini-btn {
-  min-height: 28px;
+  min-height: 24px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 0 9px;
+  padding: 0 8px;
   background: var(--bg-2);
   color: var(--text-soft);
   font-size: var(--text-xs);
@@ -1638,6 +1683,21 @@ button.ghost:disabled,
 .job-mini-btn.danger:hover {
   border-color: color-mix(in oklch, var(--danger) 42%, var(--line));
   color: var(--danger);
+}
+
+.job-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: 10px 12px 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.job-pagination-actions {
+  display: flex;
+  gap: var(--space-xs);
 }
 
 /* ═══════════════ GRID / TABLE ═══════════════ */
@@ -3843,7 +3903,8 @@ dialog .hint {
   width: min(480px, calc(100vw - 32px));
 }
 
-#project-delete-form {
+#project-delete-form,
+#task-delete-form {
   display: grid;
   gap: var(--space-md);
 }
@@ -4517,11 +4578,18 @@ button.compact {
 
   .job-card-topline {
     align-items: flex-start;
-    flex-direction: column;
+    flex-wrap: wrap;
   }
 
   .job-card-actions {
+    width: 100%;
+    margin-left: 0;
     justify-content: flex-start;
+  }
+
+  .job-pagination {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .chat-input-top {

@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler pages dev public --compatibility-date=2025-01-01",
+    "dev:local-queue": "wrangler pages dev public --compatibility-date=2025-01-01 --port 8788 --binding VS_LOCAL_QUEUE_ENDPOINT=http://127.0.0.1:8798/__queue/run",
+    "dev:queue": "wrangler dev --config wrangler.queue.toml --port 8798 --var VS_LOCAL_QUEUE_BRIDGE:1",
     "deploy": "wrangler pages deploy public --project-name=image-translator",
     "deploy:queue": "wrangler deploy --config wrangler.queue.toml"
   },

@@ -18,6 +18,18 @@ export interface JobQueueMessage {
   clientKeys?: Record<string, string>
 }
 
+async function postLocalQueueMessage(endpoint: string, message: JobQueueMessage): Promise<void> {
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message),
+  })
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`Local queue bridge failed (${response.status})${detail ? `: ${detail.slice(0, 300)}` : ''}`)
+  }
+}
+
 export function createJobQueueMessage(input: Omit<JobQueueMessage, 'kind' | 'createdAt'>): JobQueueMessage {
   return {
     kind: 'run_job',
@@ -31,8 +43,19 @@ export async function dispatchQueuedJob(
   waitUntil: WaitUntil | undefined,
   message: JobQueueMessage,
   fallback: () => Promise<unknown>,
-): Promise<'queue' | 'waitUntil' | 'inline'> {
+): Promise<'queue' | 'local-bridge' | 'waitUntil' | 'inline'> {
   const mode = String(env.VS_QUEUE_EXECUTION_MODE || '').trim().toLowerCase()
+  const localEndpoint = String(env.VS_LOCAL_QUEUE_ENDPOINT || '').trim()
+  if (mode !== 'waituntil' && localEndpoint) {
+    const task = postLocalQueueMessage(localEndpoint, message)
+    if (waitUntil) {
+      waitUntil(task)
+    } else {
+      await task
+    }
+    return 'local-bridge'
+  }
+
   const queue = resolveQueue(env, message.jobType)
   if (mode !== 'waituntil' && queue?.send) {
     await queue.send(message)

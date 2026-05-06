@@ -14,6 +14,8 @@ export interface Env {
   VS_ADMIN_EMAILS?: string
   VS_ADMIN_USER_IDS?: string
   VS_QUEUE_EXECUTION_MODE?: string
+  VS_LOCAL_QUEUE_ENDPOINT?: string
+  VS_LOCAL_QUEUE_BRIDGE?: string
   VS_IMAGE_REQUEST_TIMEOUT_MS?: string
   VS_TEXT_REQUEST_TIMEOUT_MS?: string
   VS_IMAGE_FETCH_TIMEOUT_MS?: string

@@ -114,3 +114,57 @@ test('dispatchQueuedJob routes translate and outfit jobs to their dedicated queu
     await cleanup()
   }
 })
+
+test('dispatchQueuedJob uses the local queue bridge before bound queue producers', async () => {
+  const { mod, cleanup } = await importQueue()
+  const requests = []
+  let queueCalled = false
+  let fallbackCalled = false
+  const originalFetch = globalThis.fetch
+
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push({
+      url: String(url),
+      method: init.method,
+      body: JSON.parse(String(init.body || '{}')),
+    })
+    return new Response(JSON.stringify({ ok: true, acked: 1, retried: 0 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const mode = await mod.dispatchQueuedJob(
+      {
+        VS_LOCAL_QUEUE_ENDPOINT: 'http://127.0.0.1:8798/__queue/run',
+        VS_OUTFIT_JOBS_QUEUE: {
+          send: async () => {
+            queueCalled = true
+          },
+        },
+      },
+      undefined,
+      mod.createJobQueueMessage({
+        jobId: 'job_local_bridge',
+        jobType: 'outfit_batch',
+        reason: 'submit',
+      }),
+      async () => {
+        fallbackCalled = true
+      },
+    )
+
+    assert.equal(mode, 'local-bridge')
+    assert.equal(queueCalled, false)
+    assert.equal(fallbackCalled, false)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, 'http://127.0.0.1:8798/__queue/run')
+    assert.equal(requests[0].method, 'POST')
+    assert.equal(requests[0].body.kind, 'run_job')
+    assert.equal(requests[0].body.jobId, 'job_local_bridge')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})

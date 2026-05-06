@@ -233,8 +233,6 @@
 
         <div class="actions">
           <button id="t-run-btn" class="primary" disabled>开始批量翻译</button>
-          <button id="t-clear-btn" class="ghost" disabled>清空</button>
-          <button id="t-dl-btn" class="ghost" disabled>下载全部</button>
           <span class="progress" id="t-progress"></span>
         </div>
       </div>
@@ -538,8 +536,6 @@
       <div class="panel slim outfit-actions-panel">
         <div class="actions">
           <button id="o-run" class="primary" disabled>批量生成</button>
-          <button id="o-clear" class="ghost" disabled>清空结果</button>
-          <button id="o-dl" class="ghost" disabled>下载全部</button>
           <span class="progress" id="o-progress"></span>
         </div>
       </div>
@@ -763,6 +759,28 @@
     <div class="dialog-actions">
       <button type="submit" class="ghost">取消</button>
       <button type="button" id="project-delete-confirm" class="primary danger">确认删除</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="task-delete-dialog" class="confirm-dialog">
+  <form method="dialog" id="task-delete-form">
+    <div class="dialog-copy">
+      <h3>删除任务</h3>
+      <p class="hint">删除后，这个任务会从任务列表移除。已下载到本机的图片不受影响。</p>
+    </div>
+
+    <section class="confirm-panel">
+      <span class="confirm-label">将要删除</span>
+      <strong id="task-delete-title">批量任务</strong>
+      <span id="task-delete-meta" class="muted"></span>
+    </section>
+
+    <div id="task-delete-status" class="status"></div>
+
+    <div class="dialog-actions">
+      <button type="submit" class="ghost">取消</button>
+      <button type="button" id="task-delete-confirm" class="primary danger">确认删除</button>
     </div>
   </form>
 </dialog>

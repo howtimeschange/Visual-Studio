@@ -26,23 +26,39 @@ async function createJobHarness() {
     KNOWN_JOB_STATUSES: new Set(['', 'queued', 'running', 'paused', 'completed', 'partial_failed', 'failed', 'cancelled']),
     ACTIVE_JOB_STATUSES: new Set(['queued', 'running']),
     CURRENT_TASK_JOB_STATUSES: new Set(['queued', 'running', 'paused', 'partial_failed', 'failed']),
+    JOB_TASKS_PER_PAGE: 5,
+    clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
+    sanitizeFileName: (value) => String(value || '').replace(/[^\w.-]+/g, '_'),
     state: {
-      translate: { jobs: [], jobId: '' },
-      outfit: { jobs: [], jobId: '' },
+      translate: { jobs: [], jobId: '', jobTab: 'current' },
+      outfit: { jobs: [], jobId: '', jobTab: 'current' },
     },
     translateJobWatchers: new Map(),
     outfitJobWatchers: new Map(),
   }
   const functionNames = [
+    'sanitizeJobTaskThumbs',
     'serializeJobTask',
     'sanitizeStoredJobTasks',
     'getJobTasks',
+    'getLoadedJobId',
+    'getJobTab',
     'setLoadedJobId',
     'markJobTaskLoaded',
     'clearJobTaskLoaded',
     'removeJobTask',
     'getJobTaskBucket',
     'filterJobTasksForTab',
+    'getTaskSortTime',
+    'getSortedJobTasksForTab',
+    'getPagedJobTasksForTab',
+    'getJobTaskPageCount',
+    'clampJobTaskPage',
+    'getJobTaskDownloadEntries',
+    'shouldShowLoadedJobWorkspace',
+    'assetResultUrl',
+    'addJobTaskThumb',
+    'getJobTaskThumbsFromItems',
   ]
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
   vm.createContext(context)
@@ -112,4 +128,111 @@ test('markJobTaskLoaded keeps a single current task per view', async () => {
       { jobId: 'job-c', loaded: true },
     ],
   )
+})
+
+test('history tasks stay sorted by created time when viewing an older result', async () => {
+  const harness = await createJobHarness()
+  const tasks = [
+    { jobId: 'older-completed', status: 'completed', createdAt: '2026-05-06T10:00:00.000Z', loaded: true },
+    { jobId: 'newer-cancelled', status: 'cancelled', createdAt: '2026-05-06T12:00:00.000Z', loaded: false },
+    { jobId: 'current-running', status: 'running', createdAt: '2026-05-06T13:00:00.000Z', loaded: false },
+  ]
+
+  assert.deepEqual(
+    harness.getSortedJobTasksForTab(tasks, 'history').map((task) => task.jobId),
+    ['newer-cancelled', 'older-completed'],
+  )
+})
+
+test('loaded historical results are hidden while the current task tab is empty', async () => {
+  const harness = await createJobHarness()
+  harness.state.outfit.jobTab = 'current'
+  harness.state.outfit.jobId = 'older-completed'
+  harness.state.outfit.jobs = [
+    { jobId: 'older-completed', status: 'completed', createdAt: '2026-05-06T10:00:00.000Z', loaded: true },
+    { jobId: 'newer-cancelled', status: 'cancelled', createdAt: '2026-05-06T12:00:00.000Z', loaded: false },
+  ]
+
+  assert.equal(harness.shouldShowLoadedJobWorkspace('outfit'), false)
+
+  harness.state.outfit.jobTab = 'history'
+  assert.equal(harness.shouldShowLoadedJobWorkspace('outfit'), true)
+})
+
+test('translate job task thumbnails use source image asset ids', async () => {
+  const harness = await createJobHarness()
+  const thumbs = harness.getJobTaskThumbsFromItems('translate', [
+    { inputJson: { assetId: 'asset-a', targetLanguage: 'ja' } },
+    { inputJson: { assetId: 'asset-a', targetLanguage: 'ko' } },
+    { inputJson: { assetId: 'asset-b', targetLanguage: 'ja' } },
+  ])
+
+  assert.deepEqual(JSON.parse(JSON.stringify(thumbs)), [
+    { src: '/api/results/asset-a', label: '源图 1' },
+    { src: '/api/results/asset-b', label: '源图 2' },
+  ])
+})
+
+test('outfit job task thumbnails mix model and garment references without duplicates', async () => {
+  const harness = await createJobHarness()
+  const thumbs = harness.getJobTaskThumbsFromItems('outfit', [
+    { inputJson: { modelAssetId: 'model-1', lookAssetIds: ['dress-1', 'shoe-1'] } },
+    { inputJson: { modelAssetId: 'model-1', lookAssetIds: ['dress-1', 'bag-1'] } },
+  ])
+
+  assert.deepEqual(JSON.parse(JSON.stringify(thumbs)), [
+    { src: '/api/results/model-1', label: '模特 1' },
+    { src: '/api/results/dress-1', label: '服装 1' },
+    { src: '/api/results/shoe-1', label: '服装 2' },
+  ])
+})
+
+test('history job tasks are paged five per page', async () => {
+  const harness = await createJobHarness()
+  const tasks = Array.from({ length: 12 }, (_, index) => ({
+    jobId: `job-${String(index + 1).padStart(2, '0')}`,
+    status: 'completed',
+    createdAt: new Date(Date.UTC(2026, 4, 6, 10, index)).toISOString(),
+  }))
+
+  assert.equal(harness.getJobTaskPageCount(tasks, 'history'), 3)
+  assert.equal(harness.clampJobTaskPage(tasks, 'history', 99), 3)
+  assert.deepEqual(
+    harness.getPagedJobTasksForTab(tasks, 'history', 2).map((task) => task.jobId),
+    ['job-07', 'job-06', 'job-05', 'job-04', 'job-03'],
+  )
+  assert.deepEqual(
+    harness.getPagedJobTasksForTab(tasks, 'current', 2).map((task) => task.jobId),
+    [],
+  )
+})
+
+test('job task downloads include completed outputs from task items', async () => {
+  const harness = await createJobHarness()
+  const translateItems = [
+    {
+      status: 'completed',
+      inputJson: { assetId: 'source-a', targetLanguage: 'en' },
+      outputJson: { resultAssetId: 'translated-a' },
+    },
+    {
+      status: 'failed',
+      inputJson: { assetId: 'source-b', targetLanguage: 'ja' },
+      outputJson: { resultAssetId: 'translated-b' },
+    },
+  ]
+  const outfitItems = [
+    {
+      status: 'completed',
+      inputJson: { modelAssetId: 'model-a', lookId: 'look-1' },
+      outputJson: { resultAssetId: 'outfit-a' },
+    },
+  ]
+
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('translate', translateItems))), [
+    { href: '/api/results/translated-a', name: 'source-a.en.png' },
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('outfit', outfitItems))), [
+    { href: '/api/results/outfit-a', name: 'model-a__look-1.png' },
+  ])
 })

@@ -99,6 +99,7 @@ const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running'])
 const CURRENT_TASK_JOB_STATUSES = new Set(['queued', 'running', 'paused', 'partial_failed', 'failed'])
 const KNOWN_JOB_STATUSES = new Set(['', 'queued', 'running', 'paused', 'completed', 'partial_failed', 'failed', 'cancelled'])
+const JOB_TASKS_PER_PAGE = 5
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
 const translateJobWatchers = new Map()
@@ -132,6 +133,7 @@ const state = {
     progress: '',
     jobId: '',
     jobTab: 'current',
+    jobPage: 1,
     jobs: [],
   },
   generate: {
@@ -198,6 +200,12 @@ const state = {
     deleteTargetId: '',
     deleteStatus: '',
   },
+  taskDelete: {
+    kind: '',
+    jobId: '',
+    deleting: false,
+    status: '',
+  },
   account: {
     user: null,
     usage: null,
@@ -229,6 +237,7 @@ const state = {
     progress: '',
     jobId: '',
     jobTab: 'current',
+    jobPage: 1,
     jobs: [],
   },
   style: {
@@ -276,8 +285,6 @@ const dom = {
   tFileInput: $('#t-file-input'),
   tBrowseBtn: $('#t-browse-btn'),
   tRunBtn: $('#t-run-btn'),
-  tClearBtn: $('#t-clear-btn'),
-  tDlBtn: $('#t-dl-btn'),
   tProgress: $('#t-progress'),
   tGrid: $('#t-grid'),
   tEmpty: $('#t-empty'),
@@ -376,6 +383,12 @@ const dom = {
   projectDeleteMeta: $('#project-delete-meta'),
   projectDeleteConfirm: $('#project-delete-confirm'),
   projectDeleteStatus: $('#project-delete-status'),
+  taskDeleteDialog: $('#task-delete-dialog'),
+  taskDeleteForm: $('#task-delete-form'),
+  taskDeleteTitle: $('#task-delete-title'),
+  taskDeleteMeta: $('#task-delete-meta'),
+  taskDeleteConfirm: $('#task-delete-confirm'),
+  taskDeleteStatus: $('#task-delete-status'),
   oModel: $('#o-model'),
   oGarmentType: $('#o-garment-type'),
   oConcurrency: $('#o-concurrency'),
@@ -389,8 +402,6 @@ const dom = {
   oGarmentCount: $('#o-garment-count'),
   oLookCount: $('#o-look-count'),
   oRun: $('#o-run'),
-  oClear: $('#o-clear'),
-  oDl: $('#o-dl'),
   oProgress: $('#o-progress'),
   oJobList: $('#o-job-list'),
   oJobEmpty: $('#o-job-empty'),
@@ -457,6 +468,7 @@ function init() {
   bindAccount()
   bindLightbox()
   bindPromptDialog()
+  bindTaskDeleteDialog()
   bindHome()
   bindTranslate()
   bindProjects()
@@ -545,6 +557,7 @@ function hydrateStoredState() {
   state.runtime.sessionId = runtime.sessionId
   state.translate.jobId = getLoadedStoredJobId(runtime.translate.jobs)
   state.translate.jobTab = runtime.translate.jobTab
+  state.translate.jobPage = runtime.translate.jobPage
   state.translate.jobs = runtime.translate.jobs
   state.translate.items = runtime.translate.items
   state.generate.elements = runtime.generate.elements || []
@@ -554,6 +567,7 @@ function hydrateStoredState() {
   state.generate.panY = runtime.generate.panY || 0
   state.outfit.jobId = getLoadedStoredJobId(runtime.outfit.jobs)
   state.outfit.jobTab = runtime.outfit.jobTab
+  state.outfit.jobPage = runtime.outfit.jobPage
   state.outfit.jobs = runtime.outfit.jobs
   state.outfit.models = runtime.outfit.models
   state.outfit.garments = runtime.outfit.garments
@@ -655,6 +669,7 @@ function saveRuntimeState(options = {}) {
     translate: {
       jobId: state.translate.jobId || '',
       jobTab: state.translate.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(state.translate.jobPage) || 1),
       jobs: state.translate.jobs.map(serializeJobTask),
       items: state.translate.items.map((item) => serializeAssetBackedItem(item)),
     },
@@ -672,6 +687,7 @@ function saveRuntimeState(options = {}) {
     outfit: {
       jobId: state.outfit.jobId || '',
       jobTab: state.outfit.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(state.outfit.jobPage) || 1),
       jobs: state.outfit.jobs.map(serializeJobTask),
       models: state.outfit.models.map((item) => serializeAssetBackedItem(item)),
       garments: state.outfit.garments.map((item) => serializeAssetBackedItem(item, {
@@ -950,6 +966,7 @@ function sanitizeRuntimeState(raw = {}) {
     translate: {
       jobId: typeof raw.translate?.jobId === 'string' ? raw.translate.jobId : '',
       jobTab: raw.translate?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(raw.translate?.jobPage) || 1),
       jobs: translateJobs,
       items: translateItems,
     },
@@ -969,6 +986,7 @@ function sanitizeRuntimeState(raw = {}) {
     outfit: {
       jobId: typeof raw.outfit?.jobId === 'string' ? raw.outfit.jobId : '',
       jobTab: raw.outfit?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(raw.outfit?.jobPage) || 1),
       jobs: outfitJobs,
       models: outfitModels,
       garments: outfitGarments,
@@ -1043,13 +1061,31 @@ function getJobTab(kind) {
   return kind === 'translate' ? state.translate.jobTab : state.outfit.jobTab
 }
 
+function getJobPage(kind) {
+  return kind === 'translate' ? state.translate.jobPage : state.outfit.jobPage
+}
+
 function setJobTab(kind, tab) {
   const next = tab === 'history' ? 'history' : 'current'
   if (kind === 'translate') {
     state.translate.jobTab = next
+    state.translate.jobPage = 1
   } else {
     state.outfit.jobTab = next
+    state.outfit.jobPage = 1
   }
+}
+
+function setJobPage(kind, page) {
+  const tasks = getJobTasks(kind)
+  const tab = getJobTab(kind)
+  const next = clampJobTaskPage(tasks, tab, page)
+  if (kind === 'translate') {
+    state.translate.jobPage = next
+  } else {
+    state.outfit.jobPage = next
+  }
+  return next
 }
 
 function setLoadedJobId(kind, jobId) {
@@ -1075,6 +1111,7 @@ function makeJobTask(jobId, type, extra = {}) {
     progressTotal: 0,
     progressDone: 0,
     progressFailed: 0,
+    thumbs: [],
     ...extra,
   }
 }
@@ -1091,12 +1128,8 @@ function upsertJobTask(kind, jobId, patch = {}) {
     tasks.unshift(task)
   }
   if (patch.job) updateJobTaskFromJob(task, patch.job, patch.items)
-  const index = tasks.findIndex((entry) => entry.jobId === jobId)
-  if (index > 0) {
-    tasks.splice(index, 1)
-    tasks.unshift(task)
-  }
   tasks.splice(12)
+  setJobPage(kind, getJobPage(kind))
   return task
 }
 
@@ -1105,10 +1138,12 @@ function removeJobTask(kind, jobId) {
     state.translate.jobs = state.translate.jobs.filter((task) => task.jobId !== jobId)
     if (state.translate.jobId === jobId) state.translate.jobId = ''
     translateJobWatchers.delete(jobId)
+    state.translate.jobPage = clampJobTaskPage(state.translate.jobs, state.translate.jobTab, state.translate.jobPage)
   } else {
     state.outfit.jobs = state.outfit.jobs.filter((task) => task.jobId !== jobId)
     if (state.outfit.jobId === jobId) state.outfit.jobId = ''
     outfitJobWatchers.delete(jobId)
+    state.outfit.jobPage = clampJobTaskPage(state.outfit.jobs, state.outfit.jobTab, state.outfit.jobPage)
   }
 }
 
@@ -1119,6 +1154,139 @@ function getJobTaskBucket(task = {}) {
 function filterJobTasksForTab(tasks = [], tab = 'current') {
   const bucket = tab === 'history' ? 'history' : 'current'
   return tasks.filter((task) => getJobTaskBucket(task) === bucket)
+}
+
+function getTaskSortTime(task = {}) {
+  const created = Date.parse(String(task.createdAt || ''))
+  if (Number.isFinite(created)) return created
+  const updated = Date.parse(String(task.updatedAt || ''))
+  if (Number.isFinite(updated)) return updated
+  return 0
+}
+
+function getSortedJobTasksForTab(tasks = [], tab = 'current') {
+  return filterJobTasksForTab(tasks, tab)
+    .slice()
+    .sort((a, b) => {
+      const diff = getTaskSortTime(b) - getTaskSortTime(a)
+      return diff || String(b.jobId || '').localeCompare(String(a.jobId || ''))
+    })
+}
+
+function getJobTaskPageCount(tasks = [], tab = 'current') {
+  if (tab !== 'history') return 1
+  return Math.max(1, Math.ceil(getSortedJobTasksForTab(tasks, tab).length / JOB_TASKS_PER_PAGE))
+}
+
+function clampJobTaskPage(tasks = [], tab = 'current', page = 1) {
+  const value = Math.floor(Number(page) || 1)
+  return clamp(value, 1, getJobTaskPageCount(tasks, tab))
+}
+
+function getPagedJobTasksForTab(tasks = [], tab = 'current', page = 1) {
+  const sorted = getSortedJobTasksForTab(tasks, tab)
+  if (tab !== 'history') return sorted
+  const currentPage = clampJobTaskPage(tasks, tab, page)
+  const start = (currentPage - 1) * JOB_TASKS_PER_PAGE
+  return sorted.slice(start, start + JOB_TASKS_PER_PAGE)
+}
+
+function shouldShowLoadedJobWorkspace(kind) {
+  const jobId = getLoadedJobId(kind)
+  if (!jobId) return getJobTab(kind) === 'current'
+  const task = getJobTasks(kind).find((entry) => entry.jobId === jobId)
+  if (!task) return false
+  return getJobTaskBucket(task) === getJobTab(kind)
+}
+
+function isCurrentTaskTabEmpty(kind) {
+  return getJobTab(kind) === 'current' && filterJobTasksForTab(getJobTasks(kind), 'current').length === 0
+}
+
+function resetLoadedWorkspaceForDraft(kind) {
+  if (!getLoadedJobId(kind)) return
+  clearJobTaskLoaded(kind)
+  if (kind === 'translate') {
+    translateWorkspaceLoadToken += 1
+    state.translate.items = []
+    state.translate.progress = ''
+  } else {
+    outfitWorkspaceLoadToken += 1
+    state.outfit.models = []
+    state.outfit.garments = []
+    state.outfit.results = {}
+    state.outfit.progress = ''
+  }
+}
+
+function addJobTaskThumb(thumbs, seen, assetId, label) {
+  const id = String(assetId || '').trim()
+  if (!id || seen.has(id) || thumbs.length >= 3) return
+  seen.add(id)
+  thumbs.push({
+    src: assetResultUrl(id),
+    label,
+  })
+}
+
+function getJobTaskThumbsFromItems(kind, items = []) {
+  const thumbs = []
+  const seen = new Set()
+  if (kind === 'translate') {
+    for (const item of Array.isArray(items) ? items : []) {
+      addJobTaskThumb(thumbs, seen, item?.inputJson?.assetId, `源图 ${thumbs.length + 1}`)
+    }
+    return thumbs
+  }
+
+  let modelCount = 0
+  let garmentCount = 0
+  for (const item of Array.isArray(items) ? items : []) {
+    const beforeModel = thumbs.length
+    addJobTaskThumb(thumbs, seen, item?.inputJson?.modelAssetId, `模特 ${modelCount + 1}`)
+    if (thumbs.length > beforeModel) modelCount += 1
+    const lookAssetIds = Array.isArray(item?.inputJson?.lookAssetIds) ? item.inputJson.lookAssetIds : []
+    for (const assetId of lookAssetIds) {
+      const beforeGarment = thumbs.length
+      addJobTaskThumb(thumbs, seen, assetId, `服装 ${garmentCount + 1}`)
+      if (thumbs.length > beforeGarment) garmentCount += 1
+    }
+  }
+  return thumbs
+}
+
+function addJobTaskThumbFromItem(thumbs, seen, item, label) {
+  if (!item) return
+  const src = String(item.dataUrl || '').trim() || assetResultUrl(item.assetId || item.id)
+  const key = String(item.assetId || item.id || src).trim()
+  if (!src || !key || seen.has(key) || thumbs.length >= 3) return
+  seen.add(key)
+  thumbs.push({ src, label })
+}
+
+function getJobTaskThumbsFromWorkspace(kind) {
+  const thumbs = []
+  const seen = new Set()
+  if (kind === 'translate') {
+    for (const item of state.translate.items) {
+      addJobTaskThumbFromItem(thumbs, seen, item, `源图 ${thumbs.length + 1}`)
+    }
+    return thumbs
+  }
+
+  let modelCount = 0
+  for (const item of state.outfit.models) {
+    const before = thumbs.length
+    addJobTaskThumbFromItem(thumbs, seen, item, `模特 ${modelCount + 1}`)
+    if (thumbs.length > before) modelCount += 1
+  }
+  let garmentCount = 0
+  for (const item of state.outfit.garments) {
+    const before = thumbs.length
+    addJobTaskThumbFromItem(thumbs, seen, item, `服装 ${garmentCount + 1}`)
+    if (thumbs.length > before) garmentCount += 1
+  }
+  return thumbs
 }
 
 function updateJobTaskFromJob(task, job, items = null) {
@@ -1133,6 +1301,11 @@ function updateJobTaskFromJob(task, job, items = null) {
   task.progressDone = Number(job.progressDone || 0)
   task.progressFailed = Number(job.progressFailed || 0)
   task.itemCount = Array.isArray(items) ? items.length : Number(task.itemCount || job.progressTotal || 0)
+  if (Array.isArray(items)) {
+    const kind = job.type === 'translate_batch' ? 'translate' : 'outfit'
+    const thumbs = getJobTaskThumbsFromItems(kind, items)
+    task.thumbs = thumbs.length ? thumbs : getJobTaskThumbsFromWorkspace(kind)
+  }
   task.error = ''
   if (!task.label) task.label = createJobTaskLabel(job, items)
   return task
@@ -1324,11 +1497,70 @@ async function deleteJobTask(kind, jobId) {
       state.outfit.running = false
       renderOutfit()
     }
+    return true
   } catch (error) {
     task.error = trimError(error)
     task.actioning = false
     saveRuntimeState()
     renderJobList(kind)
+    return false
+  }
+}
+
+function getTaskDeleteTarget() {
+  const kind = state.taskDelete.kind === 'outfit' ? 'outfit' : 'translate'
+  const task = state.taskDelete.jobId
+    ? getJobTasks(kind).find((entry) => entry.jobId === state.taskDelete.jobId)
+    : null
+  return { kind, task }
+}
+
+function openTaskDeleteDialog(kind, jobId) {
+  const task = getJobTasks(kind).find((entry) => entry.jobId === jobId)
+  if (!task || !dom.taskDeleteDialog) return
+  state.taskDelete.kind = kind
+  state.taskDelete.jobId = jobId
+  state.taskDelete.status = ''
+  renderTaskDeleteDialog()
+  if (!dom.taskDeleteDialog.open) dom.taskDeleteDialog.showModal()
+}
+
+function renderTaskDeleteDialog() {
+  if (!dom.taskDeleteDialog) return
+  const { kind, task } = getTaskDeleteTarget()
+  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate' ? '批量翻译任务' : '批量换装任务')
+  dom.taskDeleteMeta.textContent = task
+    ? `${getJobStatusLabel(task.status)} · ${task.createdAt ? formatTimestamp(task.createdAt) : task.jobId}`
+    : ''
+  dom.taskDeleteConfirm.disabled = state.taskDelete.deleting || !task
+  dom.taskDeleteStatus.textContent = state.taskDelete.status || ''
+  dom.taskDeleteStatus.classList.toggle('err', Boolean(state.taskDelete.status && !state.taskDelete.deleting))
+  dom.taskDeleteStatus.classList.toggle('run', state.taskDelete.deleting)
+}
+
+async function deleteTaskFromDialog() {
+  const { kind, task } = getTaskDeleteTarget()
+  if (!task || state.taskDelete.deleting) return
+  state.taskDelete.deleting = true
+  state.taskDelete.status = '正在删除任务…'
+  renderTaskDeleteDialog()
+  try {
+    const deleted = await deleteJobTask(kind, task.jobId)
+    if (!deleted) {
+      state.taskDelete.status = '删除失败，请稍后重试'
+      renderTaskDeleteDialog()
+      return
+    }
+    dom.taskDeleteDialog?.close()
+    state.taskDelete.kind = ''
+    state.taskDelete.jobId = ''
+    state.taskDelete.status = ''
+  } catch (error) {
+    state.taskDelete.status = trimError(error)
+    renderTaskDeleteDialog()
+  } finally {
+    state.taskDelete.deleting = false
+    renderTaskDeleteDialog()
   }
 }
 
@@ -1538,7 +1770,24 @@ function serializeJobTask(task = {}) {
     progressTotal: Number(task.progressTotal || 0),
     progressDone: Number(task.progressDone || 0),
     progressFailed: Number(task.progressFailed || 0),
+    thumbs: sanitizeJobTaskThumbs(task.thumbs),
   }
+}
+
+function sanitizeJobTaskThumbs(value) {
+  if (!Array.isArray(value)) return []
+  const seen = new Set()
+  return value
+    .map((thumb) => ({
+      src: String(thumb?.src || '').trim(),
+      label: String(thumb?.label || '').trim(),
+    }))
+    .filter((thumb) => {
+      if (!thumb.src || seen.has(thumb.src)) return false
+      seen.add(thumb.src)
+      return true
+    })
+    .slice(0, 3)
 }
 
 function normalizeGarmentInstructions(value) {
@@ -1664,11 +1913,12 @@ async function saveSettingsForm(event) {
       state.account.apiKeys = data.apiKeys || { keys: {}, updatedAt: '' }
       state.account.apiKeysLoadedFor = state.account.user.id
     } catch (error) {
-      setSettingsKeyStatus(trimError(error), 'err')
+      setSettingsKeyStatus(`本机 Key 已保存；账号同步失败：${trimError(error)}`, 'err')
       return
     }
   }
 
+  setSettingsKeyStatus('本机 Key 已保存')
   dom.settingsDialog.close()
 }
 
@@ -1897,6 +2147,8 @@ function bindTranslate() {
     input: dom.tFileInput,
     onFiles: async (files) => {
       if (isTranslateBusy()) return
+      resetLoadedWorkspaceForDraft('translate')
+      setJobTab('translate', 'current')
       state.translate.progress = '正在读取图片…'
       renderTranslate()
       const images = await prepareAssetItems(files, {
@@ -1918,19 +2170,9 @@ function bindTranslate() {
     button.addEventListener('click', () => {
       setJobTab('translate', button.dataset.jobTab)
       saveRuntimeState()
-      renderJobList('translate')
+      renderTranslate()
     })
   }
-  dom.tClearBtn.addEventListener('click', () => {
-    if (isTranslateBusy()) return
-    state.translate.items = []
-    state.translate.jobId = ''
-    for (const task of state.translate.jobs) task.loaded = false
-    state.translate.progress = ''
-    saveRuntimeState()
-    renderTranslate()
-  })
-  dom.tDlBtn.addEventListener('click', downloadTranslateResults)
 }
 
 function bindHome() {
@@ -1994,6 +2236,18 @@ function bindProjects() {
     if (state.projects.deleting) return
     state.projects.deleteTargetId = ''
     state.projects.deleteStatus = ''
+  })
+}
+
+function bindTaskDeleteDialog() {
+  dom.taskDeleteConfirm?.addEventListener('click', () => {
+    void deleteTaskFromDialog()
+  })
+  dom.taskDeleteDialog?.addEventListener('close', () => {
+    if (state.taskDelete.deleting) return
+    state.taskDelete.kind = ''
+    state.taskDelete.jobId = ''
+    state.taskDelete.status = ''
   })
 }
 
@@ -4174,6 +4428,8 @@ function bindOutfit() {
     input: dom.oModelInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
+      resetLoadedWorkspaceForDraft('outfit')
+      setJobTab('outfit', 'current')
       state.outfit.progress = '正在读取模特图…'
       renderOutfit()
       const images = await prepareAssetItems(files, {
@@ -4196,6 +4452,8 @@ function bindOutfit() {
     input: dom.oGarmentInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
+      resetLoadedWorkspaceForDraft('outfit')
+      setJobTab('outfit', 'current')
       state.outfit.progress = '正在读取服装图…'
       renderOutfit()
       const images = await prepareAssetItems(files, {
@@ -4222,19 +4480,9 @@ function bindOutfit() {
     button.addEventListener('click', () => {
       setJobTab('outfit', button.dataset.jobTab)
       saveRuntimeState()
-      renderJobList('outfit')
+      renderOutfit()
     })
   }
-  dom.oClear.addEventListener('click', () => {
-    if (isOutfitBusy()) return
-    state.outfit.jobId = ''
-    for (const task of state.outfit.jobs) task.loaded = false
-    state.outfit.results = {}
-    state.outfit.progress = ''
-    saveRuntimeState()
-    renderOutfit()
-  })
-  dom.oDl.addEventListener('click', downloadOutfitResults)
 }
 
 function bindStyle() {
@@ -4704,19 +4952,15 @@ function renderTargetDropdown() {
 
 function renderTranslate() {
   const busy = isTranslateBusy()
+  const showLoadedWorkspace = shouldShowLoadedJobWorkspace('translate')
   dom.tModel.value = state.translate.model
   dom.tConcurrency.value = String(state.translate.concurrency)
   dom.tPreserve.checked = state.translate.preserveBrand
   dom.tProgress.textContent = state.translate.progress
 
-  const hasItems = state.translate.items.length > 0
-  const hasFinished = state.translate.items.some((item) =>
-    Object.values(item.results).some((result) => result?.status === 'done'),
-  )
+  const hasItems = showLoadedWorkspace && state.translate.items.length > 0
 
   dom.tRunBtn.disabled = busy || !hasItems || state.translate.targets.length === 0
-  dom.tClearBtn.disabled = busy || !hasItems
-  dom.tDlBtn.disabled = !hasFinished
   dom.tModel.disabled = busy
   dom.tConcurrency.disabled = busy
   dom.tPreserve.disabled = busy
@@ -4724,7 +4968,7 @@ function renderTranslate() {
   dom.tEmpty.classList.toggle('hidden', hasItems)
   renderJobList('translate')
 
-  if (!hasItems) {
+  if (!showLoadedWorkspace || !hasItems) {
     dom.tGrid.replaceChildren()
     return
   }
@@ -4891,7 +5135,10 @@ function renderJobList(kind) {
   if (!list) return
   const tab = getJobTab(kind)
   const allTasks = getJobTasks(kind)
-  const tasks = filterJobTasksForTab(allTasks, tab)
+  const page = setJobPage(kind, getJobPage(kind))
+  const allTabTasks = getSortedJobTasksForTab(allTasks, tab)
+  const tasks = getPagedJobTasksForTab(allTasks, tab, page)
+  const pageCount = getJobTaskPageCount(allTasks, tab)
   const tabButtons = kind === 'translate' ? dom.tJobTabs : dom.oJobTabs
   for (const button of tabButtons || []) {
     const active = button.dataset.jobTab === tab
@@ -4901,10 +5148,51 @@ function renderJobList(kind) {
     button.textContent = `${button.dataset.jobTab === 'history' ? '历史任务' : '当前任务'} ${count}`
   }
   if (empty) {
-    empty.classList.toggle('hidden', tasks.length > 0)
+    empty.classList.toggle('hidden', allTabTasks.length > 0)
     empty.textContent = tab === 'history' ? '暂无历史任务' : '暂无当前任务'
   }
-  list.replaceChildren(...tasks.map((task) => createJobTaskCard(kind, task, tab)))
+  const nodes = tasks.map((task) => createJobTaskCard(kind, task, tab))
+  const pagination = createJobPagination(kind, tab, page, pageCount, allTabTasks.length)
+  if (pagination) nodes.push(pagination)
+  list.replaceChildren(...nodes)
+}
+
+function createJobPagination(kind, tab, page, pageCount, total) {
+  if (tab !== 'history' || total <= JOB_TASKS_PER_PAGE) return null
+  const wrap = document.createElement('div')
+  wrap.className = 'job-pagination'
+
+  const meta = document.createElement('span')
+  meta.textContent = `第 ${page} / ${pageCount} 页 · 共 ${total} 个任务`
+
+  const actions = document.createElement('div')
+  actions.className = 'job-pagination-actions'
+
+  const previous = document.createElement('button')
+  previous.type = 'button'
+  previous.className = 'job-mini-btn'
+  previous.textContent = '上一页'
+  previous.disabled = page <= 1
+  previous.addEventListener('click', () => {
+    setJobPage(kind, page - 1)
+    saveRuntimeState()
+    renderJobList(kind)
+  })
+
+  const next = document.createElement('button')
+  next.type = 'button'
+  next.className = 'job-mini-btn'
+  next.textContent = '下一页'
+  next.disabled = page >= pageCount
+  next.addEventListener('click', () => {
+    setJobPage(kind, page + 1)
+    saveRuntimeState()
+    renderJobList(kind)
+  })
+
+  actions.append(previous, next)
+  wrap.append(meta, actions)
+  return wrap
 }
 
 function createJobTaskCard(kind, task, tab = 'current') {
@@ -4917,6 +5205,7 @@ function createJobTaskCard(kind, task, tab = 'current') {
   card.className = `job-card${live ? ' live' : ''}${loaded ? ' current' : ''}`
   card.dataset.jobId = task.jobId || ''
 
+  const thumbs = createJobTaskThumbs(kind, task)
   const meta = document.createElement('div')
   meta.className = 'job-card-meta'
   const topline = document.createElement('div')
@@ -4926,18 +5215,20 @@ function createJobTaskCard(kind, task, tab = 'current') {
   const badge = document.createElement('span')
   badge.className = `job-status ${getJobStatusTone(task.status)}`
   badge.textContent = loaded ? `${getJobStatusLabel(task.status)} · 正在查看` : getJobStatusLabel(task.status)
+  const actions = document.createElement('div')
+  actions.className = 'job-card-actions'
   topline.append(title, badge)
   const detail = document.createElement('span')
   detail.textContent = task.progress || getJobStatusLabel(task.status) || '正在同步任务状态…'
-  meta.append(topline, detail)
-
-  const actions = document.createElement('div')
-  actions.className = 'job-card-actions'
+  const time = document.createElement('span')
+  time.className = 'job-card-time'
+  time.textContent = task.createdAt ? `发起时间 ${formatTimestamp(task.createdAt)}` : '发起时间同步中'
+  meta.append(topline, time, detail)
 
   const load = document.createElement('button')
   load.type = 'button'
   load.className = 'job-mini-btn'
-  load.textContent = loaded ? '刷新结果' : '查看结果'
+  load.textContent = '查看'
   load.disabled = Boolean(task.syncing)
   load.addEventListener('click', () => {
     void loadJobIntoWorkspace(kind, task.jobId)
@@ -4992,6 +5283,18 @@ function createJobTaskCard(kind, task, tab = 'current') {
     actions.append(cancel)
   }
 
+  if (shouldShowJobTaskDownload(task, currentTab)) {
+    const download = document.createElement('button')
+    download.type = 'button'
+    download.className = 'job-mini-btn'
+    download.textContent = '下载全部'
+    download.disabled = Boolean(task.actioning)
+    download.addEventListener('click', () => {
+      void downloadJobTaskResults(kind, task.jobId)
+    })
+    actions.append(download)
+  }
+
   if (!currentTab) {
     const remove = document.createElement('button')
     remove.type = 'button'
@@ -4999,12 +5302,12 @@ function createJobTaskCard(kind, task, tab = 'current') {
     remove.textContent = '删除'
     remove.disabled = Boolean(task.actioning)
     remove.addEventListener('click', () => {
-      void deleteJobTask(kind, task.jobId)
+      openTaskDeleteDialog(kind, task.jobId)
     })
     actions.append(remove)
   }
 
-  card.append(meta, actions)
+  card.append(thumbs, meta, actions)
   if (task.error) {
     const error = document.createElement('div')
     error.className = 'job-card-error'
@@ -5012,6 +5315,78 @@ function createJobTaskCard(kind, task, tab = 'current') {
     card.append(error)
   }
   return card
+}
+
+function shouldShowJobTaskDownload(task = {}, currentTab = false) {
+  if (Number(task.progressDone || 0) > 0) return true
+  return !currentTab && (task.status === 'completed' || task.status === 'partial_failed')
+}
+
+function getJobTaskDownloadEntries(kind, items = []) {
+  const entries = []
+  for (const item of Array.isArray(items) ? items : []) {
+    if (item?.status !== 'completed') continue
+    const resultAssetId = String(item.outputJson?.resultAssetId || '').trim()
+    if (!resultAssetId) continue
+    if (kind === 'translate') {
+      const assetId = sanitizeFileName(String(item.inputJson?.assetId || 'image'))
+      const language = sanitizeFileName(String(item.inputJson?.targetLanguage || 'translated'))
+      entries.push({
+        href: assetResultUrl(resultAssetId),
+        name: `${assetId}.${language}.png`,
+      })
+      continue
+    }
+
+    const modelId = sanitizeFileName(String(item.inputJson?.modelAssetId || 'model'))
+    const lookId = sanitizeFileName(String(item.inputJson?.lookId || item.id || 'look'))
+    entries.push({
+      href: assetResultUrl(resultAssetId),
+      name: `${modelId}__${lookId}.png`,
+    })
+  }
+  return entries
+}
+
+async function downloadJobTaskResults(kind, jobId) {
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  renderJobList(kind)
+  try {
+    const { items } = await getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`)
+    const entries = getJobTaskDownloadEntries(kind, items)
+    if (!entries.length) {
+      task.error = '这个任务还没有可下载的完成结果'
+      return
+    }
+    await downloadAll(entries)
+  } catch (error) {
+    task.error = trimError(error)
+  } finally {
+    task.actioning = false
+    saveRuntimeState()
+    renderJobList(kind)
+  }
+}
+
+function createJobTaskThumbs(kind, task) {
+  const thumbs = sanitizeJobTaskThumbs(task.thumbs)
+  const wrap = document.createElement('div')
+  wrap.className = `job-card-thumbs${thumbs.length ? '' : ' empty'}`
+  if (!thumbs.length) {
+    const placeholder = document.createElement('span')
+    placeholder.textContent = kind === 'translate' ? '译' : '装'
+    wrap.append(placeholder)
+    return wrap
+  }
+
+  for (const thumb of thumbs) {
+    const img = document.createElement('img')
+    img.src = thumb.src
+    img.alt = thumb.label || '任务缩略图'
+    img.loading = 'lazy'
+    wrap.append(img)
+  }
+  return wrap
 }
 
 function getJobTypeLabel(type) {
@@ -5116,6 +5491,7 @@ function canDeleteProject(project) {
 
 function renderOutfit() {
   const busy = isOutfitBusy()
+  const showLoadedWorkspace = shouldShowLoadedJobWorkspace('outfit')
   const looks = buildOutfitLooks()
   dom.oModel.value = state.outfit.model
   dom.oGarmentType.value = state.outfit.garmentType
@@ -5125,8 +5501,6 @@ function renderOutfit() {
   dom.oGarmentCount.textContent = String(state.outfit.garments.length)
   dom.oLookCount.textContent = String(looks.length)
   dom.oRun.disabled = busy || state.outfit.models.length === 0 || looks.length === 0
-  dom.oClear.disabled = busy || !Object.keys(state.outfit.results).length
-  dom.oDl.disabled = !Object.values(state.outfit.results).some((item) => item?.status === 'done')
   dom.oModel.disabled = busy
   dom.oGarmentType.disabled = busy
   dom.oConcurrency.disabled = busy
@@ -5137,10 +5511,10 @@ function renderOutfit() {
   renderLaneList(dom.oModelList, state.outfit.models, 'model')
   renderLaneList(dom.oGarmentList, state.outfit.garments, 'garment')
 
-  const hasMatrix = state.outfit.models.length > 0 && looks.length > 0
+  const hasMatrix = showLoadedWorkspace && state.outfit.models.length > 0 && looks.length > 0
   dom.oEmpty.classList.toggle('hidden', hasMatrix)
 
-  if (!hasMatrix) {
+  if (!showLoadedWorkspace || !hasMatrix) {
     dom.oGrid.replaceChildren()
     return
   }
@@ -5289,6 +5663,7 @@ async function runTranslateBatch() {
       progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
       label: `刚刚 · ${state.translate.items.length} 张 × ${state.translate.targets.length} 语种`,
       loaded: true,
+      thumbs: getJobTaskThumbsFromWorkspace('translate'),
       itemCount: Number(data.itemCount || 0),
       progressTotal: Number(data.itemCount || 0),
     })
@@ -5352,6 +5727,7 @@ async function runOutfitBatch() {
       progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
       label: `刚刚 · ${data.lookCount || looks.length} 套搭配`,
       loaded: true,
+      thumbs: getJobTaskThumbsFromWorkspace('outfit'),
       itemCount: Number(data.itemCount || 0),
       progressTotal: Number(data.itemCount || 0),
     })
@@ -5625,36 +6001,6 @@ function getRunningLabel(base, attempt = 1) {
 
 function getFailureLabel(base, attempts = 1) {
   return attempts > 1 ? `${base} · 已自动补偿 ${attempts - 1} 次` : base
-}
-
-async function downloadTranslateResults() {
-  const entries = []
-  for (const item of state.translate.items) {
-    for (const [language, result] of Object.entries(item.results)) {
-      if (result?.status !== 'done') continue
-      entries.push({
-        href: result.dataUrl,
-        name: `${sanitizeFileName(basename(item.name))}.${language}.png`,
-      })
-    }
-  }
-  await downloadAll(entries)
-}
-
-async function downloadOutfitResults() {
-  const looks = buildOutfitLooks()
-  const entries = []
-  for (const model of state.outfit.models) {
-    for (const look of looks) {
-      const result = state.outfit.results[pairKey(model.id, look.id)]
-      if (result?.status !== 'done') continue
-      entries.push({
-        href: result.dataUrl,
-        name: `${sanitizeFileName(basename(model.name))}__${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
-      })
-    }
-  }
-  await downloadAll(entries)
 }
 
 function createHeaderCell(text) {
@@ -6775,6 +7121,7 @@ async function restoreRuntimeState() {
   state.translate.jobs = runtime.translate.jobs
   state.translate.jobId = getLoadedStoredJobId(runtime.translate.jobs)
   state.translate.jobTab = runtime.translate.jobTab
+  state.translate.jobPage = runtime.translate.jobPage
   state.generate.projectId = routeProjectId || runtime.generate.projectId || ''
   state.generate.projectTitle = runtime.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
   state.generate.aiSessionId = runtime.generate.aiSessionId || ''
@@ -6814,6 +7161,7 @@ async function restoreRuntimeState() {
   state.outfit.jobs = runtime.outfit.jobs
   state.outfit.jobId = getLoadedStoredJobId(runtime.outfit.jobs)
   state.outfit.jobTab = runtime.outfit.jobTab
+  state.outfit.jobPage = runtime.outfit.jobPage
 
   const [translateItems, outfitModels, outfitGarments] = await Promise.all([
     hydrateAssetItems(runtime.translate.items),
@@ -7041,9 +7389,6 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
 
       const shouldApply = applyToWorkspace || getLoadedJobId('translate') === jobId
       upsertJobTask('translate', jobId, { job, items, loaded: shouldApply })
-      if (shouldApply && getJobTaskBucket({ status: job.status }) === 'history' && getJobTab('translate') === 'current') {
-        setJobTab('translate', 'history')
-      }
       if (shouldApply) {
         if (getLoadedJobId('translate') !== jobId) {
           renderJobList('translate')
@@ -7231,9 +7576,6 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
 
       const shouldApply = applyToWorkspace || getLoadedJobId('outfit') === jobId
       upsertJobTask('outfit', jobId, { job, items, loaded: shouldApply })
-      if (shouldApply && getJobTaskBucket({ status: job.status }) === 'history' && getJobTab('outfit') === 'current') {
-        setJobTab('outfit', 'history')
-      }
       if (shouldApply) {
         if (getLoadedJobId('outfit') !== jobId) {
           renderJobList('outfit')
