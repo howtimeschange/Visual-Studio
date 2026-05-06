@@ -69,6 +69,68 @@ test('gpt-image-2 text generation uses /images/generations', async () => {
   }
 })
 
+test('gpt-image-2 retries transient upstream errors before succeeding', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (calls.length === 1) {
+      return new Response('gateway timeout', { status: 524 })
+    }
+    return okImageResponse('cmV0cmllZC1pbWFnZQ==')
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 1000, retryDelayMs: 1 },
+    )
+
+    assert.equal(result.ok, true)
+    assert.equal(result.dataUrl, 'data:image/png;base64,cmV0cmllZC1pbWFnZQ==')
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].input, 'https://relay.example/v1/images/generations')
+    assert.equal(calls[1].input, 'https://relay.example/v1/images/generations')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('gpt-image-2 does not retry non-transient upstream errors', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return new Response('bad request', { status: 400 })
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 1000, retryDelayMs: 1 },
+    )
+
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 400)
+    assert.match(result.error, /Upstream 400/)
+    assert.equal(calls.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('gpt-image-2 image editing sends reference images as multipart form data', async () => {
   const { mod, cleanup } = await importShared()
   const originalFetch = globalThis.fetch

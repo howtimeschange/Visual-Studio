@@ -49,3 +49,17 @@ test('callImageModel aborts a hung upstream request instead of waiting forever',
     await cleanup()
   }
 })
+
+test('image model options default to a longer generation timeout and two retries', async () => {
+  const { mod, cleanup } = await importShared()
+
+  try {
+    const options = mod.resolveImageModelOptions('gpt-image-2', {}, {})
+
+    assert.equal(options.timeoutMs, 600_000)
+    assert.equal(options.retryCount, 2)
+    assert.equal(options.retryDelayMs, 1_000)
+  } finally {
+    await cleanup()
+  }
+})

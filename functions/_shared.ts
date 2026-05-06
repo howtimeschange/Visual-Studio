@@ -19,6 +19,8 @@ export interface Env {
   VS_IMAGE_REQUEST_TIMEOUT_MS?: string
   VS_TEXT_REQUEST_TIMEOUT_MS?: string
   VS_IMAGE_FETCH_TIMEOUT_MS?: string
+  VS_IMAGE_RETRY_COUNT?: string
+  VS_IMAGE_RETRY_DELAY_MS?: string
   VS_DB?: D1Database
   VS_INPUTS_BUCKET?: R2Bucket
   VS_RESULTS_BUCKET?: R2Bucket
@@ -30,16 +32,21 @@ export interface Env {
 
 export const DEFAULT_BASE = 'https://api.1xm.ai/v1'
 export const VISION_MODEL = 'gemini-3-flash-preview'
-const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 300_000
+const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 600_000
 const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = 90_000
 const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 60_000
+const DEFAULT_IMAGE_RETRY_COUNT = 2
+const DEFAULT_IMAGE_RETRY_DELAY_MS = 1_000
 const MIN_TIMEOUT_MS = 1_000
 const MAX_TIMEOUT_MS = 900_000
+const MAX_RETRY_COUNT = 5
+const MAX_RETRY_DELAY_MS = 30_000
 const GPT_IMAGE_2_MIN_PIXELS = 655_360
 const GPT_IMAGE_2_MAX_PIXELS = 8_294_400
 const GPT_IMAGE_2_MAX_EDGE = 3840
 const GPT_IMAGE_2_SIZE_STEP = 16
 const GPT_IMAGE_2_MAX_RATIO = 3
+const TRANSIENT_IMAGE_STATUSES = new Set([502, 503, 504, 524])
 
 export const MODEL_MAP: Record<string, string> = {
   'nano-banana-2': 'gemini-3.1-flash-image-preview',
@@ -92,6 +99,8 @@ export function resolveImageModelOptions(modelId: string, env: Env, clientKeys: 
       : '',
     timeoutMs: normalizeTimeoutMs(env.VS_IMAGE_REQUEST_TIMEOUT_MS, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS),
     imageFetchTimeoutMs: normalizeTimeoutMs(env.VS_IMAGE_FETCH_TIMEOUT_MS, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
+    retryCount: normalizeRetryCount(env.VS_IMAGE_RETRY_COUNT, DEFAULT_IMAGE_RETRY_COUNT),
+    retryDelayMs: normalizeRetryDelayMs(env.VS_IMAGE_RETRY_DELAY_MS, DEFAULT_IMAGE_RETRY_DELAY_MS),
   }
 }
 
@@ -108,6 +117,8 @@ type ImageModelOptions = {
   resolution?: string
   size?: string
   quality?: string
+  retryCount?: number
+  retryDelayMs?: number
 }
 
 export async function callImageModel(
@@ -138,15 +149,14 @@ export async function callImageModel(
   }
 
   try {
-    const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
-    const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+    const res = await fetchImageModelWithRetry(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(payload),
-    }, timeoutMs)
+    }, opts)
 
     if (!res.ok) {
       const errBody = await res.text()
@@ -180,7 +190,6 @@ async function callGptImage2Model(
   prompt: string,
   opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
-  const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
   const hasImages = images.length > 0
   const endpoint = hasImages ? 'images/edits' : 'images/generations'
   const request = hasImages
@@ -188,14 +197,14 @@ async function callGptImage2Model(
     : buildGptImage2GenerationRequest(modelName, prompt, opts)
 
   try {
-    const res = await fetchWithTimeout(`${baseUrl}/${endpoint}`, {
+    const res = await fetchImageModelWithRetry(`${baseUrl}/${endpoint}`, {
       method: 'POST',
       headers: {
         ...request.headers,
         Authorization: `Bearer ${apiKey}`,
       },
       body: request.body,
-    }, timeoutMs)
+    }, opts)
 
     if (!res.ok) {
       const errBody = await res.text()
@@ -488,6 +497,41 @@ function createTimeoutError(timeoutMs: number) {
   error.code = 'REQUEST_TIMEOUT'
   error.timeoutMs = timeoutMs
   return error
+}
+
+async function fetchImageModelWithRetry(input: RequestInfo | URL, init: RequestInit, opts: ImageModelOptions): Promise<Response> {
+  const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
+  const retryCount = normalizeRetryCount(opts.retryCount, DEFAULT_IMAGE_RETRY_COUNT)
+  const retryDelayMs = normalizeRetryDelayMs(opts.retryDelayMs, DEFAULT_IMAGE_RETRY_DELAY_MS)
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    const res = await fetchWithTimeout(input, init, timeoutMs)
+    if (!shouldRetryImageResponse(res, attempt, retryCount)) return res
+    await sleep(retryDelayMs * (2 ** attempt))
+  }
+
+  return fetchWithTimeout(input, init, timeoutMs)
+}
+
+function shouldRetryImageResponse(res: Response, attempt: number, retryCount: number): boolean {
+  return attempt < retryCount && TRANSIENT_IMAGE_STATUSES.has(res.status)
+}
+
+function normalizeRetryCount(value: unknown, fallback: number): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback
+  return Math.min(MAX_RETRY_COUNT, numeric)
+}
+
+function normalizeRetryDelayMs(value: unknown, fallback: number): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback
+  return Math.min(MAX_RETRY_DELAY_MS, numeric)
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve()
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isTimeoutError(error: unknown): error is Error & { code: string; timeoutMs: number } {
