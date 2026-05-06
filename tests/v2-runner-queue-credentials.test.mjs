@@ -24,6 +24,7 @@ async function importRunner() {
           ensureSession,
           getJob,
           getSealedCredential,
+          listEvents,
           listJobItems,
         } from './functions/_lib/v2-store.ts'
         export { sealJson, unsealJson } from './packages/core/crypto.ts'
@@ -122,6 +123,193 @@ test('submitOutfitBatch stores per-garment instructions on each queued look item
       job.configJson.garmentFingerprint,
       'bottom_1:bottom:Keep the skirt knee-length.|top_1:top:Make the collar more structured.',
     )
+  } finally {
+    await cleanup()
+  }
+})
+
+test('pauseJob prevents a queued job from running until it is resumed', async () => {
+  const { mod, cleanup } = await importRunner()
+  const sent = []
+  const env = {
+    VS_TRANSLATE_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_pause_resume', null)
+    const job = await mod.createJob(env, {
+      id: 'job_pause_resume',
+      sessionId: session.id,
+      userId: null,
+      type: 'translate_batch',
+      status: 'queued',
+      configJson: {
+        modelId: 'nano-banana-2',
+        sourceLanguage: 'auto',
+        targetLanguages: ['ja'],
+        preserveBrand: true,
+        concurrency: 1,
+      },
+      summaryJson: {},
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'translate_cell',
+      status: 'queued',
+      inputJson: { assetId: 'asset_missing', targetLanguage: 'ja' },
+      outputJson: {},
+      attemptCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+    }])
+
+    const paused = await mod.pauseJob(env, job.id)
+    const skipped = await mod.runQueuedJob(env, job.id)
+    const stillPausedJob = await mod.getJob(env, job.id)
+    const [stillQueuedItem] = await mod.listJobItems(env, job.id)
+
+    assert.equal(paused.status, 'paused')
+    assert.deepEqual(skipped, { jobId: job.id, status: 'paused', skipped: true })
+    assert.equal(stillPausedJob.status, 'paused')
+    assert.equal(stillQueuedItem.status, 'queued')
+    assert.equal(stillQueuedItem.attemptCount, 0)
+
+    const resumed = await mod.resumeJob(env, job.id)
+    const resumedJob = await mod.getJob(env, job.id)
+
+    assert.equal(resumed.status, 'queued')
+    assert.equal(resumedJob.status, 'queued')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].jobId, job.id)
+    assert.equal(sent[0].reason, 'retry')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('deleteJob removes a job, its items, and job events', async () => {
+  const { mod, cleanup } = await importRunner()
+  const env = {}
+
+  try {
+    const session = await mod.ensureSession(env, 'session_delete_job', null)
+    const job = await mod.createJob(env, {
+      id: 'job_delete_me',
+      sessionId: session.id,
+      userId: null,
+      type: 'outfit_batch',
+      status: 'queued',
+      configJson: { modelId: 'nano-banana-pro' },
+      summaryJson: {},
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'outfit_cell',
+      status: 'queued',
+      inputJson: { modelAssetId: 'model_1', lookId: 'look_1' },
+      outputJson: {},
+      attemptCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+    }])
+    await mod.pauseJob(env, job.id)
+
+    const deleted = await mod.deleteJob(env, job.id)
+    const missingJob = await mod.getJob(env, job.id)
+    const items = await mod.listJobItems(env, job.id)
+    const events = await mod.listEvents(env, 'job', job.id)
+
+    assert.deepEqual(deleted, { jobId: job.id, deleted: true })
+    assert.equal(missingJob, null)
+    assert.deepEqual(items, [])
+    assert.deepEqual(events, [])
+  } finally {
+    await cleanup()
+  }
+})
+
+test('cancelJob marks unfinished items as cancelled so history stops showing them as queued', async () => {
+  const { mod, cleanup } = await importRunner()
+  const env = {}
+
+  try {
+    const session = await mod.ensureSession(env, 'session_cancel_job', null)
+    const job = await mod.createJob(env, {
+      id: 'job_cancel_me',
+      sessionId: session.id,
+      userId: null,
+      type: 'translate_batch',
+      status: 'running',
+      configJson: {
+        modelId: 'nano-banana-2',
+        targetLanguages: ['ja'],
+      },
+      summaryJson: {},
+      progressTotal: 3,
+      progressDone: 1,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [
+      {
+        jobId: job.id,
+        itemType: 'translate_cell',
+        status: 'completed',
+        inputJson: { assetId: 'asset_done', targetLanguage: 'ja' },
+        outputJson: { resultAssetId: 'result_done' },
+        attemptCount: 1,
+        errorCode: null,
+        errorMessage: null,
+        startedAt: null,
+        finishedAt: new Date().toISOString(),
+      },
+      {
+        jobId: job.id,
+        itemType: 'translate_cell',
+        status: 'queued',
+        inputJson: { assetId: 'asset_queued', targetLanguage: 'ja' },
+        outputJson: {},
+        attemptCount: 0,
+        errorCode: null,
+        errorMessage: null,
+        startedAt: null,
+        finishedAt: null,
+      },
+      {
+        jobId: job.id,
+        itemType: 'translate_cell',
+        status: 'running',
+        inputJson: { assetId: 'asset_running', targetLanguage: 'ja' },
+        outputJson: {},
+        attemptCount: 1,
+        errorCode: null,
+        errorMessage: null,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+      },
+    ])
+
+    const cancelled = await mod.cancelJob(env, job.id)
+    const items = await mod.listJobItems(env, job.id)
+
+    assert.deepEqual(cancelled, { jobId: job.id, status: 'cancelled' })
+    assert.equal((await mod.getJob(env, job.id)).status, 'cancelled')
+    assert.deepEqual(items.map((item) => item.status), ['completed', 'cancelled', 'cancelled'])
+    assert.ok(items[1].finishedAt)
+    assert.ok(items[2].finishedAt)
   } finally {
     await cleanup()
   }

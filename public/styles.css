@@ -1463,6 +1463,183 @@ button.ghost:disabled,
   font-variant-numeric: tabular-nums;
 }
 
+/* ═══════════════ BATCH JOBS ═══════════════ */
+
+.job-panel {
+  display: grid;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  padding: var(--space-md) var(--space-xl);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-2);
+}
+
+.job-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.job-panel-head h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.job-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 320px);
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+
+.job-tab {
+  min-height: 30px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.job-tab:hover {
+  color: var(--text);
+}
+
+.job-tab.active {
+  background: var(--bg-4);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.job-list {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.job-list:empty {
+  display: none;
+}
+
+.job-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 48px;
+  padding: var(--space-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+}
+
+.job-card.current {
+  border-color: color-mix(in oklch, var(--accent) 42%, var(--line));
+  background: color-mix(in oklch, var(--accent-soft) 34%, var(--bg-3));
+}
+
+.job-card.live:not(.current) {
+  border-color: color-mix(in oklch, var(--warn) 24%, var(--line));
+}
+
+.job-card-meta {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.job-card-topline {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.job-card-meta strong,
+.job-card-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-card-meta strong {
+  font-size: var(--text-sm);
+}
+
+.job-card-meta span,
+.job-card-error {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.job-status {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 9px;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.job-status.ok {
+  border-color: color-mix(in oklch, var(--ok) 35%, var(--line));
+  color: var(--ok);
+}
+
+.job-status.run {
+  border-color: color-mix(in oklch, var(--warn) 36%, var(--line));
+  color: var(--warn);
+}
+
+.job-status.paused {
+  border-color: color-mix(in oklch, var(--accent) 32%, var(--line));
+  color: var(--accent);
+}
+
+.job-status.err,
+.job-card-error {
+  color: var(--danger);
+}
+
+.job-card-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: var(--space-xs);
+}
+
+.job-mini-btn {
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0 9px;
+  background: var(--bg-2);
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.job-mini-btn:hover {
+  border-color: var(--line-strong);
+  background: var(--bg-4);
+  color: var(--text);
+}
+
+.job-mini-btn.danger:hover {
+  border-color: color-mix(in oklch, var(--danger) 42%, var(--line));
+  color: var(--danger);
+}
+
 /* ═══════════════ GRID / TABLE ═══════════════ */
 
 .grid-wrap {
@@ -3197,20 +3374,26 @@ dialog input::placeholder,
 
 .lane-thumb-rm {
   position: absolute;
-  top: var(--space-xs);
-  right: var(--space-xs);
+  top: 8px;
+  right: 8px;
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   border-radius: 999px;
-  background: oklch(8% 0 0 / 0.85);
-  color: var(--text);
-  font-size: 0.8rem;
+  border: 1px solid color-mix(in oklch, var(--danger) 34%, var(--line));
+  background: color-mix(in oklch, white 88%, var(--danger) 12%);
+  box-shadow: 0 6px 16px oklch(0% 0 0 / 0.12);
+  color: color-mix(in oklch, var(--danger) 82%, oklch(16% 0.01 20));
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .lane-thumb-rm:hover {
-  background: color-mix(in oklch, var(--danger) 80%, oklch(10% 0 0));
+  border-color: color-mix(in oklch, var(--danger) 54%, var(--line));
+  background: color-mix(in oklch, white 62%, var(--danger) 38%);
+  color: color-mix(in oklch, var(--danger) 92%, oklch(12% 0.01 20));
 }
 
 /* ═══════════════ STYLE TRANSFER VIEW ═══════════════ */
@@ -4325,6 +4508,20 @@ button.compact {
   .outfit-lanes,
   .input-row {
     grid-template-columns: 1fr;
+  }
+
+  .job-card {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .job-card-topline {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .job-card-actions {
+    justify-content: flex-start;
   }
 
   .chat-input-top {

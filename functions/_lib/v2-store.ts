@@ -780,6 +780,35 @@ export async function updateJob(envOrJobId: any, jobIdOrPatch: string | Partial<
   return next
 }
 
+export async function deleteJobRecord(envOrJobId: any, maybeJobId?: string): Promise<boolean> {
+  const { env, id } = resolveEnvAndId(envOrJobId, maybeJobId)
+  const current = await getJob(env, id)
+  if (!current) return false
+
+  const db = dbFor(env)
+  if (db) {
+    await db.batch([
+      db.prepare("DELETE FROM runtime_events WHERE (scope = 'job' AND scope_id = ?) OR scope_id IN (SELECT id FROM job_items WHERE job_id = ?)").bind(id, id),
+      db.prepare('DELETE FROM job_items WHERE job_id = ?').bind(id),
+      db.prepare('DELETE FROM sealed_credentials WHERE job_id = ?').bind(id),
+      db.prepare('DELETE FROM jobs WHERE id = ?').bind(id),
+    ])
+    return true
+  }
+
+  const itemIds = new Set<string>([...(memoryState.jobItems.get(id)?.keys() || [])])
+  memoryState.jobItems.delete(id)
+  memoryState.events.delete(getScopeKey('job', id))
+  for (const itemId of itemIds) {
+    memoryState.events.delete(getScopeKey('item', itemId))
+  }
+  for (const [credentialId, credential] of memoryState.sealedCredentials) {
+    if (credential.jobId === id) memoryState.sealedCredentials.delete(credentialId)
+  }
+  memoryState.jobs.delete(id)
+  return true
+}
+
 export async function listJobsByStatus(env: any, statuses: string[]): Promise<JobRecord[]> {
   const normalized = statuses.map((status) => String(status || '').trim()).filter(Boolean)
   if (normalized.length === 0) return []

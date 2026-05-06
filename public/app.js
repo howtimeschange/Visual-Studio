@@ -96,8 +96,15 @@ const VIEW_ROUTES = {
   style: '/?view=style',
 }
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'running'])
+const CURRENT_TASK_JOB_STATUSES = new Set(['queued', 'running', 'paused', 'partial_failed', 'failed'])
+const KNOWN_JOB_STATUSES = new Set(['', 'queued', 'running', 'paused', 'completed', 'partial_failed', 'failed', 'cancelled'])
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
+const translateJobWatchers = new Map()
+const outfitJobWatchers = new Map()
+let translateWorkspaceLoadToken = 0
+let outfitWorkspaceLoadToken = 0
 let canvasSpaceHeld = false
 let canvasSaveTimer = 0
 let canvasSaveInFlight = null
@@ -124,6 +131,8 @@ const state = {
     running: false,
     progress: '',
     jobId: '',
+    jobTab: 'current',
+    jobs: [],
   },
   generate: {
     projectId: '',
@@ -219,6 +228,8 @@ const state = {
     running: false,
     progress: '',
     jobId: '',
+    jobTab: 'current',
+    jobs: [],
   },
   style: {
     model: 'nano-banana-2',
@@ -335,6 +346,9 @@ const dom = {
   pEmptyNew: $('#p-empty-new'),
   pRefresh: $('#p-refresh'),
   pShared: $('#p-shared'),
+  tJobList: $('#t-job-list'),
+  tJobEmpty: $('#t-job-empty'),
+  tJobTabs: $$('#t-job-tabs [data-job-tab]'),
   accountSummary: $('#account-summary'),
   accountName: $('#account-name'),
   accountEmail: $('#account-email'),
@@ -378,6 +392,9 @@ const dom = {
   oClear: $('#o-clear'),
   oDl: $('#o-dl'),
   oProgress: $('#o-progress'),
+  oJobList: $('#o-job-list'),
+  oJobEmpty: $('#o-job-empty'),
+  oJobTabs: $$('#o-job-tabs [data-job-tab]'),
   oGrid: $('#o-grid'),
   oEmpty: $('#o-empty'),
   sModel: $('#s-model'),
@@ -526,14 +543,18 @@ function hydrateStoredState() {
   state.keys = loadKeys()
   const runtime = sanitizeRuntimeState(loadRuntimeState())
   state.runtime.sessionId = runtime.sessionId
-  state.translate.jobId = runtime.translate.jobId
+  state.translate.jobId = getLoadedStoredJobId(runtime.translate.jobs)
+  state.translate.jobTab = runtime.translate.jobTab
+  state.translate.jobs = runtime.translate.jobs
   state.translate.items = runtime.translate.items
   state.generate.elements = runtime.generate.elements || []
   state.generate.aiMessages = []
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0
-  state.outfit.jobId = runtime.outfit.jobId
+  state.outfit.jobId = getLoadedStoredJobId(runtime.outfit.jobs)
+  state.outfit.jobTab = runtime.outfit.jobTab
+  state.outfit.jobs = runtime.outfit.jobs
   state.outfit.models = runtime.outfit.models
   state.outfit.garments = runtime.outfit.garments
   state.style.sourceImage = runtime.style?.sourceImage || null
@@ -633,6 +654,8 @@ function saveRuntimeState(options = {}) {
     sessionId: state.runtime.sessionId || '',
     translate: {
       jobId: state.translate.jobId || '',
+      jobTab: state.translate.jobTab === 'history' ? 'history' : 'current',
+      jobs: state.translate.jobs.map(serializeJobTask),
       items: state.translate.items.map((item) => serializeAssetBackedItem(item)),
     },
     generate: {
@@ -648,6 +671,8 @@ function saveRuntimeState(options = {}) {
     },
     outfit: {
       jobId: state.outfit.jobId || '',
+      jobTab: state.outfit.jobTab === 'history' ? 'history' : 'current',
+      jobs: state.outfit.jobs.map(serializeJobTask),
       models: state.outfit.models.map((item) => serializeAssetBackedItem(item)),
       garments: state.outfit.garments.map((item) => serializeAssetBackedItem(item, {
         role: item.role || 'full_outfit',
@@ -895,6 +920,8 @@ function clearCurrentAiSession() {
 }
 
 function sanitizeRuntimeState(raw = {}) {
+  const translateJobs = sanitizeStoredJobTasks(raw.translate?.jobs, raw.translate?.jobId, 'translate_batch')
+  const outfitJobs = sanitizeStoredJobTasks(raw.outfit?.jobs, raw.outfit?.jobId, 'outfit_batch')
   const translateItems = Array.isArray(raw.translate?.items)
     ? raw.translate.items
       .map((item) => sanitizeStoredAssetItem(item))
@@ -911,13 +938,19 @@ function sanitizeRuntimeState(raw = {}) {
     ? raw.outfit.garments
       .map((item) => sanitizeStoredAssetItem(item))
       .filter(Boolean)
-      .map((item) => ({ ...item, role: item.role || 'full_outfit' }))
+      .map((item) => ({
+        ...item,
+        role: item.role || 'full_outfit',
+        instructions: normalizeGarmentInstructions(item.instructions),
+      }))
     : []
 
   return {
     sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
     translate: {
       jobId: typeof raw.translate?.jobId === 'string' ? raw.translate.jobId : '',
+      jobTab: raw.translate?.jobTab === 'history' ? 'history' : 'current',
+      jobs: translateJobs,
       items: translateItems,
     },
     generate: {
@@ -935,6 +968,8 @@ function sanitizeRuntimeState(raw = {}) {
     },
     outfit: {
       jobId: typeof raw.outfit?.jobId === 'string' ? raw.outfit.jobId : '',
+      jobTab: raw.outfit?.jobTab === 'history' ? 'history' : 'current',
+      jobs: outfitJobs,
       models: outfitModels,
       garments: outfitGarments,
     },
@@ -951,6 +986,349 @@ function sanitizeRuntimeState(raw = {}) {
         ? raw.style.history.filter((entry) => entry?.id && entry?.resultDataUrl).slice(-30)
         : [],
     },
+  }
+}
+
+function sanitizeStoredJobTasks(rawJobs, legacyJobId = '', fallbackType = '') {
+  const jobs = Array.isArray(rawJobs) ? rawJobs : []
+  const mapped = jobs
+    .map((entry) => {
+      const task = serializeJobTask(entry)
+      const status = KNOWN_JOB_STATUSES.has(task.status) ? task.status : ''
+      const type = String(task.type || '').trim()
+      if (!type || type !== fallbackType) return null
+      return task.jobId ? {
+        ...task,
+        status,
+        type,
+        loaded: task.loaded && !ACTIVE_JOB_STATUSES.has(status) && status !== '',
+      } : null
+    })
+    .filter(Boolean)
+
+  if (mapped.length === 0 && typeof legacyJobId === 'string' && legacyJobId && !mapped.some((task) => task.jobId === legacyJobId)) {
+    mapped.unshift({
+      jobId: legacyJobId,
+      type: fallbackType,
+      status: '',
+      progress: '',
+      label: '',
+      createdAt: '',
+      updatedAt: '',
+      loaded: false,
+      error: '',
+      itemCount: 0,
+      progressTotal: 0,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+  }
+
+  return mapped.slice(0, 12)
+}
+
+function getLoadedStoredJobId(tasks = []) {
+  return tasks.find((task) => task.loaded && !ACTIVE_JOB_STATUSES.has(task.status) && task.status !== '')?.jobId || ''
+}
+
+function getJobTasks(kind) {
+  return kind === 'translate' ? state.translate.jobs : state.outfit.jobs
+}
+
+function getLoadedJobId(kind) {
+  return kind === 'translate' ? state.translate.jobId : state.outfit.jobId
+}
+
+function getJobTab(kind) {
+  return kind === 'translate' ? state.translate.jobTab : state.outfit.jobTab
+}
+
+function setJobTab(kind, tab) {
+  const next = tab === 'history' ? 'history' : 'current'
+  if (kind === 'translate') {
+    state.translate.jobTab = next
+  } else {
+    state.outfit.jobTab = next
+  }
+}
+
+function setLoadedJobId(kind, jobId) {
+  if (kind === 'translate') {
+    state.translate.jobId = jobId || ''
+  } else {
+    state.outfit.jobId = jobId || ''
+  }
+}
+
+function makeJobTask(jobId, type, extra = {}) {
+  return {
+    jobId,
+    type,
+    status: '',
+    progress: '',
+    label: '',
+    createdAt: '',
+    updatedAt: '',
+    loaded: false,
+    error: '',
+    itemCount: 0,
+    progressTotal: 0,
+    progressDone: 0,
+    progressFailed: 0,
+    ...extra,
+  }
+}
+
+function upsertJobTask(kind, jobId, patch = {}) {
+  if (!jobId) return null
+  const tasks = getJobTasks(kind)
+  const type = kind === 'translate' ? 'translate_batch' : 'outfit_batch'
+  let task = tasks.find((entry) => entry.jobId === jobId)
+  if (task) {
+    Object.assign(task, patch)
+  } else {
+    task = makeJobTask(jobId, type, patch)
+    tasks.unshift(task)
+  }
+  if (patch.job) updateJobTaskFromJob(task, patch.job, patch.items)
+  const index = tasks.findIndex((entry) => entry.jobId === jobId)
+  if (index > 0) {
+    tasks.splice(index, 1)
+    tasks.unshift(task)
+  }
+  tasks.splice(12)
+  return task
+}
+
+function removeJobTask(kind, jobId) {
+  if (kind === 'translate') {
+    state.translate.jobs = state.translate.jobs.filter((task) => task.jobId !== jobId)
+    if (state.translate.jobId === jobId) state.translate.jobId = ''
+    translateJobWatchers.delete(jobId)
+  } else {
+    state.outfit.jobs = state.outfit.jobs.filter((task) => task.jobId !== jobId)
+    if (state.outfit.jobId === jobId) state.outfit.jobId = ''
+    outfitJobWatchers.delete(jobId)
+  }
+}
+
+function getJobTaskBucket(task = {}) {
+  return CURRENT_TASK_JOB_STATUSES.has(task.status) || !task.status ? 'current' : 'history'
+}
+
+function filterJobTasksForTab(tasks = [], tab = 'current') {
+  const bucket = tab === 'history' ? 'history' : 'current'
+  return tasks.filter((task) => getJobTaskBucket(task) === bucket)
+}
+
+function updateJobTaskFromJob(task, job, items = null) {
+  if (!task || !job) return task
+  task.jobId = job.id || task.jobId
+  task.type = job.type || task.type
+  task.status = job.status || task.status
+  task.progress = formatBatchProgress(job)
+  task.createdAt = job.createdAt || task.createdAt
+  task.updatedAt = job.updatedAt || task.updatedAt
+  task.progressTotal = Number(job.progressTotal || 0)
+  task.progressDone = Number(job.progressDone || 0)
+  task.progressFailed = Number(job.progressFailed || 0)
+  task.itemCount = Array.isArray(items) ? items.length : Number(task.itemCount || job.progressTotal || 0)
+  task.error = ''
+  if (!task.label) task.label = createJobTaskLabel(job, items)
+  return task
+}
+
+function createJobTaskLabel(job, items = null) {
+  const total = Number(job?.progressTotal || 0)
+  const created = job?.createdAt ? formatRelativeTime(job.createdAt) : '刚刚'
+  if (job?.type === 'outfit_batch') {
+    const lookCount = Number(job?.summaryJson?.lookCount || 0)
+    return `${created} · ${lookCount || total || '多'} 套搭配`
+  }
+  if (job?.type === 'translate_batch') {
+    const languages = Array.isArray(job?.configJson?.targetLanguages) ? job.configJson.targetLanguages.length : 0
+    const assets = Array.isArray(job?.configJson?.assetIds) ? job.configJson.assetIds.length : 0
+    return `${created} · ${assets || '多'} 张 × ${languages || '多'} 语种`
+  }
+  return `${created} · ${Array.isArray(items) ? items.length : total} 项`
+}
+
+function markJobTaskLoaded(kind, jobId) {
+  for (const task of getJobTasks(kind)) {
+    task.loaded = task.jobId === jobId
+  }
+  setLoadedJobId(kind, jobId)
+}
+
+function clearJobTaskLoaded(kind) {
+  for (const task of getJobTasks(kind)) {
+    task.loaded = false
+  }
+  setLoadedJobId(kind, '')
+}
+
+async function loadJobIntoWorkspace(kind, jobId) {
+  const loadToken = kind === 'translate' ? ++translateWorkspaceLoadToken : ++outfitWorkspaceLoadToken
+  const task = upsertJobTask(kind, jobId, { syncing: true, error: '' })
+  markJobTaskLoaded(kind, jobId)
+  if (kind === 'translate') {
+    state.translate.progress = '正在切换任务结果…'
+    renderTranslate()
+  } else {
+    state.outfit.progress = '正在切换任务结果…'
+    renderOutfit()
+  }
+  renderJobList(kind)
+  try {
+    const { job, items } = await fetchJobSnapshot(jobId)
+    if ((kind === 'translate' ? translateWorkspaceLoadToken : outfitWorkspaceLoadToken) !== loadToken) {
+      return
+    }
+    updateJobTaskFromJob(task, job, items)
+    if (kind === 'translate') {
+      await hydrateTranslateWorkspaceFromJob(job, items)
+      if (translateWorkspaceLoadToken !== loadToken) return
+      applyTranslateJobSnapshot(job, items)
+      renderTranslateDropdowns()
+    } else {
+      await hydrateOutfitWorkspaceFromJob(job, items)
+      if (outfitWorkspaceLoadToken !== loadToken) return
+      applyOutfitJobSnapshot(job, items)
+    }
+    saveRuntimeState()
+    if (kind === 'translate') {
+      void syncTranslateJob(jobId, { applyToWorkspace: true })
+    } else {
+      void syncOutfitJob(jobId, { applyToWorkspace: true })
+    }
+  } catch (error) {
+    if ((kind === 'translate' ? translateWorkspaceLoadToken : outfitWorkspaceLoadToken) !== loadToken) {
+      return
+    }
+    const status = Number(error?.status || 0)
+    if (status === 404 || status === 403) {
+      removeJobTask(kind, jobId)
+      clearJobTaskLoaded(kind)
+      if (kind === 'translate') {
+        state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
+      } else {
+        state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
+      }
+      saveRuntimeState()
+      if (kind === 'translate') renderTranslate()
+      else renderOutfit()
+      return
+    }
+    task.error = trimError(error)
+    clearJobTaskLoaded(kind)
+    saveRuntimeState()
+    if (kind === 'translate') renderTranslate()
+    else renderOutfit()
+  } finally {
+    if (task) task.syncing = false
+    renderJobList(kind)
+  }
+}
+
+async function pauseJobTask(kind, jobId) {
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  renderJobList(kind)
+  try {
+    await postJson(`/api/jobs/${encodeURIComponent(jobId)}/pause`, {})
+    if (kind === 'translate') {
+      await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else {
+      await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    }
+  } catch (error) {
+    task.error = trimError(error)
+    saveRuntimeState()
+  } finally {
+    task.actioning = false
+    renderJobList(kind)
+  }
+}
+
+async function resumeJobTask(kind, jobId) {
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  renderJobList(kind)
+  try {
+    await postJson(`/api/jobs/${encodeURIComponent(jobId)}/resume`, {})
+    if (kind === 'translate') {
+      await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else {
+      await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    }
+  } catch (error) {
+    task.error = trimError(error)
+    saveRuntimeState()
+  } finally {
+    task.actioning = false
+    renderJobList(kind)
+  }
+}
+
+async function retryJobTask(kind, jobId) {
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  renderJobList(kind)
+  try {
+    await postJson(`/api/jobs/${encodeURIComponent(jobId)}/retry`, {})
+    setJobTab(kind, 'current')
+    if (kind === 'translate') {
+      await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else {
+      await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    }
+  } catch (error) {
+    task.error = trimError(error)
+    saveRuntimeState()
+  } finally {
+    task.actioning = false
+    renderJobList(kind)
+  }
+}
+
+async function cancelJobTask(kind, jobId) {
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  renderJobList(kind)
+  try {
+    await postJson(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {})
+    if (kind === 'translate') {
+      await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else {
+      await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    }
+    setJobTab(kind, 'history')
+    saveRuntimeState()
+    renderJobList(kind)
+  } catch (error) {
+    task.error = trimError(error)
+    saveRuntimeState()
+  } finally {
+    task.actioning = false
+    renderJobList(kind)
+  }
+}
+
+async function deleteJobTask(kind, jobId) {
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  renderJobList(kind)
+  try {
+    await deleteJson(`/api/jobs/${encodeURIComponent(jobId)}`)
+    removeJobTask(kind, jobId)
+    saveRuntimeState()
+    if (kind === 'translate') {
+      state.translate.running = false
+      renderTranslate()
+    } else {
+      state.outfit.running = false
+      renderOutfit()
+    }
+  } catch (error) {
+    task.error = trimError(error)
+    task.actioning = false
+    saveRuntimeState()
+    renderJobList(kind)
   }
 }
 
@@ -1142,6 +1520,24 @@ function serializeAssetBackedItem(item, extra = {}) {
     label: item.label || '',
     role: item.role || '',
     ...extra,
+  }
+}
+
+function serializeJobTask(task = {}) {
+  return {
+    jobId: String(task.jobId || task.id || ''),
+    type: String(task.type || ''),
+    status: String(task.status || ''),
+    progress: String(task.progress || ''),
+    label: String(task.label || ''),
+    createdAt: String(task.createdAt || ''),
+    updatedAt: String(task.updatedAt || ''),
+    loaded: Boolean(task.loaded),
+    error: String(task.error || ''),
+    itemCount: Number(task.itemCount || 0),
+    progressTotal: Number(task.progressTotal || 0),
+    progressDone: Number(task.progressDone || 0),
+    progressFailed: Number(task.progressFailed || 0),
   }
 }
 
@@ -1518,11 +1914,18 @@ function bindTranslate() {
   })
 
   dom.tRunBtn.addEventListener('click', runTranslateBatch)
+  for (const button of dom.tJobTabs || []) {
+    button.addEventListener('click', () => {
+      setJobTab('translate', button.dataset.jobTab)
+      saveRuntimeState()
+      renderJobList('translate')
+    })
+  }
   dom.tClearBtn.addEventListener('click', () => {
     if (isTranslateBusy()) return
-    translateWatcherToken += 1
     state.translate.items = []
     state.translate.jobId = ''
+    for (const task of state.translate.jobs) task.loaded = false
     state.translate.progress = ''
     saveRuntimeState()
     renderTranslate()
@@ -3815,10 +4218,17 @@ function bindOutfit() {
   })
 
   dom.oRun.addEventListener('click', runOutfitBatch)
+  for (const button of dom.oJobTabs || []) {
+    button.addEventListener('click', () => {
+      setJobTab('outfit', button.dataset.jobTab)
+      saveRuntimeState()
+      renderJobList('outfit')
+    })
+  }
   dom.oClear.addEventListener('click', () => {
     if (isOutfitBusy()) return
-    outfitWatcherToken += 1
     state.outfit.jobId = ''
+    for (const task of state.outfit.jobs) task.loaded = false
     state.outfit.results = {}
     state.outfit.progress = ''
     saveRuntimeState()
@@ -4312,6 +4722,7 @@ function renderTranslate() {
   dom.tPreserve.disabled = busy
   dom.tDropzone.classList.toggle('disabled', busy)
   dom.tEmpty.classList.toggle('hidden', hasItems)
+  renderJobList('translate')
 
   if (!hasItems) {
     dom.tGrid.replaceChildren()
@@ -4474,6 +4885,161 @@ function renderProjects() {
   dom.pEmpty.classList.toggle('hidden', items.length > 0 || loading)
 }
 
+function renderJobList(kind) {
+  const list = kind === 'translate' ? dom.tJobList : dom.oJobList
+  const empty = kind === 'translate' ? dom.tJobEmpty : dom.oJobEmpty
+  if (!list) return
+  const tab = getJobTab(kind)
+  const allTasks = getJobTasks(kind)
+  const tasks = filterJobTasksForTab(allTasks, tab)
+  const tabButtons = kind === 'translate' ? dom.tJobTabs : dom.oJobTabs
+  for (const button of tabButtons || []) {
+    const active = button.dataset.jobTab === tab
+    const count = filterJobTasksForTab(allTasks, button.dataset.jobTab).length
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-selected', active ? 'true' : 'false')
+    button.textContent = `${button.dataset.jobTab === 'history' ? '历史任务' : '当前任务'} ${count}`
+  }
+  if (empty) {
+    empty.classList.toggle('hidden', tasks.length > 0)
+    empty.textContent = tab === 'history' ? '暂无历史任务' : '暂无当前任务'
+  }
+  list.replaceChildren(...tasks.map((task) => createJobTaskCard(kind, task, tab)))
+}
+
+function createJobTaskCard(kind, task, tab = 'current') {
+  const live = ACTIVE_JOB_STATUSES.has(task.status)
+  const paused = task.status === 'paused'
+  const retryable = task.status === 'failed' || task.status === 'partial_failed'
+  const currentTab = tab !== 'history'
+  const loaded = getLoadedJobId(kind) === task.jobId || task.loaded
+  const card = document.createElement('div')
+  card.className = `job-card${live ? ' live' : ''}${loaded ? ' current' : ''}`
+  card.dataset.jobId = task.jobId || ''
+
+  const meta = document.createElement('div')
+  meta.className = 'job-card-meta'
+  const topline = document.createElement('div')
+  topline.className = 'job-card-topline'
+  const title = document.createElement('strong')
+  title.textContent = task.label || getJobTypeLabel(task.type)
+  const badge = document.createElement('span')
+  badge.className = `job-status ${getJobStatusTone(task.status)}`
+  badge.textContent = loaded ? `${getJobStatusLabel(task.status)} · 正在查看` : getJobStatusLabel(task.status)
+  topline.append(title, badge)
+  const detail = document.createElement('span')
+  detail.textContent = task.progress || getJobStatusLabel(task.status) || '正在同步任务状态…'
+  meta.append(topline, detail)
+
+  const actions = document.createElement('div')
+  actions.className = 'job-card-actions'
+
+  const load = document.createElement('button')
+  load.type = 'button'
+  load.className = 'job-mini-btn'
+  load.textContent = loaded ? '刷新结果' : '查看结果'
+  load.disabled = Boolean(task.syncing)
+  load.addEventListener('click', () => {
+    void loadJobIntoWorkspace(kind, task.jobId)
+  })
+  actions.append(load)
+
+  if (live && currentTab) {
+    const pause = document.createElement('button')
+    pause.type = 'button'
+    pause.className = 'job-mini-btn'
+    pause.textContent = '暂停'
+    pause.disabled = Boolean(task.actioning)
+    pause.addEventListener('click', () => {
+      void pauseJobTask(kind, task.jobId)
+    })
+    actions.append(pause)
+  }
+
+  if (paused && currentTab) {
+    const resume = document.createElement('button')
+    resume.type = 'button'
+    resume.className = 'job-mini-btn'
+    resume.textContent = '继续'
+    resume.disabled = Boolean(task.actioning)
+    resume.addEventListener('click', () => {
+      void resumeJobTask(kind, task.jobId)
+    })
+    actions.append(resume)
+  }
+
+  if (retryable && currentTab) {
+    const retry = document.createElement('button')
+    retry.type = 'button'
+    retry.className = 'job-mini-btn'
+    retry.textContent = '重试'
+    retry.disabled = Boolean(task.actioning)
+    retry.addEventListener('click', () => {
+      void retryJobTask(kind, task.jobId)
+    })
+    actions.append(retry)
+  }
+
+  if ((live || paused || retryable) && currentTab) {
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.className = 'job-mini-btn danger'
+    cancel.textContent = '结束'
+    cancel.disabled = Boolean(task.actioning)
+    cancel.addEventListener('click', () => {
+      void cancelJobTask(kind, task.jobId)
+    })
+    actions.append(cancel)
+  }
+
+  if (!currentTab) {
+    const remove = document.createElement('button')
+    remove.type = 'button'
+    remove.className = 'job-mini-btn danger'
+    remove.textContent = '删除'
+    remove.disabled = Boolean(task.actioning)
+    remove.addEventListener('click', () => {
+      void deleteJobTask(kind, task.jobId)
+    })
+    actions.append(remove)
+  }
+
+  card.append(meta, actions)
+  if (task.error) {
+    const error = document.createElement('div')
+    error.className = 'job-card-error'
+    error.textContent = task.error
+    card.append(error)
+  }
+  return card
+}
+
+function getJobTypeLabel(type) {
+  if (type === 'translate_batch') return '批量翻译'
+  if (type === 'outfit_batch') return '批量换装'
+  return '任务'
+}
+
+function getJobStatusLabel(status) {
+  return ({
+    queued: '排队中',
+    running: '进行中',
+    paused: '已暂停',
+    completed: '已完成',
+    partial_failed: '部分失败',
+    failed: '失败',
+    cancelled: '已取消',
+  })[status] || '同步中'
+}
+
+function getJobStatusTone(status) {
+  if (status === 'completed') return 'ok'
+  if (status === 'running' || status === 'queued') return 'run'
+  if (status === 'paused') return 'paused'
+  if (status === 'failed' || status === 'partial_failed' || status === 'cancelled') return 'err'
+  return ''
+}
+
 function createProjectSkeleton() {
   const card = document.createElement('div')
   card.className = 'project-card'
@@ -4566,6 +5132,7 @@ function renderOutfit() {
   dom.oConcurrency.disabled = busy
   dom.oModelAdd.disabled = busy
   dom.oGarmentAdd.disabled = busy
+  renderJobList('outfit')
 
   renderLaneList(dom.oModelList, state.outfit.models, 'model')
   renderLaneList(dom.oGarmentList, state.outfit.garments, 'garment')
@@ -4716,9 +5283,22 @@ async function runTranslateBatch() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-    state.translate.jobId = data.jobId
+    upsertJobTask('translate', data.jobId, {
+      type: 'translate_batch',
+      status: 'queued',
+      progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
+      label: `刚刚 · ${state.translate.items.length} 张 × ${state.translate.targets.length} 语种`,
+      loaded: true,
+      itemCount: Number(data.itemCount || 0),
+      progressTotal: Number(data.itemCount || 0),
+    })
+    markJobTaskLoaded('translate', data.jobId)
+    setJobTab('translate', 'current')
+    state.translate.running = false
+    state.translate.progress = '任务已提交，可继续上传新图片'
     saveRuntimeState()
-    await syncTranslateJob(data.jobId)
+    renderTranslate()
+    void syncTranslateJob(data.jobId, { applyToWorkspace: true })
   } catch (error) {
     state.translate.running = false
     state.translate.progress = trimError(error)
@@ -4766,9 +5346,22 @@ async function runOutfitBatch() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-    state.outfit.jobId = data.jobId
+    upsertJobTask('outfit', data.jobId, {
+      type: 'outfit_batch',
+      status: 'queued',
+      progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
+      label: `刚刚 · ${data.lookCount || looks.length} 套搭配`,
+      loaded: true,
+      itemCount: Number(data.itemCount || 0),
+      progressTotal: Number(data.itemCount || 0),
+    })
+    markJobTaskLoaded('outfit', data.jobId)
+    setJobTab('outfit', 'current')
+    state.outfit.running = false
+    state.outfit.progress = '任务已提交，可继续上传新图片'
     saveRuntimeState()
-    await syncOutfitJob(data.jobId)
+    renderOutfit()
+    void syncOutfitJob(data.jobId, { applyToWorkspace: true })
   } catch (error) {
     state.outfit.running = false
     state.outfit.progress = trimError(error)
@@ -4894,7 +5487,8 @@ async function retryTranslateJob(itemId, language) {
 
   try {
     await postJson(`/api/jobs/${encodeURIComponent(state.translate.jobId)}/items/${encodeURIComponent(result.itemId)}/retry`, {})
-    await syncTranslateJob(state.translate.jobId)
+    await syncTranslateJob(state.translate.jobId, { applyToWorkspace: true })
+    state.translate.running = false
   } catch (error) {
     state.translate.running = false
     state.translate.progress = trimError(error)
@@ -4920,7 +5514,8 @@ async function retryOutfitJob(modelId, lookId) {
 
   try {
     await postJson(`/api/jobs/${encodeURIComponent(state.outfit.jobId)}/items/${encodeURIComponent(result.itemId)}/retry`, {})
-    await syncOutfitJob(state.outfit.jobId)
+    await syncOutfitJob(state.outfit.jobId, { applyToWorkspace: true })
+    state.outfit.running = false
   } catch (error) {
     state.outfit.running = false
     state.outfit.progress = trimError(error)
@@ -5009,19 +5604,19 @@ function hasOutfitActiveItems() {
 }
 
 function isTranslateBusy() {
-  return state.translate.running || hasTranslateActiveItems()
+  return state.translate.running
 }
 
 function isOutfitBusy() {
-  return state.outfit.running || hasOutfitActiveItems()
+  return state.outfit.running
 }
 
 function canRetryTranslateItem() {
-  return !hasTranslateActiveItems()
+  return Boolean(state.translate.jobId) && !hasTranslateActiveItems()
 }
 
 function canRetryOutfitItem() {
-  return !hasOutfitActiveItems()
+  return Boolean(state.outfit.jobId) && !hasOutfitActiveItems()
 }
 
 function getRunningLabel(base, attempt = 1) {
@@ -5150,6 +5745,11 @@ function createTranslateResultCell(item, language, signature) {
     return cell
   }
 
+  if (result.status === 'cancelled') {
+    cell.append(createStatusLine('已结束'))
+    return cell
+  }
+
   if (result.status === 'running') {
     cell.append(createStatusLine(getRunningLabel('翻译中…', result.attempt), 'run', true))
     return cell
@@ -5253,6 +5853,11 @@ function createOutfitResultCell(model, look, signature) {
 
   if (result.status === 'queue') {
     cell.append(createStatusLine('排队中…'))
+    return cell
+  }
+
+  if (result.status === 'cancelled') {
+    cell.append(createStatusLine('已结束'))
     return cell
   }
 
@@ -6167,7 +6772,9 @@ async function restoreRuntimeState() {
   const runtime = sanitizeRuntimeState(loadRuntimeState())
   const routeProjectId = state.activeView === 'generate' ? canvasProjectIdFromLocation() : ''
   state.runtime.sessionId = runtime.sessionId
-  state.translate.jobId = runtime.translate.jobId
+  state.translate.jobs = runtime.translate.jobs
+  state.translate.jobId = getLoadedStoredJobId(runtime.translate.jobs)
+  state.translate.jobTab = runtime.translate.jobTab
   state.generate.projectId = routeProjectId || runtime.generate.projectId || ''
   state.generate.projectTitle = runtime.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
   state.generate.aiSessionId = runtime.generate.aiSessionId || ''
@@ -6204,7 +6811,9 @@ async function restoreRuntimeState() {
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0
-  state.outfit.jobId = runtime.outfit.jobId
+  state.outfit.jobs = runtime.outfit.jobs
+  state.outfit.jobId = getLoadedStoredJobId(runtime.outfit.jobs)
+  state.outfit.jobTab = runtime.outfit.jobTab
 
   const [translateItems, outfitModels, outfitGarments] = await Promise.all([
     hydrateAssetItems(runtime.translate.items),
@@ -6214,7 +6823,11 @@ async function restoreRuntimeState() {
 
   state.translate.items = translateItems.map((item) => ({ ...item, results: {} }))
   state.outfit.models = outfitModels
-  state.outfit.garments = outfitGarments.map((item) => ({ ...item, role: item.role || 'full_outfit' }))
+  state.outfit.garments = outfitGarments.map((item) => ({
+    ...item,
+    role: item.role || 'full_outfit',
+    instructions: normalizeGarmentInstructions(item.instructions),
+  }))
 
   const savedResults = loadResultsStore()
   restoreTranslateResults(savedResults)
@@ -6241,12 +6854,8 @@ async function restoreRuntimeState() {
     void loadCanvasProjects()
   }
 
-  if (state.translate.jobId) {
-    void syncTranslateJob(state.translate.jobId, { passive404: true })
-  }
-  if (state.outfit.jobId) {
-    void syncOutfitJob(state.outfit.jobId, { passive404: true })
-  }
+  watchStoredJobTasks('translate')
+  watchStoredJobTasks('outfit')
 }
 
 function assetResultUrl(assetId, projectId = '') {
@@ -6262,6 +6871,7 @@ function formatBatchProgress(job) {
 
   if (job?.status === 'queued') return total ? `0 / ${total}` : '排队中…'
   if (job?.status === 'running') return `${finished} / ${total}${failed ? ` · 失败 ${failed}` : ''}`
+  if (job?.status === 'paused') return `${finished} / ${total}${failed ? ` · 失败 ${failed}` : ''} · 已暂停`
   if (job?.status === 'completed') return `完成 ${done} / ${total}`
   if (job?.status === 'partial_failed') return `完成 ${done} / ${total} · 失败 ${failed}`
   if (job?.status === 'failed') return total ? `完成 ${done} / ${total} · 失败 ${failed || total}` : '任务失败'
@@ -6329,12 +6939,42 @@ function mapTranslateJobItem(item, signature) {
     }
   }
 
+  if (item.status === 'cancelled') {
+    return {
+      status: 'cancelled',
+      signature,
+      itemId: item.id,
+    }
+  }
+
   return {
     status: 'queue',
     signature,
     attempt: Number(item.attemptCount || 0),
     itemId: item.id,
   }
+}
+
+async function hydrateTranslateWorkspaceFromJob(job, items) {
+  const existing = new Map(state.translate.items.map((item) => [item.assetId || item.id, item]))
+  const assetIds = unique(items.map((item) => String(item.inputJson?.assetId || '')).filter(Boolean))
+  const missing = assetIds
+    .filter((assetId) => !existing.has(assetId))
+    .map((assetId) => ({ id: assetId, assetId, name: assetId, mime: 'image/png' }))
+  const hydrated = await hydrateAssetItems(missing)
+  state.translate.items = [
+    ...state.translate.items.filter((item) => assetIds.includes(item.assetId || item.id)),
+    ...hydrated.map((item) => ({ ...item, results: {} })),
+  ].map((item) => ({ ...item, results: item.results || {} }))
+
+  const targets = Array.isArray(job?.configJson?.targetLanguages)
+    ? job.configJson.targetLanguages.map(String).filter((code) => TARGET_LANGUAGES.some((lang) => lang.code === code))
+    : []
+  if (targets.length) state.translate.targets = unique(targets)
+  state.translate.source = getLanguage(job?.configJson?.sourceLanguage)?.code || 'auto'
+  state.translate.model = getModel(job?.configJson?.modelId)?.id || state.translate.model
+  state.translate.preserveBrand = job?.configJson?.preserveBrand !== false
+  state.translate.concurrency = clamp(Number(job?.configJson?.concurrency) || state.translate.concurrency, 1, 6)
 }
 
 function applyTranslateJobSnapshot(job, items) {
@@ -6359,44 +6999,89 @@ function applyTranslateJobSnapshot(job, items) {
     }
   }
 
-  state.translate.running = !TERMINAL_JOB_STATUSES.has(job.status)
   state.translate.progress = formatBatchProgress(job)
   renderTranslate()
 }
 
-async function syncTranslateJob(jobId, { passive404 = false } = {}) {
+async function fetchJobSnapshot(jobId) {
+  const [{ job }, { items }] = await Promise.all([
+    getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
+    getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
+  ])
+  return { job, items }
+}
+
+function watchStoredJobTasks(kind) {
+  for (const task of getJobTasks(kind)) {
+    if (!task.jobId) continue
+    if (task.status && !ACTIVE_JOB_STATUSES.has(task.status)) {
+      continue
+    }
+    if (kind === 'translate') {
+      void syncTranslateJob(task.jobId, { passive404: true })
+    } else {
+      void syncOutfitJob(task.jobId, { passive404: true })
+    }
+  }
+}
+
+async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
   const token = ++translateWatcherToken
+  translateJobWatchers.set(jobId, token)
 
-  while (token === translateWatcherToken && state.translate.jobId === jobId) {
+  while (translateJobWatchers.get(jobId) === token) {
     try {
-      const [{ job }, { items }] = await Promise.all([
-        getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
-        getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
-      ])
+      const { job, items } = await fetchJobSnapshot(jobId)
+      if (job?.type && job.type !== 'translate_batch') {
+        removeJobTask('translate', jobId)
+        saveRuntimeState()
+        renderTranslate()
+        return
+      }
 
-      applyTranslateJobSnapshot(job, items)
+      const shouldApply = applyToWorkspace || getLoadedJobId('translate') === jobId
+      upsertJobTask('translate', jobId, { job, items, loaded: shouldApply })
+      if (shouldApply && getJobTaskBucket({ status: job.status }) === 'history' && getJobTab('translate') === 'current') {
+        setJobTab('translate', 'history')
+      }
+      if (shouldApply) {
+        if (getLoadedJobId('translate') !== jobId) {
+          renderJobList('translate')
+          saveRuntimeState()
+          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+            translateJobWatchers.delete(jobId)
+            break
+          }
+          await wait(900)
+          continue
+        }
+        applyTranslateJobSnapshot(job, items)
+      } else {
+        renderTranslate()
+      }
       saveRuntimeState()
 
-      if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+        translateJobWatchers.delete(jobId)
         break
       }
 
       await wait(900)
     } catch (error) {
-      if (Number(error?.status || 0) === 404) {
-        if (state.translate.jobId === jobId) {
-          state.translate.jobId = ''
-          state.translate.running = false
-          if (!passive404) {
-            state.translate.progress = '任务记录已失效，请重新提交'
-          }
-          saveRuntimeState()
-          renderTranslate()
+      const status = Number(error?.status || 0)
+      if (status === 404 || status === 403) {
+        const wasLoaded = getLoadedJobId('translate') === jobId
+        removeJobTask('translate', jobId)
+        if (!passive404 && wasLoaded) {
+          state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
         }
+        saveRuntimeState()
+        renderTranslate()
         return
       }
 
-      state.translate.progress = trimError(error)
+      const task = upsertJobTask('translate', jobId, { error: trimError(error) })
+      if (getLoadedJobId('translate') === jobId) state.translate.progress = task.error
       renderTranslate()
       await wait(1200)
     }
@@ -6434,12 +7119,77 @@ function mapOutfitJobItem(item, signature) {
     }
   }
 
+  if (item.status === 'cancelled') {
+    return {
+      status: 'cancelled',
+      signature,
+      itemId: item.id,
+    }
+  }
+
   return {
     status: 'queue',
     signature,
     attempt: Number(item.attemptCount || 0),
     itemId: item.id,
   }
+}
+
+async function hydrateOutfitWorkspaceFromJob(job, items) {
+  const modelIds = unique(items.map((item) => String(item.inputJson?.modelAssetId || '')).filter(Boolean))
+  const garmentIds = unique(items.flatMap((item) =>
+    Array.isArray(item.inputJson?.lookAssetIds) ? item.inputJson.lookAssetIds.map(String) : [],
+  ).filter(Boolean))
+  const garmentMeta = new Map()
+  for (const item of items) {
+    const assetIds = Array.isArray(item.inputJson?.lookAssetIds) ? item.inputJson.lookAssetIds.map(String) : []
+    const roles = Array.isArray(item.inputJson?.lookRoles) ? item.inputJson.lookRoles.map(String) : []
+    const labels = Array.isArray(item.inputJson?.lookLabels) ? item.inputJson.lookLabels.map(String) : []
+    const instructions = Array.isArray(item.inputJson?.lookInstructions) ? item.inputJson.lookInstructions.map(String) : []
+    assetIds.forEach((assetId, index) => {
+      if (!garmentMeta.has(assetId)) {
+        garmentMeta.set(assetId, {
+          role: roles[index] || 'full_outfit',
+          label: labels[index] || assetId,
+          instructions: instructions[index] || '',
+        })
+      }
+    })
+  }
+
+  const existingModels = new Map(state.outfit.models.map((item) => [item.assetId || item.id, item]))
+  const existingGarments = new Map(state.outfit.garments.map((item) => [item.assetId || item.id, item]))
+  const missingModels = modelIds
+    .filter((assetId) => !existingModels.has(assetId))
+    .map((assetId) => ({ id: assetId, assetId, name: assetId, mime: 'image/png' }))
+  const missingGarments = garmentIds
+    .filter((assetId) => !existingGarments.has(assetId))
+    .map((assetId) => {
+      const meta = garmentMeta.get(assetId) || {}
+      return { id: assetId, assetId, name: meta.label || assetId, mime: 'image/png', ...meta }
+    })
+
+  const [hydratedModels, hydratedGarments] = await Promise.all([
+    hydrateAssetItems(missingModels),
+    hydrateAssetItems(missingGarments),
+  ])
+  state.outfit.models = [
+    ...state.outfit.models.filter((item) => modelIds.includes(item.assetId || item.id)),
+    ...hydratedModels,
+  ]
+  state.outfit.garments = [
+    ...state.outfit.garments.filter((item) => garmentIds.includes(item.assetId || item.id)).map((item) => ({
+      ...item,
+      ...(garmentMeta.get(item.assetId || item.id) || {}),
+    })),
+    ...hydratedGarments.map((item) => ({
+      ...item,
+      role: item.role || garmentMeta.get(item.assetId || item.id)?.role || 'full_outfit',
+      instructions: normalizeGarmentInstructions(item.instructions || garmentMeta.get(item.assetId || item.id)?.instructions),
+    })),
+  ]
+  state.outfit.model = getModel(job?.configJson?.modelId)?.id || state.outfit.model
+  state.outfit.concurrency = clamp(Number(job?.configJson?.concurrency) || state.outfit.concurrency, 1, 4)
 }
 
 function applyOutfitJobSnapshot(job, items) {
@@ -6461,44 +7211,67 @@ function applyOutfitJobSnapshot(job, items) {
   }
 
   state.outfit.results = nextResults
-  state.outfit.running = !TERMINAL_JOB_STATUSES.has(job.status)
   state.outfit.progress = formatBatchProgress(job)
   renderOutfit()
 }
 
-async function syncOutfitJob(jobId, { passive404 = false } = {}) {
+async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
   const token = ++outfitWatcherToken
+  outfitJobWatchers.set(jobId, token)
 
-  while (token === outfitWatcherToken && state.outfit.jobId === jobId) {
+  while (outfitJobWatchers.get(jobId) === token) {
     try {
-      const [{ job }, { items }] = await Promise.all([
-        getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
-        getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
-      ])
+      const { job, items } = await fetchJobSnapshot(jobId)
+      if (job?.type && job.type !== 'outfit_batch') {
+        removeJobTask('outfit', jobId)
+        saveRuntimeState()
+        renderOutfit()
+        return
+      }
 
-      applyOutfitJobSnapshot(job, items)
+      const shouldApply = applyToWorkspace || getLoadedJobId('outfit') === jobId
+      upsertJobTask('outfit', jobId, { job, items, loaded: shouldApply })
+      if (shouldApply && getJobTaskBucket({ status: job.status }) === 'history' && getJobTab('outfit') === 'current') {
+        setJobTab('outfit', 'history')
+      }
+      if (shouldApply) {
+        if (getLoadedJobId('outfit') !== jobId) {
+          renderJobList('outfit')
+          saveRuntimeState()
+          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+            outfitJobWatchers.delete(jobId)
+            break
+          }
+          await wait(900)
+          continue
+        }
+        applyOutfitJobSnapshot(job, items)
+      } else {
+        renderOutfit()
+      }
       saveRuntimeState()
 
-      if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+        outfitJobWatchers.delete(jobId)
         break
       }
 
       await wait(900)
     } catch (error) {
-      if (Number(error?.status || 0) === 404) {
-        if (state.outfit.jobId === jobId) {
-          state.outfit.jobId = ''
-          state.outfit.running = false
-          if (!passive404) {
-            state.outfit.progress = '任务记录已失效，请重新提交'
-          }
-          saveRuntimeState()
-          renderOutfit()
+      const status = Number(error?.status || 0)
+      if (status === 404 || status === 403) {
+        const wasLoaded = getLoadedJobId('outfit') === jobId
+        removeJobTask('outfit', jobId)
+        if (!passive404 && wasLoaded) {
+          state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
         }
+        saveRuntimeState()
+        renderOutfit()
         return
       }
 
-      state.outfit.progress = trimError(error)
+      const task = upsertJobTask('outfit', jobId, { error: trimError(error) })
+      if (getLoadedJobId('outfit') === jobId) state.outfit.progress = task.error
       renderOutfit()
       await wait(1200)
     }

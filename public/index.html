@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/styles.css?v=20260427-3" />
+<link rel="stylesheet" href="/styles.css?v=20260506-3" />
 </head>
 <body>
 <div class="shell">
@@ -238,6 +238,18 @@
           <span class="progress" id="t-progress"></span>
         </div>
       </div>
+
+      <section class="job-panel" aria-label="翻译任务">
+        <div class="job-panel-head">
+          <h3>任务管理</h3>
+          <span class="muted" id="t-job-empty">暂无历史任务</span>
+        </div>
+        <div class="job-tabs" id="t-job-tabs" role="tablist" aria-label="翻译任务分类">
+          <button type="button" class="job-tab active" data-job-tab="current" role="tab" aria-selected="true">当前任务</button>
+          <button type="button" class="job-tab" data-job-tab="history" role="tab" aria-selected="false">历史任务</button>
+        </div>
+        <div class="job-list" id="t-job-list"></div>
+      </section>
 
       <div class="grid-wrap" id="t-grid-wrap">
         <table class="grid" id="t-grid"></table>
@@ -532,6 +544,18 @@
         </div>
       </div>
 
+      <section class="job-panel" aria-label="换装任务">
+        <div class="job-panel-head">
+          <h3>任务管理</h3>
+          <span class="muted" id="o-job-empty">暂无历史任务</span>
+        </div>
+        <div class="job-tabs" id="o-job-tabs" role="tablist" aria-label="换装任务分类">
+          <button type="button" class="job-tab active" data-job-tab="current" role="tab" aria-selected="true">当前任务</button>
+          <button type="button" class="job-tab" data-job-tab="history" role="tab" aria-selected="false">历史任务</button>
+        </div>
+        <div class="job-list" id="o-job-list"></div>
+      </section>
+
       <div class="grid-wrap" id="o-grid-wrap">
         <table class="grid" id="o-grid"></table>
         <div id="o-empty" class="empty">先上传模特和服装单品，系统会自动组合搭配矩阵</div>
@@ -809,6 +833,6 @@
   </div>
 </dialog>
 
-<script type="module" src="/app.js?v=20260428-2"></script>
+<script type="module" src="/app.js?v=20260506-11"></script>
 </body>
 </html>

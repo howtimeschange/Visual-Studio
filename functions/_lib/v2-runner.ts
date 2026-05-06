@@ -17,6 +17,7 @@ import {
   createJobItems,
   createSealedCredential,
   createUsageEvent,
+  deleteJobRecord,
   deleteSealedCredential,
   ensureSession,
   getAssetDataUrl,
@@ -45,6 +46,8 @@ const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
+const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
+const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
 
 function splitDataUrl(dataUrl: string): { mime: string; base64: string } {
   const match = String(dataUrl || '').match(/^data:(image\/[^;]+);base64,(.+)$/)
@@ -312,6 +315,7 @@ export async function submitTranslateBatch(
 async function runTranslateBatchJob(env: Env, jobId: string) {
   const initialJob = await getJob(env, jobId)
   if (!initialJob) return
+  if (STOPPED_JOB_STATUSES.has(initialJob.status)) return
   const clientKeys = await loadJobClientKeys(env, initialJob)
   await updateJob(env, jobId, { status: 'running' })
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
@@ -322,7 +326,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
 
   await runPool(items, concurrency, async (item) => {
     const job = await getJob(env, jobId)
-    if (!job || job.status === 'cancelled') return
+    if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
     await updateJobItem(env, jobId, item.id, {
       status: 'running',
@@ -401,7 +405,11 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   await progress.drain()
 
   const latestJob = await getJob(env, jobId)
+  if (latestJob?.status === 'paused') {
+    return
+  }
   if (latestJob?.status === 'cancelled') {
+    await markRemainingItemsCancelled(env, jobId)
     await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
     return
   }
@@ -516,6 +524,7 @@ export async function submitOutfitBatch(
 async function runOutfitBatchJob(env: Env, jobId: string) {
   const initialJob = await getJob(env, jobId)
   if (!initialJob) return
+  if (STOPPED_JOB_STATUSES.has(initialJob.status)) return
   const clientKeys = await loadJobClientKeys(env, initialJob)
   await updateJob(env, jobId, { status: 'running' })
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
@@ -526,7 +535,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
 
   await runPool(items, concurrency, async (item) => {
     const job = await getJob(env, jobId)
-    if (!job || job.status === 'cancelled') return
+    if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
     await updateJobItem(env, jobId, item.id, {
       status: 'running',
@@ -624,7 +633,11 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await progress.drain()
 
   const latestJob = await getJob(env, jobId)
+  if (latestJob?.status === 'paused') {
+    return
+  }
   if (latestJob?.status === 'cancelled') {
+    await markRemainingItemsCancelled(env, jobId)
     await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
     return
   }
@@ -744,6 +757,7 @@ async function buildConversationHistory(env: Env, conversationId: string): Promi
 async function runGenerateTurnJob(env: Env, jobId: string) {
   const job = await getJob(env, jobId)
   if (!job) return
+  if (STOPPED_JOB_STATUSES.has(job.status)) return
   const turnId = String(job.configJson.turnId || '')
   const turn = await getConversationTurn(env, turnId)
   if (!turn) return
@@ -875,6 +889,12 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
 }
 
 async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
+  const latestJob = await getJob(env, job.id)
+  if (latestJob?.status === 'paused') {
+    await publishEvent(env, 'job', job.id, 'status', { status: 'paused' })
+    return
+  }
+
   const message = String(error?.message || 'Job failed before processing started')
   const items = await listJobItems(env, job.id)
   const activeItems = items.filter((item) => !['completed', 'failed', 'cancelled'].includes(item.status))
@@ -921,7 +941,7 @@ async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
 export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: ClientKeys) {
   const job = await getJob(env, jobId)
   if (!job) return { jobId, status: 'missing' }
-  if (['completed', 'partial_failed', 'failed', 'cancelled'].includes(job.status)) {
+  if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
     return { jobId: job.id, status: job.status, skipped: true }
   }
 
@@ -1116,12 +1136,66 @@ export async function retryJobItem(env: Env, jobId: string, itemId: string, wait
   return { jobId: job.id, itemId: item.id, type: job.type }
 }
 
+async function markRemainingItemsCancelled(env: Env, jobId: string) {
+  const items = (await listJobItems(env, jobId)).filter((item) => !['completed', 'failed', 'cancelled'].includes(item.status))
+  for (const item of items) {
+    await updateJobItem(env, jobId, item.id, {
+      status: 'cancelled',
+      finishedAt: new Date().toISOString(),
+    })
+  }
+}
+
 export async function cancelJob(env: Env, jobId: string) {
   const job = await getJob(env, jobId)
   if (!job) throw createRunnerError('Job not found', 404)
   await updateJob(env, job.id, { status: 'cancelled' })
+  await markRemainingItemsCancelled(env, job.id)
   await publishEvent(env, 'job', job.id, 'status', { status: 'cancelled' })
   return { jobId: job.id, status: 'cancelled' }
+}
+
+export async function pauseJob(env: Env, jobId: string) {
+  const job = await getJob(env, jobId)
+  if (!job) throw createRunnerError('Job not found', 404)
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
+    throw createRunnerError('Finished jobs cannot be paused', 409)
+  }
+  if (job.status !== 'paused') {
+    await updateJob(env, job.id, { status: 'paused' })
+    if (job.type === 'generate_turn' && typeof job.configJson?.turnId === 'string') {
+      await updateConversationTurn(env, String(job.configJson.turnId), { status: 'paused' })
+    }
+    await publishEvent(env, 'job', job.id, 'status', { status: 'paused' })
+  }
+  return { jobId: job.id, status: 'paused' }
+}
+
+export async function resumeJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
+  const job = await getJob(env, jobId)
+  if (!job) throw createRunnerError('Job not found', 404)
+  if (job.status !== 'paused') {
+    throw createRunnerError('Only paused jobs can be resumed', 409)
+  }
+
+  const nextJob = await updateJob(env, job.id, { status: 'queued' })
+  if (job.type === 'generate_turn' && typeof job.configJson?.turnId === 'string') {
+    await updateConversationTurn(env, String(job.configJson.turnId), { status: 'queued' })
+  }
+  await updateJobCounts(env, job.id)
+  await publishEvent(env, 'job', job.id, 'status', { status: 'queued' })
+  await scheduleJobExecution(env, nextJob || { ...job, status: 'queued' }, waitUntil, 'retry')
+  return { jobId: job.id, status: 'queued' }
+}
+
+export async function deleteJob(env: Env, jobId: string) {
+  const job = await getJob(env, jobId)
+  if (!job) throw createRunnerError('Job not found', 404)
+  if (!TERMINAL_JOB_STATUSES.has(job.status) && job.status !== 'paused') {
+    await updateJob(env, job.id, { status: 'cancelled' })
+  }
+  const deleted = await deleteJobRecord(env, job.id)
+  return { jobId: job.id, deleted }
 }
 
 function createRunnerError(message: string, status = 502) {
