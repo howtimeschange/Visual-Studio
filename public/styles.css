@@ -186,6 +186,55 @@ a {
   outline-offset: 2px;
 }
 
+.app-notice {
+  position: fixed;
+  left: 50%;
+  top: 18px;
+  z-index: 80;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: max-content;
+  max-width: min(520px, calc(100vw - 32px));
+  min-height: 42px;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--bg-raised) 94%, white);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  font-size: var(--text-sm);
+  transform: translateX(-50%);
+}
+
+.app-notice.ok {
+  border-color: color-mix(in oklch, var(--ok) 34%, var(--line));
+}
+
+.app-notice.hidden {
+  display: none;
+}
+
+.app-notice button {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.app-notice button:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
 /* ═══════════════ SHELL ═══════════════ */
 
 .shell {

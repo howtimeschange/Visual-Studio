@@ -70,9 +70,17 @@ const AI_STREAM_DELAY_MS = 16
 const AI_STREAM_PUNCTUATION_DELAY_MS = 80
 const AI_HISTORY_LIMIT = 40
 const AI_HISTORY_INLINE_DATA_URL_LIMIT = 220_000
+const AI_STORED_SESSION_LIMIT = 8
+const AI_STORED_MESSAGE_LIMIT = 16
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_AI_SESSION_TITLE = '当前会话'
+const STYLE_HISTORY_LIMIT = 12
+const RUNTIME_FALLBACK_TASK_LIMIT = 8
+const RUNTIME_FALLBACK_ITEM_LIMIT = 24
+const RUNTIME_FALLBACK_ELEMENT_LIMIT = 80
+const RUNTIME_FALLBACK_SUBJECT_REF_LIMIT = 12
+const RUNTIME_MIGRATION_NOTICE_MS = 5200
 
 const KEY_STORAGE = 'img-translator:keys:v1'
 const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
@@ -119,6 +127,10 @@ const state = {
   openDropdown: null,
   theme: 'light',
   keys: {},
+  notice: {
+    message: '',
+    tone: '',
+  },
   runtime: {
     sessionId: '',
   },
@@ -449,12 +461,20 @@ const dom = {
   promptContent: $('#prompt-content'),
   promptCopy: $('#prompt-copy'),
   promptCopyStatus: $('#prompt-copy-status'),
+  notice: $('#app-notice'),
+  noticeText: $('#app-notice-text'),
+  noticeClose: $('#app-notice-close'),
 }
 
 init()
 
 function init() {
+  const runtimeMigration = migrateLegacyRuntimeStorage()
   hydrateStoredState()
+  if (runtimeMigration.migrated) {
+    state.notice.message = '已清理旧版本地缓存，释放浏览器存储空间。'
+    state.notice.tone = 'ok'
+  }
   applyTheme()
   state.activeView = viewFromLocation(state.activeView)
   const routeProjectId = canvasProjectIdFromLocation()
@@ -468,6 +488,7 @@ function init() {
   bindAccount()
   bindLightbox()
   bindPromptDialog()
+  bindAppNotice()
   bindTaskDeleteDialog()
   bindHome()
   bindTranslate()
@@ -477,6 +498,7 @@ function init() {
   bindOutfit()
   bindStyle()
   renderAll()
+  renderAppNotice()
   void loadAccount()
   void restoreRuntimeState()
 }
@@ -554,6 +576,7 @@ function redirectAfterAuth() {
 function hydrateStoredState() {
   state.keys = loadKeys()
   const runtime = sanitizeRuntimeState(loadRuntimeState())
+  const storedResults = loadResultsStore()
   state.runtime.sessionId = runtime.sessionId
   state.translate.jobId = getLoadedStoredJobId(runtime.translate.jobs)
   state.translate.jobTab = runtime.translate.jobTab
@@ -577,7 +600,8 @@ function hydrateStoredState() {
   state.style.colorPalette = runtime.style?.colorPalette || []
   state.style.tags = runtime.style?.tags || []
   state.style.subjectRefs = runtime.style?.subjectRefs || []
-  state.style.history = runtime.style?.history || []
+  state.style.history = getStoredStyleHistory(storedResults, runtime.style?.history)
+    .filter((entry) => entry.resultDataUrl)
 
   const stored = readJson(PREF_STORAGE, null)
   if (stored) {
@@ -664,7 +688,14 @@ function savePrefs() {
 function saveRuntimeState(options = {}) {
   const persistCanvas = options.persistCanvas !== false
   persistCurrentAiSession()
-  localStorage.setItem(RUNTIME_STORAGE, JSON.stringify({
+  saveAiHistory()
+  saveStyleHistory()
+  writeRuntimeStorageSnapshot(createRuntimeStorageSnapshot())
+  if (persistCanvas) scheduleCanvasProjectSave()
+}
+
+function createRuntimeStorageSnapshot() {
+  return {
     sessionId: state.runtime.sessionId || '',
     translate: {
       jobId: state.translate.jobId || '',
@@ -678,8 +709,6 @@ function saveRuntimeState(options = {}) {
       projectTitle: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
       elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
       aiSessionId: state.generate.aiSessionId || '',
-      aiSessions: serializeAiSessions(state.generate.aiSessions),
-      aiMessages: getSerializedAiHistory(),
       scale: state.generate.scale,
       panX: state.generate.panX,
       panY: state.generate.panY,
@@ -702,20 +731,152 @@ function saveRuntimeState(options = {}) {
       colorPalette: state.style.colorPalette,
       tags: state.style.tags,
       subjectRefs: state.style.subjectRefs.map((item) => serializeAssetBackedItem(item)),
-      history: state.style.history.map((entry) => ({
-        id: entry.id,
-        subject: entry.subject,
-        resultDataUrl: entry.resultDataUrl || '',
-        timestamp: entry.timestamp,
-      })),
     },
-  }))
-  saveAiHistory()
-  if (persistCanvas) scheduleCanvasProjectSave()
+  }
+}
+
+function createCompactRuntimeStorageSnapshot(snapshot = {}) {
+  return {
+    sessionId: typeof snapshot.sessionId === 'string' ? snapshot.sessionId : '',
+    translate: {
+      jobId: String(snapshot.translate?.jobId || ''),
+      jobTab: snapshot.translate?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(snapshot.translate?.jobPage) || 1),
+      jobs: Array.isArray(snapshot.translate?.jobs) ? snapshot.translate.jobs.slice(-RUNTIME_FALLBACK_TASK_LIMIT) : [],
+      items: Array.isArray(snapshot.translate?.items) ? snapshot.translate.items.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
+    },
+    generate: {
+      projectId: String(snapshot.generate?.projectId || ''),
+      projectTitle: String(snapshot.generate?.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE),
+      elements: Array.isArray(snapshot.generate?.elements)
+        ? snapshot.generate.elements.slice(-RUNTIME_FALLBACK_ELEMENT_LIMIT).map((el) => {
+            if (!el || typeof el !== 'object') return null
+            if (el.type === 'image' && !el.assetId) {
+              return {
+                ...el,
+                content: '',
+              }
+            }
+            return el
+          }).filter(Boolean)
+        : [],
+      aiSessionId: String(snapshot.generate?.aiSessionId || ''),
+      scale: Number(snapshot.generate?.scale) || 1,
+      panX: Number(snapshot.generate?.panX) || 0,
+      panY: Number(snapshot.generate?.panY) || 0,
+    },
+    outfit: {
+      jobId: String(snapshot.outfit?.jobId || ''),
+      jobTab: snapshot.outfit?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(snapshot.outfit?.jobPage) || 1),
+      jobs: Array.isArray(snapshot.outfit?.jobs) ? snapshot.outfit.jobs.slice(-RUNTIME_FALLBACK_TASK_LIMIT) : [],
+      models: Array.isArray(snapshot.outfit?.models) ? snapshot.outfit.models.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
+      garments: Array.isArray(snapshot.outfit?.garments) ? snapshot.outfit.garments.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
+    },
+    style: {
+      sourceImage: snapshot.style?.sourceImage || null,
+      visualStyle: snapshot.style?.visualStyle || null,
+      styleSummary: String(snapshot.style?.styleSummary || ''),
+      colorPalette: Array.isArray(snapshot.style?.colorPalette) ? snapshot.style.colorPalette : [],
+      tags: Array.isArray(snapshot.style?.tags) ? snapshot.style.tags : [],
+      subjectRefs: Array.isArray(snapshot.style?.subjectRefs)
+        ? snapshot.style.subjectRefs.slice(-RUNTIME_FALLBACK_SUBJECT_REF_LIMIT)
+        : [],
+    },
+  }
+}
+
+function writeRuntimeStorageSnapshot(snapshot) {
+  for (const candidate of [snapshot, createCompactRuntimeStorageSnapshot(snapshot)]) {
+    try {
+      localStorage.setItem(RUNTIME_STORAGE, JSON.stringify(candidate))
+      return true
+    } catch {
+      // Keep the UI responsive even if local storage is full.
+    }
+  }
+  return false
 }
 
 function loadRuntimeState() {
   return readJson(RUNTIME_STORAGE, {})
+}
+
+function createRuntimeMigrationInfo(overrides = {}) {
+  return {
+    migrated: Boolean(overrides.migrated),
+    compacted: Boolean(overrides.compacted),
+    aiHistory: Boolean(overrides.aiHistory),
+    styleHistory: Boolean(overrides.styleHistory),
+  }
+}
+
+function isLegacyRuntimeStorageHeavy(raw = {}) {
+  return Boolean(
+    raw.generate?.aiMessages
+      || raw.generate?.aiSessions
+      || raw.style?.history
+      || (Array.isArray(raw.generate?.elements)
+        && raw.generate.elements.some((el) => el?.type === 'image' && !el.assetId && el.content)),
+  )
+}
+
+function persistLegacyAiHistory(raw = {}) {
+  const sessions = sanitizeAiSessions(raw.generate?.aiSessions)
+  const messages = sanitizeAiMessages(raw.generate?.aiMessages)
+  if (!sessions.length && !messages.length) return false
+
+  const activeSessionId = typeof raw.generate?.aiSessionId === 'string' ? raw.generate.aiSessionId : ''
+  const payloadSessions = sessions.length
+    ? sessions
+    : [createAiSessionRecord({
+        id: activeSessionId,
+        title: DEFAULT_AI_SESSION_TITLE,
+        messages,
+      })]
+  const payload = {
+    activeSessionId: activeSessionId || payloadSessions[0]?.id || '',
+    sessions: serializeStoredAiSessions(payloadSessions),
+  }
+  if (!payload.sessions.length) return false
+
+  try {
+    localStorage.setItem(canvasAiHistoryStorageKey(raw.generate?.projectId), JSON.stringify(payload))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function persistLegacyStyleHistory(raw = {}) {
+  const history = sanitizeStyleHistoryEntries(raw.style?.history)
+  if (!history.length) return false
+  const store = loadResultsStore()
+  if (!store.style) store.style = { history: [] }
+  const existing = sanitizeStyleHistoryEntries(store.style.history)
+  const seen = new Set(existing.map((entry) => entry.id))
+  store.style.history = serializeStyleHistoryEntries([
+    ...existing,
+    ...history.filter((entry) => !seen.has(entry.id)),
+  ])
+  saveResultsStore(store)
+  return true
+}
+
+function migrateLegacyRuntimeStorage() {
+  const raw = loadRuntimeState()
+  if (!isLegacyRuntimeStorageHeavy(raw)) return createRuntimeMigrationInfo()
+
+  const aiHistory = persistLegacyAiHistory(raw)
+  const styleHistory = persistLegacyStyleHistory(raw)
+  const sanitized = sanitizeRuntimeState(raw)
+  const compacted = writeRuntimeStorageSnapshot(createCompactRuntimeStorageSnapshot(sanitized))
+  return createRuntimeMigrationInfo({
+    migrated: compacted || aiHistory || styleHistory,
+    compacted,
+    aiHistory,
+    styleHistory,
+  })
 }
 
 function canvasAiHistoryStorageKey(projectId = state.generate.projectId) {
@@ -726,16 +887,63 @@ function canvasAiHistoryStorageKey(projectId = state.generate.projectId) {
 function loadAiHistory(projectId = state.generate.projectId, options = {}) {
   const id = String(projectId || '').trim()
   const allowLegacy = options.allowLegacy !== false
-  const scoped = sanitizeAiMessages(readJson(canvasAiHistoryStorageKey(id), []))
+  const scoped = resolveStoredAiHistoryPayload(readJson(canvasAiHistoryStorageKey(id), null))
   if (scoped.length || id || !allowLegacy) return scoped
-  return sanitizeAiMessages(readJson(CANVAS_AI_HISTORY_STORAGE, []))
+  return resolveStoredAiHistoryPayload(readJson(CANVAS_AI_HISTORY_STORAGE, null))
 }
 
 function saveAiHistory() {
+  return saveAiSessions()
+}
+
+function resolveStoredAiHistoryPayload(raw) {
+  if (Array.isArray(raw)) return sanitizeAiMessages(raw)
+  const sessions = sanitizeAiSessions(raw?.sessions)
+  if (!sessions.length) return []
+  const activeSessionId = typeof raw?.activeSessionId === 'string' ? raw.activeSessionId : ''
+  const session = sessions.find((item) => item.id === activeSessionId) || sessions[sessions.length - 1] || sessions[0]
+  return sanitizeAiMessages(session?.messages)
+}
+
+function serializeStoredAiSessions(value) {
+  return sanitizeAiSessions(value)
+    .slice(-AI_STORED_SESSION_LIMIT)
+    .map((session) => ({
+      ...session,
+      messages: Array.isArray(session.messages)
+        ? session.messages.slice(-AI_STORED_MESSAGE_LIMIT).map((msg) => serializeAiMessage(msg)).filter(Boolean)
+        : [],
+    }))
+}
+
+function saveAiSessions() {
   persistCurrentAiSession()
-  const messages = getSerializedAiHistory()
-  if (!messages.length) return
-  localStorage.setItem(canvasAiHistoryStorageKey(), JSON.stringify(messages))
+  const sessions = serializeStoredAiSessions(state.generate.aiSessions)
+  if (!sessions.length) return false
+  const activeSessionId = state.generate.aiSessionId || sessions[sessions.length - 1]?.id || ''
+  const activeSession = sessions.find((item) => item.id === activeSessionId) || sessions[sessions.length - 1] || null
+  const payloads = [
+    {
+      activeSessionId,
+      sessions,
+    },
+    activeSession
+      ? {
+          activeSessionId: activeSession.id,
+          sessions: [activeSession],
+        }
+      : null,
+  ].filter(Boolean)
+
+  for (const payload of payloads) {
+    try {
+      localStorage.setItem(canvasAiHistoryStorageKey(), JSON.stringify(payload))
+      return true
+    } catch {
+      // Fall back to the active session only when storage is tight.
+    }
+  }
+  return false
 }
 
 function getSerializedAiHistory() {
@@ -803,19 +1011,14 @@ function resolveCanvasAiSessions(project, projectId = state.generate.projectId, 
 function loadAiSessions(projectId = state.generate.projectId, options = {}) {
   const id = String(projectId || '').trim()
   const raw = readJson(canvasAiHistoryStorageKey(id), null)
-  const sessions = sanitizeAiSessions(raw?.sessions)
+  const sessions = Array.isArray(raw)
+    ? []
+    : sanitizeAiSessions(raw?.sessions)
   if (sessions.length || id || options.allowLegacy === false) return sessions
-  return sanitizeAiSessions(readJson(CANVAS_AI_HISTORY_STORAGE, null)?.sessions)
-}
-
-function saveAiSessions() {
-  persistCurrentAiSession()
-  const sessions = serializeAiSessions(state.generate.aiSessions)
-  if (!sessions.length) return
-  localStorage.setItem(canvasAiHistoryStorageKey(), JSON.stringify({
-    activeSessionId: state.generate.aiSessionId || sessions[0]?.id || '',
-    sessions,
-  }))
+  const legacy = readJson(CANVAS_AI_HISTORY_STORAGE, null)
+  return Array.isArray(legacy)
+    ? []
+    : sanitizeAiSessions(legacy?.sessions)
 }
 
 function createAiSessionRecord({ id = '', title = '', messages = [], createdAt = '', updatedAt = '' } = {}) {
@@ -1000,9 +1203,7 @@ function sanitizeRuntimeState(raw = {}) {
       subjectRefs: Array.isArray(raw.style?.subjectRefs)
         ? raw.style.subjectRefs.map((item) => sanitizeStoredAssetItem(item)).filter(Boolean)
         : [],
-      history: Array.isArray(raw.style?.history)
-        ? raw.style.history.filter((entry) => entry?.id && entry?.resultDataUrl).slice(-30)
-        : [],
+      history: sanitizeStyleHistoryEntries(raw.style?.history),
     },
   }
 }
@@ -1808,6 +2009,39 @@ function sanitizeStoredAssetItem(raw = {}) {
     dataUrl: '',
     base64: '',
   }
+}
+
+function sanitizeStyleHistoryEntries(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const assetId = typeof entry?.assetId === 'string' ? entry.assetId.trim() : ''
+      const resultDataUrl = typeof entry?.resultDataUrl === 'string' ? entry.resultDataUrl : ''
+      if (!assetId && !resultDataUrl) return null
+      return {
+        id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
+        subject: typeof entry?.subject === 'string' ? entry.subject : '',
+        assetId,
+        mime: typeof entry?.mime === 'string' ? entry.mime : '',
+        resultDataUrl,
+        timestamp: Number(entry?.timestamp) || Date.now(),
+      }
+    })
+    .filter(Boolean)
+    .slice(-STYLE_HISTORY_LIMIT)
+}
+
+function serializeStyleHistoryEntries(entries) {
+  return sanitizeStyleHistoryEntries(entries).map((entry) => ({
+    id: entry.id,
+    subject: entry.subject,
+    assetId: entry.assetId || '',
+    mime: entry.mime || '',
+    resultDataUrl: entry.assetId
+      ? ''
+      : (shouldInlineHistoryDataUrl(entry.resultDataUrl) ? entry.resultDataUrl : ''),
+    timestamp: entry.timestamp,
+  }))
 }
 
 function bindShell() {
@@ -4629,6 +4863,7 @@ function bindStyle() {
 function renderStyle() {
   const s = state.style
   const busy = s.analyzing || s.generating
+  const visibleHistory = s.history.filter((entry) => entry.resultDataUrl)
 
   dom.sModel.value = s.model
   dom.sModel.disabled = busy
@@ -4636,7 +4871,7 @@ function renderStyle() {
   const hasSource = Boolean(s.sourceImage)
   const hasStyle = Boolean(s.visualStyle)
   const hasResult = Boolean(s.resultDataUrl)
-  const hasHistory = s.history.length > 0
+  const hasHistory = visibleHistory.length > 0
 
   dom.sDropzone.classList.toggle('hidden', hasSource)
   dom.sSourcePreview.classList.toggle('hidden', !hasSource)
@@ -4725,7 +4960,7 @@ function renderStyle() {
     dom.sError.textContent = s.error
   }
 
-  dom.sHistory.replaceChildren(...s.history.slice().reverse().map((entry) => {
+  dom.sHistory.replaceChildren(...visibleHistory.slice().reverse().map((entry) => {
     const card = document.createElement('div')
     card.className = 'style-history-card'
 
@@ -4814,13 +5049,21 @@ async function generateStyleTransfer() {
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     state.style.resultDataUrl = data.resultDataUrl
     state.style.generating = false
+    const resultName = `style-transfer-${sanitizeFileName(state.style.subject || 'result')}.png`
+    const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, resultName, {
+      kind: 'result',
+      source: 'style_transfer',
+    }).catch(() => null)
 
     state.style.history.push({
       id: crypto.randomUUID(),
       subject: state.style.subject.trim() || state.style.subjectRefs.map((r) => basename(r.name)).join(', '),
+      assetId: storedResult?.assetId || '',
+      mime: storedResult?.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
       resultDataUrl: data.resultDataUrl,
       timestamp: Date.now(),
     })
+    state.style.history = sanitizeStyleHistoryEntries(state.style.history)
 
     saveRuntimeState()
     renderStyle()
@@ -4833,6 +5076,7 @@ async function generateStyleTransfer() {
 
 function renderAll() {
   renderShell()
+  renderAppNotice()
   renderHome()
   renderTranslateDropdowns()
   renderTranslate()
@@ -4853,6 +5097,34 @@ function renderShell() {
   for (const view of dom.views) {
     view.classList.toggle('active', view.id === `view-${state.activeView}`)
   }
+}
+
+function bindAppNotice() {
+  dom.noticeClose?.addEventListener('click', () => {
+    state.notice.message = ''
+    renderAppNotice()
+  })
+}
+
+function renderAppNotice() {
+  if (!dom.notice || !dom.noticeText) return
+  const message = String(state.notice.message || '')
+  dom.notice.classList.toggle('hidden', !message)
+  dom.notice.classList.toggle('ok', state.notice.tone === 'ok')
+  dom.noticeText.textContent = message
+  if (!message) {
+    window.clearTimeout(renderAppNotice.timer)
+    renderAppNotice.timer = null
+    renderAppNotice.timerMessage = ''
+    return
+  }
+  if (renderAppNotice.timer && renderAppNotice.timerMessage === message) return
+  window.clearTimeout(renderAppNotice.timer)
+  renderAppNotice.timerMessage = message
+  renderAppNotice.timer = window.setTimeout(() => {
+    state.notice.message = ''
+    renderAppNotice()
+  }, RUNTIME_MIGRATION_NOTICE_MS)
 }
 
 function bindLightbox() {
@@ -7116,6 +7388,7 @@ async function hydrateCanvasElements(elements) {
 async function restoreRuntimeState() {
   restoringRuntimeState = true
   const runtime = sanitizeRuntimeState(loadRuntimeState())
+  const savedResults = loadResultsStore()
   const routeProjectId = state.activeView === 'generate' ? canvasProjectIdFromLocation() : ''
   state.runtime.sessionId = runtime.sessionId
   state.translate.jobs = runtime.translate.jobs
@@ -7177,7 +7450,6 @@ async function restoreRuntimeState() {
     instructions: normalizeGarmentInstructions(item.instructions),
   }))
 
-  const savedResults = loadResultsStore()
   restoreTranslateResults(savedResults)
   restoreOutfitResults(savedResults)
 
@@ -7192,7 +7464,7 @@ async function restoreRuntimeState() {
   state.style.styleSummary = runtime.style?.styleSummary || ''
   state.style.colorPalette = runtime.style?.colorPalette || []
   state.style.tags = runtime.style?.tags || []
-  state.style.history = runtime.style?.history || []
+  state.style.history = await hydrateStyleHistory(getStoredStyleHistory(savedResults, runtime.style?.history))
 
   restoringRuntimeState = false
   runtimeStateReady = true
@@ -8238,6 +8510,43 @@ function pruneResultsStore(data) {
       delete data.outfit[key]
     }
   }
+}
+
+function getStoredStyleHistory(store, fallbackHistory = []) {
+  const saved = sanitizeStyleHistoryEntries(store?.style?.history)
+  if (saved.length) return saved
+  return sanitizeStyleHistoryEntries(fallbackHistory)
+}
+
+function saveStyleHistory() {
+  const store = loadResultsStore()
+  if (!store.style) store.style = { history: [] }
+  store.style.history = serializeStyleHistoryEntries(state.style.history)
+  saveResultsStore(store)
+}
+
+async function hydrateStyleHistory(entries) {
+  const history = sanitizeStyleHistoryEntries(entries)
+  const toHydrate = history
+    .filter((entry) => entry.assetId && !entry.resultDataUrl)
+    .map((entry) => ({
+      id: entry.assetId,
+      assetId: entry.assetId,
+      name: entry.subject || entry.assetId,
+      mime: entry.mime || 'image/png',
+    }))
+
+  if (!toHydrate.length) return history
+  const hydrated = await hydrateAssetItems(toHydrate)
+  const byAssetId = new Map(hydrated.map((item) => [item.assetId || item.id, item]))
+  return history.filter((entry) => {
+    if (entry.resultDataUrl) return true
+    const asset = byAssetId.get(entry.assetId)
+    if (!asset?.dataUrl) return false
+    entry.resultDataUrl = asset.dataUrl
+    entry.mime = asset.mime || entry.mime
+    return true
+  })
 }
 
 function saveTranslateResult(itemAssetId, language, result) {

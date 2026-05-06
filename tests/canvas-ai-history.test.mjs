@@ -30,6 +30,8 @@ async function createHistoryHarness() {
   const context = {
     AI_HISTORY_LIMIT: 40,
     AI_HISTORY_INLINE_DATA_URL_LIMIT: 220_000,
+    AI_STORED_SESSION_LIMIT: 8,
+    AI_STORED_MESSAGE_LIMIT: 16,
     CANVAS_AI_HISTORY_STORAGE: LEGACY_HISTORY_KEY,
     CANVAS_AI_HISTORY_PROJECT_PREFIX: `${LEGACY_HISTORY_KEY}:project:`,
     state: {
@@ -86,6 +88,8 @@ async function createHistoryHarness() {
     'canvasAiHistoryStorageKey',
     'loadAiHistory',
     'saveAiHistory',
+    'resolveStoredAiHistoryPayload',
+    'serializeStoredAiSessions',
     'getSerializedAiHistory',
     'serializeAiMessages',
     'getProjectAiHistory',
