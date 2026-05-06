@@ -1,5 +1,5 @@
 import { Env, json, corsPreflight } from '../../_shared'
-import { getAuthContext } from '../../_lib/auth'
+import { requireAuth } from '../../_lib/auth'
 import { submitGenerateTurn } from '../../_lib/v2-runner'
 import { mergeUserClientKeys } from '../../_lib/user-api-keys'
 
@@ -14,8 +14,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUnti
   }
 
   try {
-    const auth = await getAuthContext(env, request)
-    const userId = auth.user?.id || null
+    const user = await requireAuth(env, request)
+    const userId = user.id
     const clientKeys = await mergeUserClientKeys(env, userId, body?.clientKeys || {})
     return json(await submitGenerateTurn(env, { ...body, clientKeys, _authUserId: userId }, waitUntil))
   } catch (error: any) {

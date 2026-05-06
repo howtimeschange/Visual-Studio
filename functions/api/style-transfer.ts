@@ -2,7 +2,7 @@ import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
 } from '../_shared'
-import { getAuthContext } from '../_lib/auth'
+import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 import { ensureSession, getAssetDataUrl } from '../_lib/v2-store'
 
@@ -16,13 +16,12 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: 'Invalid JSON' }, 400)
   }
 
-  const action = String(body?.action || '').trim()
-  const auth = await getAuthContext(env, request)
-  const userId = auth.user?.id || null
-  const clientKeys = await mergeUserClientKeys(env, userId, body?.clientKeys || {})
-  const requestBody = { ...body, clientKeys, _authUserId: userId }
-
   try {
+    const user = await requireAuth(env, request)
+    const action = String(body?.action || '').trim()
+    const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
+    const requestBody = { ...body, clientKeys, _authUserId: user.id }
+
     if (action === 'analyze') {
       return json(await handleAnalyze(env, requestBody))
     }

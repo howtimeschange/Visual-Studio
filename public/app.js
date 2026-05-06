@@ -569,6 +569,20 @@ function showAuthView({ returnTo = currentRoutePath(), invite = '', replace = fa
   setActiveView('auth', { updateRoute: false })
 }
 
+function redirectToLoginForApi(error) {
+  if (Number(error?.status || 0) !== 401) return
+  const message = String(error?.message || error?.payload?.error || '')
+  if (!/login required/i.test(message)) return
+  state.account.user = null
+  state.account.usage = null
+  state.account.apiKeys = { keys: {}, updatedAt: '' }
+  state.account.apiKeysLoadedFor = ''
+  state.account.error = ''
+  state.account.status = '请先登录后继续使用'
+  showAuthView({ returnTo: currentRoutePath() })
+  renderAccount()
+}
+
 function redirectAfterAuth() {
   const target = getAuthReturnTarget()
   clearAuthReturnTarget()
@@ -3437,9 +3451,11 @@ function renderCanvasElement(el) {
     text.contentEditable = 'true'
     text.textContent = el.content || ''
     applyTextElementStyle(text, el)
+    text.addEventListener('input', () => {
+      updateCanvasTextElementContent(el, text.textContent || '')
+    })
     text.addEventListener('blur', () => {
-      el.content = text.textContent || ''
-      saveRuntimeState()
+      updateCanvasTextElementContent(el, text.textContent || '')
     })
     node.append(text)
   } else if (el.type === 'shape') {
@@ -3512,6 +3528,14 @@ function updateCanvasGeneratorNode(node, el) {
   hint.className = 'gen-hint'
   hint.textContent = isLoading ? status : (hasError ? error : '选中后设置参数并生成')
   placeholder.append(hint)
+}
+
+function updateCanvasTextElementContent(el, content) {
+  if (!el) return
+  const nextContent = String(content || '')
+  if (el.content === nextContent) return
+  el.content = nextContent
+  saveRuntimeState()
 }
 
 function applyTextElementStyle(node, el) {
@@ -4598,7 +4622,7 @@ async function sendCanvasAiMessage() {
       renderCanvas()
       saveRuntimeState()
     }
-    saveRuntimeState({ persistCanvas: false })
+    saveRuntimeState()
   } finally {
     state.generate.aiRunning = false
     renderAiMessages()
@@ -7964,10 +7988,7 @@ async function getJson(url) {
   const response = await fetch(url)
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const error = new Error(data.error || `HTTP ${response.status}`)
-    error.status = response.status
-    error.payload = data
-    throw error
+    throw createHttpError(response, data)
   }
   return data
 }
@@ -7980,10 +8001,7 @@ async function postJson(url, body) {
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const error = new Error(data.error || `HTTP ${response.status}`)
-    error.status = response.status
-    error.payload = data
-    throw error
+    throw createHttpError(response, data)
   }
   return data
 }
@@ -7996,10 +8014,7 @@ async function putJson(url, body) {
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const error = new Error(data.error || `HTTP ${response.status}`)
-    error.status = response.status
-    error.payload = data
-    throw error
+    throw createHttpError(response, data)
   }
   return data
 }
@@ -8008,12 +8023,17 @@ async function deleteJson(url) {
   const response = await fetch(url, { method: 'DELETE' })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const error = new Error(data.error || `HTTP ${response.status}`)
-    error.status = response.status
-    error.payload = data
-    throw error
+    throw createHttpError(response, data)
   }
   return data
+}
+
+function createHttpError(response, payload = {}) {
+  const error = new Error(payload?.error || `HTTP ${response.status}`)
+  error.status = response.status
+  error.payload = payload
+  redirectToLoginForApi(error)
+  return error
 }
 
 async function fetchSseEvents(url) {
@@ -8031,10 +8051,7 @@ async function fetchSseEvents(url) {
     } catch {
       payload = {}
     }
-    const error = new Error(payload.error || text.trim() || `HTTP ${response.status}`)
-    error.status = response.status
-    error.payload = payload
-    throw error
+    throw createHttpError(response, payload.error ? payload : { error: text.trim() || undefined })
   }
 
   return parseSseEvents(text)
@@ -8068,10 +8085,7 @@ async function streamGenerateRequest(url, body, { onEvent = null } = {}) {
 
   if (!response.ok) {
     const data = await response.json().catch(() => ({}))
-    const error = new Error(data.error || `HTTP ${response.status}`)
-    error.status = response.status
-    error.payload = data
-    throw error
+    throw createHttpError(response, data)
   }
 
   if (!response.body) {
@@ -8334,11 +8348,9 @@ function getCanvasImageSize(aspectRatio = '1:1', width, height) {
   const explicitWidth = Number(width)
   const explicitHeight = Number(height)
   if (Number.isFinite(explicitWidth) && explicitWidth > 0 && Number.isFinite(explicitHeight) && explicitHeight > 0) {
-    const maxSide = 360
-    const scale = Math.min(1, maxSide / Math.max(explicitWidth, explicitHeight))
     return {
-      width: Math.max(80, Math.round(explicitWidth * scale)),
-      height: Math.max(80, Math.round(explicitHeight * scale)),
+      width: Math.max(80, Math.round(explicitWidth / 2)),
+      height: Math.max(80, Math.round(explicitHeight / 2)),
     }
   }
 

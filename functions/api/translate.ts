@@ -3,7 +3,7 @@ import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP, LANG_NAMES,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
 } from '../_shared'
-import { getAuthContext } from '../_lib/auth'
+import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
 interface OcrResult {
@@ -143,8 +143,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try { body = await request.json() } catch { return json({ error: 'Invalid JSON' }, 400) }
 
   try {
-    const auth = await getAuthContext(env, request)
-    const clientKeys = await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
+    const user = await requireAuth(env, request)
+    const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
     return json(await executeTranslate({ ...body, clientKeys }, env))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Translate failed'), status: error?.status || 502 }, error?.status || 502)

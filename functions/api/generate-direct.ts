@@ -16,7 +16,7 @@ import {
   updateJobItem,
 } from '../_lib/v2-store'
 import { publishEvent } from '../_lib/v2-events'
-import { getAuthContext } from '../_lib/auth'
+import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
 type RefRole = 'character' | 'subject' | 'style' | 'scene' | 'other'
@@ -38,8 +38,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   try {
-    const auth = await getAuthContext(env, request)
-    const userId = auth.user?.id || null
+    const user = await requireAuth(env, request)
+    const userId = user.id
     const clientKeys = await mergeUserClientKeys(env, userId, body?.clientKeys || {})
     return json(await handleDirectGenerate(env, { ...body, clientKeys, _authUserId: userId }))
   } catch (error: any) {
