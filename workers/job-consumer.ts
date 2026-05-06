@@ -4,6 +4,7 @@ import { runQueuedJob } from '../functions/_lib/v2-runner'
 type QueueMessageBody = {
   kind?: string
   jobId?: string
+  clientKeys?: Record<string, string>
 }
 
 export default {
@@ -16,7 +17,7 @@ export default {
       }
 
       try {
-        await runQueuedJob(env, String(body.jobId))
+        await runQueuedJob(env, String(body.jobId), body.clientKeys || {})
         message.ack()
       } catch (error) {
         console.error('visual-studio queue job failed', body.jobId, error)

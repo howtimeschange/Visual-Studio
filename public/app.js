@@ -72,6 +72,7 @@ const AI_HISTORY_LIMIT = 40
 const AI_HISTORY_INLINE_DATA_URL_LIMIT = 220_000
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
+const DEFAULT_AI_SESSION_TITLE = '当前会话'
 
 const KEY_STORAGE = 'img-translator:keys:v1'
 const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
@@ -80,6 +81,7 @@ const RUNTIME_STORAGE = 'img-translator:runtime:v2'
 const RESULTS_STORAGE = 'img-translator:results:v1'
 const AUTH_RETURN_STORAGE = 'img-translator:auth-return:v1'
 const CANVAS_AI_HISTORY_STORAGE = 'img-translator:canvas-ai-history:v1'
+const CANVAS_AI_HISTORY_PROJECT_PREFIX = `${CANVAS_AI_HISTORY_STORAGE}:project:`
 const CANVAS_GUIDE_STORAGE = 'img-translator:canvas-guide:v1'
 const CANVAS_AI_FIRST_OPEN_STORAGE = 'img-translator:canvas-ai-opened:v1'
 const DEFAULT_CANVAS_PROJECT_TITLE = '未命名画布'
@@ -126,6 +128,7 @@ const state = {
   generate: {
     projectId: '',
     projectTitle: DEFAULT_CANVAS_PROJECT_TITLE,
+    projectMetadata: {},
     projectSaveStatus: '',
     // canvas
     scale: 1,
@@ -159,6 +162,8 @@ const state = {
     drawPoints: [],
     // ai sidebar
     showAiPanel: false,
+    aiSessionId: '',
+    aiSessions: [],
     aiMessages: [],
     aiRefs: [],
     aiRunning: false,
@@ -294,6 +299,9 @@ const dom = {
   gAiSidebar: $('#g-ai-sidebar'),
   gAiToggle: $('#g-ai-toggle'),
   gAiClose: $('#g-ai-close'),
+  gAiSession: $('#g-ai-session'),
+  gAiNewSession: $('#g-ai-new-session'),
+  gAiClearSession: $('#g-ai-clear-session'),
   gAiMessages: $('#g-ai-messages'),
   gGenPanel: $('#g-gen-panel'),
   gGenPrompt: $('#g-gen-prompt'),
@@ -523,7 +531,7 @@ function hydrateStoredState() {
   state.translate.jobId = runtime.translate.jobId
   state.translate.items = runtime.translate.items
   state.generate.elements = runtime.generate.elements || []
-  state.generate.aiMessages = runtime.generate.aiMessages?.length ? runtime.generate.aiMessages : loadAiHistory()
+  state.generate.aiMessages = []
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0
@@ -624,6 +632,7 @@ function savePrefs() {
 
 function saveRuntimeState(options = {}) {
   const persistCanvas = options.persistCanvas !== false
+  persistCurrentAiSession()
   localStorage.setItem(RUNTIME_STORAGE, JSON.stringify({
     sessionId: state.runtime.sessionId || '',
     translate: {
@@ -634,7 +643,9 @@ function saveRuntimeState(options = {}) {
       projectId: state.generate.projectId || '',
       projectTitle: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
       elements: state.generate.elements.map((el) => serializeCanvasElement(el)),
-      aiMessages: state.generate.aiMessages.slice(-AI_HISTORY_LIMIT).map((msg) => serializeAiMessage(msg)).filter(Boolean),
+      aiSessionId: state.generate.aiSessionId || '',
+      aiSessions: serializeAiSessions(state.generate.aiSessions),
+      aiMessages: getSerializedAiHistory(),
       scale: state.generate.scale,
       panX: state.generate.panX,
       panY: state.generate.panY,
@@ -667,14 +678,217 @@ function loadRuntimeState() {
   return readJson(RUNTIME_STORAGE, {})
 }
 
-function loadAiHistory() {
+function canvasAiHistoryStorageKey(projectId = state.generate.projectId) {
+  const id = String(projectId || '').trim()
+  return id ? `${CANVAS_AI_HISTORY_PROJECT_PREFIX}${id}` : CANVAS_AI_HISTORY_STORAGE
+}
+
+function loadAiHistory(projectId = state.generate.projectId, options = {}) {
+  const id = String(projectId || '').trim()
+  const allowLegacy = options.allowLegacy !== false
+  const scoped = sanitizeAiMessages(readJson(canvasAiHistoryStorageKey(id), []))
+  if (scoped.length || id || !allowLegacy) return scoped
   return sanitizeAiMessages(readJson(CANVAS_AI_HISTORY_STORAGE, []))
 }
 
 function saveAiHistory() {
-  const messages = state.generate.aiMessages.slice(-AI_HISTORY_LIMIT).map((msg) => serializeAiMessage(msg)).filter(Boolean)
+  persistCurrentAiSession()
+  const messages = getSerializedAiHistory()
   if (!messages.length) return
-  localStorage.setItem(CANVAS_AI_HISTORY_STORAGE, JSON.stringify(messages))
+  localStorage.setItem(canvasAiHistoryStorageKey(), JSON.stringify(messages))
+}
+
+function getSerializedAiHistory() {
+  return serializeAiMessages(state.generate.aiMessages)
+}
+
+function serializeAiMessages(messages) {
+  return Array.isArray(messages)
+    ? messages.slice(-AI_HISTORY_LIMIT).map((msg) => serializeAiMessage(msg)).filter(Boolean)
+    : []
+}
+
+function getProjectAiHistory(project) {
+  const metadata = project?.metadataJson && typeof project.metadataJson === 'object' ? project.metadataJson : {}
+  return sanitizeAiMessages(metadata.aiMessages)
+}
+
+function getProjectAiSessions(project) {
+  const metadata = project?.metadataJson && typeof project.metadataJson === 'object' ? project.metadataJson : {}
+  const sessions = sanitizeAiSessions(metadata.aiSessions)
+  const legacyMessages = sanitizeAiMessages(metadata.aiMessages)
+  if (sessions.length) return sessions
+  return legacyMessages.length || Array.isArray(metadata.aiMessages)
+    ? [createAiSessionRecord({
+        id: typeof metadata.aiSessionId === 'string' ? metadata.aiSessionId : '',
+        title: DEFAULT_AI_SESSION_TITLE,
+        messages: legacyMessages,
+      })]
+    : []
+}
+
+function getProjectMetadata(project) {
+  return project?.metadataJson && typeof project.metadataJson === 'object' ? project.metadataJson : {}
+}
+
+function hasProjectAiHistory(project) {
+  return Array.isArray(getProjectMetadata(project).aiMessages)
+}
+
+function resolveCanvasAiHistory(project, projectId = state.generate.projectId, runtimeMessages = []) {
+  const sessions = getProjectAiSessions(project)
+  if (sessions.length) {
+    const metadata = getProjectMetadata(project)
+    const targetId = typeof metadata.aiSessionId === 'string' ? metadata.aiSessionId : ''
+    const session = sessions.find((item) => item.id === targetId) || sessions[0]
+    return session.messages
+  }
+  if (hasProjectAiHistory(project)) return getProjectAiHistory(project)
+  const id = String(projectId || '').trim()
+  if (id) return loadAiHistory(id, { allowLegacy: false })
+  return runtimeMessages?.length ? runtimeMessages : loadAiHistory('', { allowLegacy: true })
+}
+
+function resolveCanvasAiSessions(project, projectId = state.generate.projectId, runtimeSessions = [], runtimeMessages = []) {
+  const projectSessions = getProjectAiSessions(project)
+  if (projectSessions.length) return projectSessions
+  const storedSessions = loadAiSessions(projectId, { allowLegacy: false })
+  if (storedSessions.length) return storedSessions
+  const sanitizedRuntimeSessions = sanitizeAiSessions(runtimeSessions)
+  if (sanitizedRuntimeSessions.length) return sanitizedRuntimeSessions
+  const legacyMessages = resolveCanvasAiHistory(project, projectId, runtimeMessages)
+  return legacyMessages.length ? [createAiSessionRecord({ title: DEFAULT_AI_SESSION_TITLE, messages: legacyMessages })] : []
+}
+
+function loadAiSessions(projectId = state.generate.projectId, options = {}) {
+  const id = String(projectId || '').trim()
+  const raw = readJson(canvasAiHistoryStorageKey(id), null)
+  const sessions = sanitizeAiSessions(raw?.sessions)
+  if (sessions.length || id || options.allowLegacy === false) return sessions
+  return sanitizeAiSessions(readJson(CANVAS_AI_HISTORY_STORAGE, null)?.sessions)
+}
+
+function saveAiSessions() {
+  persistCurrentAiSession()
+  const sessions = serializeAiSessions(state.generate.aiSessions)
+  if (!sessions.length) return
+  localStorage.setItem(canvasAiHistoryStorageKey(), JSON.stringify({
+    activeSessionId: state.generate.aiSessionId || sessions[0]?.id || '',
+    sessions,
+  }))
+}
+
+function createAiSessionRecord({ id = '', title = '', messages = [], createdAt = '', updatedAt = '' } = {}) {
+  const now = new Date().toISOString()
+  return {
+    id: id || crypto.randomUUID(),
+    title: String(title || '').trim() || DEFAULT_AI_SESSION_TITLE,
+    messages: sanitizeAiMessages(messages),
+    createdAt: createdAt || now,
+    updatedAt: updatedAt || now,
+  }
+}
+
+function sanitizeAiSessions(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((session) => {
+      const id = typeof session?.id === 'string' && session.id ? session.id : crypto.randomUUID()
+      const messages = sanitizeAiMessages(session?.messages)
+      return {
+        id,
+        title: typeof session?.title === 'string' && session.title.trim() ? session.title.trim().slice(0, 48) : inferAiSessionTitle(messages),
+        messages,
+        createdAt: typeof session?.createdAt === 'string' ? session.createdAt : new Date().toISOString(),
+        updatedAt: typeof session?.updatedAt === 'string' ? session.updatedAt : new Date().toISOString(),
+      }
+    })
+    .filter(Boolean)
+    .slice(-20)
+}
+
+function serializeAiSessions(value) {
+  return sanitizeAiSessions(value).map((session) => ({
+    ...session,
+    messages: serializeAiMessages(session.messages),
+  }))
+}
+
+function inferAiSessionTitle(messages) {
+  const firstUser = messages.find((msg) => msg.role === 'user' && msg.content)
+  return firstUser?.content ? firstUser.content.slice(0, 24) : DEFAULT_AI_SESSION_TITLE
+}
+
+function persistCurrentAiSession() {
+  if (!state.generate.aiSessionId) {
+    if (!state.generate.aiMessages.length) return
+    const created = createAiSessionRecord({ messages: state.generate.aiMessages })
+    state.generate.aiSessions.push(created)
+    state.generate.aiSessionId = created.id
+  }
+  let session = state.generate.aiSessions.find((item) => item.id === state.generate.aiSessionId)
+  if (!session) {
+    session = createAiSessionRecord({ id: state.generate.aiSessionId, messages: [] })
+    state.generate.aiSessions.push(session)
+  }
+  session.messages = sanitizeAiMessages(state.generate.aiMessages)
+  session.title = inferAiSessionTitle(session.messages)
+  session.updatedAt = new Date().toISOString()
+}
+
+function activateAiSession(sessionId) {
+  persistCurrentAiSession()
+  const session = state.generate.aiSessions.find((item) => item.id === sessionId)
+  if (!session) return
+  state.generate.aiSessionId = session.id
+  state.generate.aiMessages = sanitizeAiMessages(session.messages)
+  state.generate.aiRefs = []
+}
+
+function ensureCurrentAiSession() {
+  if (!state.generate.aiSessions.length) {
+    const session = createAiSessionRecord({ messages: state.generate.aiMessages })
+    state.generate.aiSessions = [session]
+    state.generate.aiSessionId = session.id
+    state.generate.aiMessages = sanitizeAiMessages(session.messages)
+    return session
+  }
+  const session = state.generate.aiSessions.find((item) => item.id === state.generate.aiSessionId) || state.generate.aiSessions[0]
+  state.generate.aiSessionId = session.id
+  state.generate.aiMessages = sanitizeAiMessages(session.messages)
+  return session
+}
+
+function startNewAiSession() {
+  if (state.generate.aiRunning) return
+  persistCurrentAiSession()
+  const session = createAiSessionRecord({ title: DEFAULT_AI_SESSION_TITLE, messages: [] })
+  state.generate.aiSessions.push(session)
+  state.generate.aiSessions = state.generate.aiSessions.slice(-20)
+  state.generate.aiSessionId = session.id
+  state.generate.aiMessages = []
+  state.generate.aiRefs = []
+  saveRuntimeState()
+  renderAiMessages()
+  renderAiRefList()
+  renderAiSessionControls()
+}
+
+function clearCurrentAiSession() {
+  if (state.generate.aiRunning) return
+  ensureCurrentAiSession()
+  const session = state.generate.aiSessions.find((item) => item.id === state.generate.aiSessionId)
+  state.generate.aiMessages = []
+  state.generate.aiRefs = []
+  if (session) {
+    session.messages = []
+    session.title = DEFAULT_AI_SESSION_TITLE
+    session.updatedAt = new Date().toISOString()
+  }
+  saveRuntimeState()
+  renderAiMessages()
+  renderAiRefList()
+  renderAiSessionControls()
 }
 
 function sanitizeRuntimeState(raw = {}) {
@@ -709,6 +923,8 @@ function sanitizeRuntimeState(raw = {}) {
         ? raw.generate.projectTitle.trim()
         : DEFAULT_CANVAS_PROJECT_TITLE,
       elements: generateElements,
+      aiSessionId: typeof raw.generate?.aiSessionId === 'string' ? raw.generate.aiSessionId : '',
+      aiSessions: sanitizeAiSessions(raw.generate?.aiSessions),
       aiMessages: sanitizeAiMessages(raw.generate?.aiMessages),
       scale: Number(raw.generate?.scale) || 1,
       panX: Number(raw.generate?.panX) || 0,
@@ -1277,8 +1493,16 @@ function bindTranslate() {
     input: dom.tFileInput,
     onFiles: async (files) => {
       if (isTranslateBusy()) return
-      const images = await prepareAssetItems(files)
+      state.translate.progress = '正在读取图片…'
+      renderTranslate()
+      const images = await prepareAssetItems(files, {
+        onProgress: ({ current, total, filename }) => {
+          state.translate.progress = `正在上传图片 ${current}/${total} · ${filename}`
+          renderTranslate()
+        },
+      })
       state.translate.items.push(...images.map((item) => ({ ...item, results: {} })))
+      state.translate.progress = ''
       saveRuntimeState()
       renderTranslate()
     },
@@ -2998,6 +3222,15 @@ function bindAiSidebar() {
     state.generate.showAiPanel = false
     dom.gAiSidebar.classList.add('hidden')
   })
+  dom.gAiSession?.addEventListener('change', () => {
+    activateAiSession(dom.gAiSession.value)
+    saveRuntimeState()
+    renderAiMessages()
+    renderAiRefList()
+    renderAiSessionControls()
+  })
+  dom.gAiNewSession?.addEventListener('click', startNewAiSession)
+  dom.gAiClearSession?.addEventListener('click', clearCurrentAiSession)
 
   dom.gAiMessages.addEventListener('click', (event) => {
     const suggestion = event.target.closest('[data-ai-prompt]')
@@ -3077,7 +3310,25 @@ function renderAiRefList() {
   }))
 }
 
+function renderAiSessionControls() {
+  if (!dom.gAiSession) return
+  ensureCurrentAiSession()
+  const options = state.generate.aiSessions.slice().reverse().map((session, index) => {
+    const option = document.createElement('option')
+    option.value = session.id
+    option.textContent = session.title || `会话 ${state.generate.aiSessions.length - index}`
+    return option
+  })
+  dom.gAiSession.replaceChildren(...options)
+  dom.gAiSession.value = state.generate.aiSessionId || state.generate.aiSessions[0]?.id || ''
+  const busy = state.generate.aiRunning
+  dom.gAiSession.disabled = busy || state.generate.aiSessions.length <= 1
+  if (dom.gAiNewSession) dom.gAiNewSession.disabled = busy
+  if (dom.gAiClearSession) dom.gAiClearSession.disabled = busy || state.generate.aiMessages.length === 0
+}
+
 function renderAiMessages() {
+  renderAiSessionControls()
   if (dom.gSend) {
     dom.gSend.disabled = state.generate.aiRunning
     dom.gSend.textContent = state.generate.aiRunning ? '处理中' : '发送'
@@ -3287,6 +3538,7 @@ async function sendCanvasAiMessage() {
   if (state.generate.aiRunning) return
   const text = dom.gInput.value.trim()
   if (!text && state.generate.aiRefs.length === 0) return
+  await ensureCanvasProjectRecord()
   const requestText = text || '基于参考图生成一版。'
   const history = state.generate.aiMessages
     .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
@@ -3515,9 +3767,17 @@ function bindOutfit() {
     input: dom.oModelInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
-      const images = await prepareAssetItems(files)
+      state.outfit.progress = '正在读取模特图…'
+      renderOutfit()
+      const images = await prepareAssetItems(files, {
+        onProgress: ({ current, total, filename }) => {
+          state.outfit.progress = `正在上传模特图 ${current}/${total} · ${filename}`
+          renderOutfit()
+        },
+      })
       state.outfit.models.push(...images)
       pruneOutfitResults()
+      state.outfit.progress = ''
       saveRuntimeState()
       renderOutfit()
     },
@@ -3529,12 +3789,20 @@ function bindOutfit() {
     input: dom.oGarmentInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
-      const images = await prepareAssetItems(files)
+      state.outfit.progress = '正在读取服装图…'
+      renderOutfit()
+      const images = await prepareAssetItems(files, {
+        onProgress: ({ current, total, filename }) => {
+          state.outfit.progress = `正在上传服装图 ${current}/${total} · ${filename}`
+          renderOutfit()
+        },
+      })
       state.outfit.garments.push(...images.map((item) => ({
         ...item,
         role: state.outfit.garmentType,
       })))
       pruneOutfitResults()
+      state.outfit.progress = ''
       saveRuntimeState()
       renderOutfit()
     },
@@ -3619,8 +3887,16 @@ function bindStyle() {
 
   dom.sRefInput.addEventListener('change', async () => {
     if (!dom.sRefInput.files?.length || state.style.generating) return
-    const images = await prepareAssetItems(dom.sRefInput.files)
+    state.style.styleSummary = '正在上传主体参考图…'
+    renderStyle()
+    const images = await prepareAssetItems(dom.sRefInput.files, {
+      onProgress: ({ current, total, filename }) => {
+        state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
+        renderStyle()
+      },
+    })
     state.style.subjectRefs.push(...images)
+    if (!state.style.visualStyle) state.style.styleSummary = ''
     saveRuntimeState()
     renderStyle()
     dom.sRefInput.value = ''
@@ -5180,11 +5456,16 @@ async function readImageFiles(fileList) {
   return images
 }
 
-async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_upload' } = {}) {
+async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_upload', onProgress = null } = {}) {
   const images = await readImageFiles(fileList)
   const uploaded = []
 
-  for (const image of images) {
+  for (const [index, image] of images.entries()) {
+    onProgress?.({
+      current: index + 1,
+      total: images.length,
+      filename: image.name,
+    })
     const data = await postJson('/api/assets/upload', {
       sessionId: state.runtime.sessionId || undefined,
       kind,
@@ -5325,8 +5606,14 @@ async function startNewCanvasProject({ initialPrompt = '' } = {}) {
   if (state.generate.genRunning || state.generate.aiRunning) return
   state.generate.projectId = ''
   state.generate.projectTitle = initialPrompt ? initialPrompt.slice(0, 36) : DEFAULT_CANVAS_PROJECT_TITLE
+  state.generate.projectMetadata = {}
   state.generate.projectSaveStatus = ''
   state.generate.elements = []
+  const aiSession = createAiSessionRecord()
+  state.generate.aiSessionId = aiSession.id
+  state.generate.aiSessions = [aiSession]
+  state.generate.aiMessages = []
+  state.generate.aiRefs = []
   state.generate.selectedIds = []
   state.generate.scale = 1
   state.generate.panX = 0
@@ -5363,7 +5650,13 @@ async function openCanvasProject(projectId) {
     const snapshot = await loadCanvasProjectSnapshot(projectId)
     state.generate.projectId = projectId
     state.generate.projectTitle = snapshot.project?.title || DEFAULT_CANVAS_PROJECT_TITLE
+    state.generate.projectMetadata = getProjectMetadata(snapshot.project)
     state.generate.elements = await hydrateCanvasElements(snapshot.elements || [])
+    state.generate.aiSessions = resolveCanvasAiSessions(snapshot.project, projectId)
+    ensureCurrentAiSession()
+    state.generate.aiMessages = await hydrateAiMessages(resolveCanvasAiHistory(snapshot.project, projectId))
+    persistCurrentAiSession()
+    state.generate.aiRefs = []
     state.generate.selectedIds = []
     state.generate.scale = 1
     state.generate.panX = 0
@@ -5434,7 +5727,12 @@ async function deleteCanvasProjectFromDialog() {
     if (state.generate.projectId === projectId) {
       state.generate.projectId = ''
       state.generate.projectTitle = DEFAULT_CANVAS_PROJECT_TITLE
+      state.generate.projectMetadata = {}
       state.generate.elements = []
+      state.generate.aiSessionId = ''
+      state.generate.aiSessions = []
+      state.generate.aiMessages = []
+      state.generate.aiRefs = []
       state.generate.selectedIds = []
       state.generate.projectSaveStatus = ''
       saveRuntimeState({ persistCanvas: false })
@@ -5722,10 +6020,17 @@ async function ensureCanvasProjectRecord() {
     const data = await postJson('/api/canvas/projects', {
       sessionId: state.runtime.sessionId || undefined,
       title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+      metadataJson: {
+        ...state.generate.projectMetadata,
+        aiSessionId: state.generate.aiSessionId || '',
+        aiSessions: serializeAiSessions(state.generate.aiSessions),
+        aiMessages: getSerializedAiHistory(),
+      },
     })
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     state.generate.projectId = data.project?.id || ''
     state.generate.projectTitle = data.project?.title || state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
+    state.generate.projectMetadata = getProjectMetadata(data.project)
     if (state.activeView === 'generate' && state.generate.projectId && window.location.pathname === '/lovart/canvas' && !canvasProjectIdFromLocation()) {
       window.history.replaceState({}, '', `/lovart/canvas?id=${encodeURIComponent(state.generate.projectId)}`)
     }
@@ -5758,6 +6063,12 @@ async function persistCanvasProject() {
       const projectBody = {
         sessionId: state.runtime.sessionId || undefined,
         title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+        metadataJson: {
+          ...state.generate.projectMetadata,
+          aiSessionId: state.generate.aiSessionId || '',
+          aiSessions: serializeAiSessions(state.generate.aiSessions),
+          aiMessages: getSerializedAiHistory(),
+        },
       }
 
       try {
@@ -5833,18 +6144,20 @@ async function hydrateCanvasElements(elements) {
 async function restoreRuntimeState() {
   restoringRuntimeState = true
   const runtime = sanitizeRuntimeState(loadRuntimeState())
-  const aiHistory = runtime.generate.aiMessages?.length ? runtime.generate.aiMessages : loadAiHistory()
   const routeProjectId = state.activeView === 'generate' ? canvasProjectIdFromLocation() : ''
   state.runtime.sessionId = runtime.sessionId
   state.translate.jobId = runtime.translate.jobId
   state.generate.projectId = routeProjectId || runtime.generate.projectId || ''
   state.generate.projectTitle = runtime.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
+  state.generate.aiSessionId = runtime.generate.aiSessionId || ''
+  state.generate.aiSessions = runtime.generate.aiSessions || []
   let canvasElements = runtime.generate.elements || []
   if (state.generate.projectId) {
     try {
       const snapshot = await loadCanvasProjectSnapshot(state.generate.projectId)
       if (snapshot) {
         state.generate.projectTitle = snapshot.project?.title || state.generate.projectTitle
+        state.generate.projectMetadata = getProjectMetadata(snapshot.project)
         canvasElements = snapshot.elements
         state.generate.projectSaveStatus = 'saved'
       }
@@ -5853,7 +6166,20 @@ async function restoreRuntimeState() {
     }
   }
   state.generate.elements = await hydrateCanvasElements(canvasElements)
-  state.generate.aiMessages = await hydrateAiMessages(aiHistory)
+  const aiHistory = resolveCanvasAiHistory(
+    { metadataJson: state.generate.projectMetadata },
+    state.generate.projectId,
+    runtime.generate.aiMessages,
+  )
+  state.generate.aiSessions = resolveCanvasAiSessions(
+    { metadataJson: state.generate.projectMetadata },
+    state.generate.projectId,
+    state.generate.aiSessions,
+    runtime.generate.aiMessages,
+  )
+  ensureCurrentAiSession()
+  if (aiHistory.length) state.generate.aiMessages = await hydrateAiMessages(aiHistory)
+  persistCurrentAiSession()
   state.generate.scale = runtime.generate.scale || 1
   state.generate.panX = runtime.generate.panX || 0
   state.generate.panY = runtime.generate.panY || 0

@@ -338,7 +338,12 @@
       <aside class="ai-sidebar hidden" id="g-ai-sidebar">
         <div class="ai-sidebar-head">
           <h3>AI 助手</h3>
-          <button type="button" id="g-ai-close" class="ai-sidebar-close">&times;</button>
+          <div class="ai-sidebar-head-actions">
+            <select id="g-ai-session" class="ai-sidebar-session" aria-label="AI 会话"></select>
+            <button type="button" id="g-ai-new-session" class="ai-sidebar-head-btn" title="新会话">新会话</button>
+            <button type="button" id="g-ai-clear-session" class="ai-sidebar-head-btn" title="清空当前会话">清空</button>
+            <button type="button" id="g-ai-close" class="ai-sidebar-close" title="关闭 AI 助手">&times;</button>
+          </div>
         </div>
         <div class="ai-sidebar-messages" id="g-ai-messages"></div>
         <div class="ai-sidebar-bottom">

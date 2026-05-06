@@ -8,6 +8,7 @@ export interface Env {
   GPT_IMAGE_API_KEY?: string
   GPT_IMAGE_GROUP?: string
   CREDENTIAL_KEK?: string
+  VS_JOB_CREDENTIAL_KEK?: string
   ADMIN_EMAILS?: string
   ADMIN_USER_IDS?: string
   VS_ADMIN_EMAILS?: string
@@ -21,6 +22,8 @@ export interface Env {
   VS_RESULTS_BUCKET?: R2Bucket
   VS_TEMP_BUCKET?: R2Bucket
   VS_JOBS_QUEUE?: Queue<unknown>
+  VS_TRANSLATE_JOBS_QUEUE?: Queue<unknown>
+  VS_OUTFIT_JOBS_QUEUE?: Queue<unknown>
 }
 
 export const DEFAULT_BASE = 'https://api.1xm.ai/v1'
@@ -30,6 +33,11 @@ const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = 90_000
 const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 60_000
 const MIN_TIMEOUT_MS = 1_000
 const MAX_TIMEOUT_MS = 900_000
+const GPT_IMAGE_2_MIN_PIXELS = 655_360
+const GPT_IMAGE_2_MAX_PIXELS = 8_294_400
+const GPT_IMAGE_2_MAX_EDGE = 3840
+const GPT_IMAGE_2_SIZE_STEP = 16
+const GPT_IMAGE_2_MAX_RATIO = 3
 
 export const MODEL_MAP: Record<string, string> = {
   'nano-banana-2': 'gemini-3.1-flash-image-preview',
@@ -90,13 +98,23 @@ export interface ImagePart {
   mime: string
 }
 
+type ImageModelOptions = {
+  group?: string
+  timeoutMs?: number
+  imageFetchTimeoutMs?: number
+  aspectRatio?: string
+  resolution?: string
+  size?: string
+  quality?: string
+}
+
 export async function callImageModel(
   baseUrl: string,
   apiKey: string,
   modelName: string,
   images: ImagePart[],
   prompt: string,
-  opts: { group?: string; timeoutMs?: number; imageFetchTimeoutMs?: number } = {},
+  opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
   if (modelName === 'gpt-image-2') {
     return callGptImage2Model(baseUrl, apiKey, modelName, images, prompt, opts)
@@ -158,14 +176,14 @@ async function callGptImage2Model(
   modelName: string,
   images: ImagePart[],
   prompt: string,
-  opts: { timeoutMs?: number; imageFetchTimeoutMs?: number } = {},
+  opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
   const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
   const hasImages = images.length > 0
   const endpoint = hasImages ? 'images/edits' : 'images/generations'
   const request = hasImages
-    ? buildGptImage2EditRequest(modelName, images, prompt)
-    : buildGptImage2GenerationRequest(modelName, prompt)
+    ? buildGptImage2EditRequest(modelName, images, prompt, opts)
+    : buildGptImage2GenerationRequest(modelName, prompt, opts)
 
   try {
     const res = await fetchWithTimeout(`${baseUrl}/${endpoint}`, {
@@ -202,33 +220,35 @@ async function callGptImage2Model(
   }
 }
 
-function buildGptImage2GenerationRequest(modelName: string, prompt: string): {
+function buildGptImage2GenerationRequest(modelName: string, prompt: string, opts: ImageModelOptions = {}): {
   headers: Record<string, string>
   body: string
 } {
+  const settings = resolveGptImage2Settings(opts)
   return {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: modelName,
       prompt,
       n: 1,
-      size: 'auto',
-      quality: 'high',
+      size: settings.size,
+      quality: settings.quality,
       output_format: 'png',
     }),
   }
 }
 
-function buildGptImage2EditRequest(modelName: string, images: ImagePart[], prompt: string): {
+function buildGptImage2EditRequest(modelName: string, images: ImagePart[], prompt: string, opts: ImageModelOptions = {}): {
   headers: Record<string, string>
   body: FormData
 } {
+  const settings = resolveGptImage2Settings(opts)
   const form = new FormData()
   form.set('model', modelName)
   form.set('prompt', prompt)
   form.set('n', '1')
-  form.set('size', 'auto')
-  form.set('quality', 'high')
+  form.set('size', settings.size)
+  form.set('quality', settings.quality)
   form.set('output_format', 'png')
 
   images.forEach((image, index) => {
@@ -238,6 +258,81 @@ function buildGptImage2EditRequest(modelName: string, images: ImagePart[], promp
   })
 
   return { headers: {}, body: form }
+}
+
+function resolveGptImage2Settings(opts: ImageModelOptions = {}) {
+  return {
+    size: normalizeGptImage2Size(opts.size || sizeForAspectRatioAndResolution(opts.aspectRatio, opts.resolution)),
+    quality: normalizeGptImage2Quality(opts.quality),
+  }
+}
+
+function normalizeGptImage2Quality(value: unknown): string {
+  const quality = String(value || '').trim().toLowerCase()
+  return ['auto', 'high', 'medium', 'low'].includes(quality) ? quality : 'high'
+}
+
+function normalizeGptImage2Size(value: unknown): string {
+  const size = String(value || '').trim().toLowerCase()
+  if (!size || size === 'auto') return 'auto'
+  const match = size.match(/^(\d+)x(\d+)$/)
+  if (!match) return 'auto'
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return 'auto'
+  if (width < GPT_IMAGE_2_SIZE_STEP || height < GPT_IMAGE_2_SIZE_STEP) return 'auto'
+  if (width > GPT_IMAGE_2_MAX_EDGE || height > GPT_IMAGE_2_MAX_EDGE) return 'auto'
+  if (width % GPT_IMAGE_2_SIZE_STEP !== 0 || height % GPT_IMAGE_2_SIZE_STEP !== 0) return 'auto'
+  const pixels = width * height
+  if (pixels < GPT_IMAGE_2_MIN_PIXELS || pixels > GPT_IMAGE_2_MAX_PIXELS) return 'auto'
+  if (Math.max(width, height) / Math.min(width, height) > GPT_IMAGE_2_MAX_RATIO) return 'auto'
+  return `${width}x${height}`
+}
+
+function sizeForAspectRatioAndResolution(aspectRatio: unknown, resolution: unknown): string {
+  const ratio = normalizeGptImage2AspectRatio(aspectRatio)
+  const longEdge = ({
+    '1k': 1024,
+    '2k': 2048,
+    '4k': 3840,
+  } as Record<string, number>)[String(resolution || '').trim().toLowerCase()]
+  if (!ratio || !longEdge) return 'auto'
+
+  const [ratioWidth, ratioHeight] = ratio.split(':').map((part) => Number(part) || 1)
+  if (Math.max(ratioWidth, ratioHeight) / Math.min(ratioWidth, ratioHeight) > GPT_IMAGE_2_MAX_RATIO) return 'auto'
+
+  let candidateLongEdge = alignGptImage2Size(longEdge)
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const size = buildGptImage2SizeForLongEdge(candidateLongEdge, ratioWidth, ratioHeight)
+    const normalized = normalizeGptImage2Size(size)
+    if (normalized !== 'auto') return normalized
+
+    const [width, height] = size.split('x').map(Number)
+    const pixels = width * height
+    candidateLongEdge += pixels > GPT_IMAGE_2_MAX_PIXELS ? -GPT_IMAGE_2_SIZE_STEP : GPT_IMAGE_2_SIZE_STEP
+    if (candidateLongEdge < GPT_IMAGE_2_SIZE_STEP || candidateLongEdge > GPT_IMAGE_2_MAX_EDGE) return 'auto'
+  }
+
+  return 'auto'
+}
+
+function normalizeGptImage2AspectRatio(value: unknown): string {
+  const ratio = String(value || '').trim()
+  return ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(ratio) ? ratio : ''
+}
+
+function alignGptImage2Size(value: number): number {
+  return Math.max(
+    GPT_IMAGE_2_SIZE_STEP,
+    Math.min(GPT_IMAGE_2_MAX_EDGE, Math.round(value / GPT_IMAGE_2_SIZE_STEP) * GPT_IMAGE_2_SIZE_STEP),
+  )
+}
+
+function buildGptImage2SizeForLongEdge(longEdge: number, ratioWidth: number, ratioHeight: number): string {
+  const landscape = ratioWidth >= ratioHeight
+  const width = landscape ? longEdge : alignGptImage2Size((longEdge * ratioWidth) / ratioHeight)
+  const height = landscape ? alignGptImage2Size((longEdge * ratioHeight) / ratioWidth) : longEdge
+  return `${width}x${height}`
 }
 
 export async function callTextModel(

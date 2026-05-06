@@ -121,6 +121,8 @@ type GenerateRequestBody = {
   referenceImages?: RefImage[]
   useDesignAgent?: boolean
   previousResult?: PreviousResultPart | null
+  aspectRatio?: string
+  resolution?: string
   clientKeys?: Record<string, unknown>
 }
 
@@ -135,7 +137,7 @@ type GenerateExecutionContext = {
   useDesignAgent: boolean
   previousResult: PreviousResultPart | null
   agentConfig: DesignAgentConfig
-  imageModelOptions: { group?: string }
+  imageModelOptions: ReturnType<typeof resolveImageModelOptions>
 }
 
 type GenerateExecutionResult = {
@@ -187,6 +189,8 @@ export function buildGenerateExecutionContext(body: GenerateRequestBody, env: En
     referenceImages = [],
     useDesignAgent = true,
     previousResult = null,
+    aspectRatio = '',
+    resolution = '',
     clientKeys = {},
   } = body ?? {}
 
@@ -198,6 +202,8 @@ export function buildGenerateExecutionContext(body: GenerateRequestBody, env: En
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const { visionKey, genKey } = resolveKeys(modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  imageModelOptions.aspectRatio = normalizeAspectRatio(aspectRatio)
+  imageModelOptions.resolution = normalizeResolution(resolution)
   if (!genKey) throw createStatusError(`Missing API key for ${modelId}`, 400)
 
   const agentConfig = resolveDesignAgentConfig(visionKey)
@@ -1174,6 +1180,16 @@ function createStatusError(message: string, status = 502) {
 
 function isImagePart(value: any): value is PreviousResultPart {
   return Boolean(value?.base64 && value?.mime)
+}
+
+function normalizeAspectRatio(value: unknown): string {
+  const ratio = String(value || '').trim()
+  return ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(ratio) ? ratio : ''
+}
+
+function normalizeResolution(value: unknown): string {
+  const resolution = String(value || '').trim().toLowerCase()
+  return ['1k', '2k', '4k'].includes(resolution) ? resolution : ''
 }
 
 function uniqueStrings(values: string[]): string[] {

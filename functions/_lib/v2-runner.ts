@@ -33,7 +33,7 @@ import {
 } from './v2-store'
 import { publishEvent } from './v2-events'
 import { createJobQueueMessage, dispatchQueuedJob } from './v2-queue'
-import { loadUserClientKeys } from './user-api-keys'
+import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
 import { executeTranslate } from '../api/translate'
 import { executeOutfitSwap } from '../api/outfit-swap'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
@@ -43,6 +43,8 @@ type WaitUntil = (promise: Promise<unknown>) => void
 type ClientKeys = Record<string, unknown>
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
+const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
+const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 
 function splitDataUrl(dataUrl: string): { mime: string; base64: string } {
   const match = String(dataUrl || '').match(/^data:(image\/[^;]+);base64,(.+)$/)
@@ -62,6 +64,12 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
   const numeric = Math.floor(Number(value))
   if (!Number.isFinite(numeric)) return fallback
   return Math.min(max, Math.max(min, numeric))
+}
+
+function clampMs(value: unknown, fallback: number): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  return Math.min(24 * 60 * 60_000, Math.max(60_000, numeric))
 }
 
 async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
@@ -95,16 +103,41 @@ function queueProgressPublisher(env: Env, jobId: string) {
 
 async function maybeSealClientKeys(env: Env, jobId: string, clientKeys: ClientKeys): Promise<string | null> {
   if (!clientKeys || Object.keys(clientKeys).length === 0) return null
-  const ciphertext = await sealJson(clientKeys, env.CREDENTIAL_KEK)
+  const ciphertext = await sealJson(clientKeys, jobCredentialSecret(env))
   const record = await createSealedCredential(env, jobId, ciphertext, addMinutes(30))
   return record.id
+}
+
+function jobCredentialSecret(env: Env): string | undefined {
+  return env.VS_JOB_CREDENTIAL_KEK || env.CREDENTIAL_KEK
+}
+
+function jobCredentialSecrets(env: Env): string[] {
+  return [...new Set([
+    String(env.VS_JOB_CREDENTIAL_KEK || '').trim(),
+    String(env.CREDENTIAL_KEK || '').trim(),
+  ].filter(Boolean))]
 }
 
 async function loadClientKeys(env: Env, credentialId?: string | null): Promise<ClientKeys> {
   if (!credentialId) return {}
   const record = await getSealedCredential(env, credentialId)
   if (!record) return {}
-  return unsealJson<ClientKeys>(record.ciphertext, env.CREDENTIAL_KEK)
+  const secrets = jobCredentialSecrets(env)
+  if (secrets.length === 0) {
+    return unsealJson<ClientKeys>(record.ciphertext, undefined)
+  }
+
+  let lastError: unknown = null
+  for (const secret of secrets) {
+    try {
+      return await unsealJson<ClientKeys>(record.ciphertext, secret)
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  throw lastError
 }
 
 async function loadJobClientKeys(env: Env, job: JobRecord): Promise<ClientKeys> {
@@ -173,6 +206,7 @@ async function requeueItems(env: Env, jobId: string, items: JobItemRecord[]): Pr
     status: 'queued',
     errorCode: null,
     errorMessage: null,
+    startedAt: null,
     finishedAt: null,
   })))
 }
@@ -182,11 +216,17 @@ async function scheduleJobExecution(
   job: JobRecord,
   waitUntil: WaitUntil | undefined,
   reason: 'submit' | 'retry' | 'recover',
+  clientKeys: ClientKeys = {},
 ) {
   return dispatchQueuedJob(
     env,
     waitUntil,
-    createJobQueueMessage({ jobId: job.id, jobType: job.type, reason }),
+    createJobQueueMessage({
+      jobId: job.id,
+      jobType: job.type,
+      reason,
+      clientKeys: Object.keys(clientKeys || {}).length ? sanitizeClientKeys(clientKeys) : undefined,
+    }),
     () => runQueuedJob(env, job.id),
   )
 }
@@ -251,7 +291,7 @@ export async function submitTranslateBatch(
   await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type })
   await publishJobProgress(env, job)
 
-  await scheduleJobExecution(env, job, waitUntil, 'submit')
+  await scheduleJobExecution(env, job, waitUntil, 'submit', body?.clientKeys || {})
 
   return { jobId: job.id, sessionId: session.id, itemCount: items.length }
 }
@@ -440,7 +480,7 @@ export async function submitOutfitBatch(
   await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type })
   await publishJobProgress(env, job)
 
-  await scheduleJobExecution(env, job, waitUntil, 'submit')
+  await scheduleJobExecution(env, job, waitUntil, 'submit', body?.clientKeys || {})
 
   return { jobId: job.id, sessionId: session.id, lookCount: looks.length, itemCount: items.length }
 }
@@ -646,7 +686,7 @@ export async function submitGenerateTurn(
   await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type, turnId: turn.id })
   await publishEvent(env, 'turn', turn.id, 'status', { status: 'queued' })
 
-  await scheduleJobExecution(env, job, waitUntil, 'submit')
+  await scheduleJobExecution(env, job, waitUntil, 'submit', body?.clientKeys || {})
 
   return { jobId: job.id, sessionId: session.id, conversationId: conversation.id, turnId: turn.id }
 }
@@ -801,24 +841,84 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   }
 }
 
-export async function runQueuedJob(env: Env, jobId: string) {
+async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
+  const message = String(error?.message || 'Job failed before processing started')
+  const items = await listJobItems(env, job.id)
+  const activeItems = items.filter((item) => !['completed', 'failed', 'cancelled'].includes(item.status))
+
+  await Promise.all(activeItems.map(async (item) => {
+    await updateJobItem(env, job.id, item.id, {
+      status: 'failed',
+      attemptCount: Math.max(1, Number(item.attemptCount || 0)),
+      errorCode: 'job_setup_failed',
+      errorMessage: message,
+      finishedAt: nowIso(),
+    })
+    await publishEvent(env, 'item', item.id, 'item_failed', {
+      jobId: job.id,
+      error: message,
+    })
+  }))
+
+  const finalItems = await listJobItems(env, job.id)
+  const progressDone = finalItems.filter((item) => item.status === 'completed').length
+  const progressFailed = finalItems.filter((item) => item.status === 'failed').length
+  const finalJob = await updateJob(env, job.id, {
+    status: 'failed',
+    progressDone,
+    progressFailed,
+    summaryJson: { ...job.summaryJson, error: message },
+  })
+
+  if (job.type === 'generate_turn' && job.configJson?.turnId) {
+    await updateConversationTurn(env, String(job.configJson.turnId), { status: 'failed' })
+    await publishEvent(env, 'turn', String(job.configJson.turnId), 'error', { error: message })
+  }
+
+  if (finalJob) {
+    await publishEvent(env, 'job', job.id, 'job_completed', {
+      status: finalJob.status,
+      error: message,
+    })
+  }
+
+  await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
+}
+
+export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: ClientKeys) {
   const job = await getJob(env, jobId)
   if (!job) return { jobId, status: 'missing' }
   if (['completed', 'partial_failed', 'failed', 'cancelled'].includes(job.status)) {
     return { jobId: job.id, status: job.status, skipped: true }
   }
 
-  if (job.type === 'translate_batch') {
-    await runTranslateBatchJob(env, job.id)
-  } else if (job.type === 'outfit_batch') {
-    await runOutfitBatchJob(env, job.id)
-  } else if (job.type === 'generate_turn') {
-    await runGenerateTurnJob(env, job.id)
-  } else {
-    await updateJob(env, job.id, {
-      status: 'failed',
-      summaryJson: { error: `No runner registered for ${job.type}` },
-    })
+  if (inlineClientKeys && Object.keys(inlineClientKeys).length > 0) {
+    const record = await maybeSealClientKeys(env, job.id, inlineClientKeys)
+    if (record) {
+      await updateJob(env, job.id, {
+        configJson: {
+          ...job.configJson,
+          sealedCredentialId: record,
+        },
+      })
+    }
+  }
+
+  try {
+    if (job.type === 'translate_batch') {
+      await runTranslateBatchJob(env, job.id)
+    } else if (job.type === 'outfit_batch') {
+      await runOutfitBatchJob(env, job.id)
+    } else if (job.type === 'generate_turn') {
+      await runGenerateTurnJob(env, job.id)
+    } else {
+      await updateJob(env, job.id, {
+        status: 'failed',
+        summaryJson: { error: `No runner registered for ${job.type}` },
+      })
+    }
+  } catch (error) {
+    await failQueuedJobSetup(env, job, error)
   }
 
   return { jobId: job.id, status: (await getJob(env, job.id))?.status || job.status }
@@ -827,28 +927,96 @@ export async function runQueuedJob(env: Env, jobId: string) {
 export async function recoverJobs(env: Env, waitUntil?: WaitUntil) {
   const jobs = await listJobsByStatus(env, ['queued', 'running'])
   const scheduled: Array<Record<string, unknown>> = []
+  const staleAfterMs = clampMs((env as Env & { VS_JOB_ITEM_TIMEOUT_MS?: string }).VS_JOB_ITEM_TIMEOUT_MS, DEFAULT_STALE_JOB_ITEM_MS)
 
   for (const job of jobs) {
-    if (job.status === 'running') {
-      const items = await listJobItems(env, job.id)
-      const runningItems = items.filter((item) => item.status === 'running')
-      if (runningItems.length) await requeueItems(env, job.id, runningItems)
-      await updateJob(env, job.id, { status: 'queued' })
-      if (job.type === 'generate_turn' && typeof job.configJson?.turnId === 'string') {
-        await updateConversationTurn(env, String(job.configJson.turnId), { status: 'queued' })
-      }
+    const recovered = job.status === 'running'
+      ? await recoverRunningJob(env, job, staleAfterMs)
+      : { shouldSchedule: true, previousStatus: job.status }
+
+    if (!recovered.shouldSchedule) {
+      continue
     }
 
     const dispatchMode = await scheduleJobExecution(env, { ...job, status: 'queued' }, waitUntil, 'recover')
     scheduled.push({
       jobId: job.id,
       type: job.type,
-      previousStatus: job.status,
+      previousStatus: recovered.previousStatus,
       dispatchMode,
     })
   }
 
   return { recovered: scheduled.length, jobs: scheduled }
+}
+
+async function recoverRunningJob(env: Env, job: JobRecord, staleAfterMs: number): Promise<{ shouldSchedule: boolean; previousStatus: string }> {
+  const items = await listJobItems(env, job.id)
+  const runningItems = items.filter((item) => item.status === 'running')
+  const staleItems = runningItems.filter((item) => isStaleItem(item, job, staleAfterMs))
+
+  if (runningItems.length && staleItems.length === 0) {
+    return { shouldSchedule: false, previousStatus: job.status }
+  }
+
+  for (const item of staleItems) {
+    if (item.attemptCount >= MAX_JOB_ITEM_ATTEMPTS) {
+      await updateJobItem(env, job.id, item.id, {
+        status: 'failed',
+        errorCode: 'job_item_timeout',
+        errorMessage: `Job item timed out after ${MAX_JOB_ITEM_ATTEMPTS} attempts.`,
+        finishedAt: nowIso(),
+      })
+    } else {
+      await requeueItems(env, job.id, [item])
+    }
+  }
+
+  const latestItems = await listJobItems(env, job.id)
+  const nonTerminal = latestItems.filter((item) => !['completed', 'failed'].includes(item.status))
+
+  if (nonTerminal.length === 0) {
+    await finalizeRecoveredJob(env, job, latestItems)
+    return { shouldSchedule: false, previousStatus: job.status }
+  }
+
+  await updateJob(env, job.id, { status: 'queued' })
+  await updateJobCounts(env, job.id)
+  if (job.type === 'generate_turn' && typeof job.configJson?.turnId === 'string') {
+    await updateConversationTurn(env, String(job.configJson.turnId), { status: 'queued' })
+  }
+  return { shouldSchedule: true, previousStatus: job.status }
+}
+
+async function finalizeRecoveredJob(env: Env, job: JobRecord, items: JobItemRecord[]): Promise<void> {
+  const failed = items.filter((item) => item.status === 'failed').length
+  const completed = items.filter((item) => item.status === 'completed').length
+  const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
+  await updateJob(env, job.id, {
+    status,
+    progressDone: completed,
+    progressFailed: failed,
+    summaryJson: {
+      ...job.summaryJson,
+      ...createJobSummary(items),
+      recoveredAt: nowIso(),
+    },
+  })
+  if (job.type === 'generate_turn' && typeof job.configJson?.turnId === 'string') {
+    await updateConversationTurn(env, String(job.configJson.turnId), { status })
+  }
+  await publishEvent(env, 'job', job.id, 'job_completed', {
+    status,
+    summary: createJobSummary(items),
+  })
+}
+
+function isStaleItem(item: JobItemRecord, job: JobRecord, staleAfterMs: number): boolean {
+  const startedAt = Date.parse(String(item.startedAt || ''))
+  const fallbackAt = Date.parse(String(job.updatedAt || job.createdAt || ''))
+  const reference = Number.isFinite(startedAt) ? startedAt : fallbackAt
+  if (!Number.isFinite(reference)) return true
+  return Date.now() - reference >= staleAfterMs
 }
 
 export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {

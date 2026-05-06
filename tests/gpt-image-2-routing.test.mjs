@@ -113,3 +113,89 @@ test('gpt-image-2 image editing sends reference images as multipart form data', 
     await cleanup()
   }
 })
+
+test('gpt-image-2 maps existing 4k landscape config to a supported size', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return okImageResponse('ZmFrZS00aw==')
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a 4k widescreen campaign poster',
+      { timeoutMs: 1000, aspectRatio: '16:9', resolution: '4k' },
+    )
+
+    assert.equal(result.ok, true)
+    const payload = JSON.parse(calls[0].init.body)
+    assert.equal(payload.size, '3840x2160')
+    assert.equal(payload.quality, 'high')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('gpt-image-2 maps existing 4k portrait config to a supported edit size', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return okImageResponse('ZWRpdC00aw==')
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [{ base64: 'cmVmLWltYWdl', mime: 'image/png' }],
+      'extend this into a 4k vertical poster',
+      { timeoutMs: 1000, aspectRatio: '9:16', resolution: '4k' },
+    )
+
+    assert.equal(result.ok, true)
+    const form = calls[0].init.body
+    assert.equal(form.get('size'), '2160x3840')
+    assert.equal(form.get('quality'), 'high')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('gpt-image-2 keeps square 4k under the documented pixel limit', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return okImageResponse('c3F1YXJlLTRr')
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a square 4k product render',
+      { timeoutMs: 1000, aspectRatio: '1:1', resolution: '4k' },
+    )
+
+    assert.equal(result.ok, true)
+    const payload = JSON.parse(calls[0].init.body)
+    assert.equal(payload.size, '2880x2880')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})

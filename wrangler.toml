@@ -32,10 +32,15 @@ bucket_name = "visual-studio-temp"
 # Queue producer for durable job dispatch. The Pages Function falls back to waitUntil
 # when this binding is not provisioned by the deployment environment.
 [[queues.producers]]
-binding = "VS_JOBS_QUEUE"
-queue = "visual-studio-jobs"
+binding = "VS_TRANSLATE_JOBS_QUEUE"
+queue = "visual-studio-translate-jobs"
 
-# [vars]
+[[queues.producers]]
+binding = "VS_OUTFIT_JOBS_QUEUE"
+queue = "visual-studio-outfit-jobs"
+
+[vars]
+VS_QUEUE_EXECUTION_MODE = "queue"
 # RELAY_BASE_URL = "https://api.1xm.ai/v1"
 # ADMIN_EMAILS = "owner@example.com" # comma-separated admin account emails for /admin
-# VS_QUEUE_EXECUTION_MODE = "waitUntil" # set to "queue" after deploying workers/job-consumer.ts
+# VS_IMAGE_REQUEST_TIMEOUT_MS = "300000"

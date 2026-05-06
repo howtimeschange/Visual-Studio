@@ -98,6 +98,8 @@ async function handleDirectGenerate(env: Env, body: any) {
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const { visionKey, genKey } = resolveKeys(modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  imageModelOptions.aspectRatio = aspectRatio
+  imageModelOptions.resolution = resolution
 
   try {
     if (!genKey) throw createError(`Missing API key for ${modelId}`, 400)

@@ -2405,6 +2405,50 @@ button.ghost:disabled,
   font-weight: 700;
 }
 
+.ai-sidebar-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ai-sidebar-session {
+  width: 92px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.ai-sidebar-head-btn {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--bg-2);
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ai-sidebar-head-btn:hover:not(:disabled),
+.ai-sidebar-session:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--accent) 35%, var(--line-strong));
+  background: var(--bg-4);
+  color: var(--text);
+}
+
+.ai-sidebar-head-btn:disabled,
+.ai-sidebar-session:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .ai-sidebar-close {
   width: 28px;
   height: 28px;
@@ -2421,6 +2465,22 @@ button.ghost:disabled,
 .ai-sidebar-close:hover {
   background: var(--bg-4);
   color: var(--text);
+}
+
+@media (max-width: 520px) {
+  .ai-sidebar-head {
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .ai-sidebar-head-actions {
+    width: 100%;
+  }
+
+  .ai-sidebar-session {
+    flex: 1;
+  }
 }
 
 .ai-sidebar-messages {

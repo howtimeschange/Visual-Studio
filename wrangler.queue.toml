@@ -21,7 +21,13 @@ binding = "VS_TEMP_BUCKET"
 bucket_name = "visual-studio-temp"
 
 [[queues.consumers]]
-queue = "visual-studio-jobs"
+queue = "visual-studio-translate-jobs"
+max_batch_size = 4
+max_batch_timeout = 10
+max_retries = 3
+
+[[queues.consumers]]
+queue = "visual-studio-outfit-jobs"
 max_batch_size = 4
 max_batch_timeout = 10
 max_retries = 3
