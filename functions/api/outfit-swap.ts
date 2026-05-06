@@ -5,7 +5,7 @@
 //   model:    { base64, mime },     // person photo
 //   garment?: { base64, mime },     // legacy single clothing photo
 //   garments?: [{ base64, mime, role?, label? }],
-//   garmentType?: 'top'|'bottom'|'dress'|'outerwear'|'full_outfit'|'accessory',
+//   garmentType?: 'top'|'bottom'|'dress'|'outerwear'|'full_outfit'|'shoes'|'accessory',
 //   instructions?: string,          // free-form extra requests (pose, background)
 //   clientKeys?
 // }
@@ -166,21 +166,21 @@ Return JSON only:
   "garments": [
     {
       "index": 2,
-      "role": "top|bottom|dress|outerwear|full_outfit|accessory|other",
+      "role": "top|bottom|dress|outerwear|full_outfit|shoes|accessory|other",
       "category": "...",
       "colors": ["..."],
       "pattern": "...",
       "silhouette": "...",
       "material": "...",
-      "keyDetails": ["logos", "closures", "trim", "ruffles", "prints", "collar", "hem", "pockets"],
-      "layering": "base|outer|accessory"
+      "keyDetails": ["logos", "closures", "trim", "ruffles", "prints", "collar", "hem", "pockets", "toe shape", "sole", "heel", "laces"],
+      "layering": "base|outer|shoes|accessory"
     }
   ]
 }
 
 Rules:
 - Capture only visible facts
-- Call out logos, graphics, embroidery, trims, seams, buttons, zippers, hems, pockets, prints, and color blocking
+- Call out logos, graphics, embroidery, trims, seams, buttons, zippers, hems, pockets, prints, toe shape, soles, heels, laces, and color blocking
 - Keep item indices aligned with the provided images
 - If unsure, use short conservative descriptions`,
     },
@@ -263,10 +263,11 @@ ${garmentAnalysis}
    - full outfit / dress items are the base look
    - top and bottom should be worn together when both exist
    - outerwear must layer above the base clothing
+   - shoes should be placed on the feet, replacing only the original footwear or bare-foot region
    - accessories should complement the outfit naturally without replacing garments
 4. Replace ONLY the relevant clothing regions; do not alter unrelated body parts, identity cues, hairstyle, hands, or background layout unless explicitly requested
 5. Realistic fit: drape, folds, shadows, seam placement, and layering must look natural on the model's body and pose
-6. Preserve visible branding, prints, trims, stitching, closures, hems, pockets, collars, ruffles, embroidery, and special details from every garment reference
+6. Preserve visible branding, prints, trims, stitching, closures, hems, pockets, collars, ruffles, embroidery, toe boxes, soles, heels, laces, straps, and special details from every garment reference
 7. If garment references conflict, prioritize a plausible styling solution that keeps each role recognizable and faithful
 8. Background: keep Image #1 background (or use a clean studio background if Image #1 background is messy)
 9. Lighting: relight the garments to match the scene lighting of Image #1
@@ -291,6 +292,7 @@ function describeGarmentRole(role: string): string {
     bottom: 'GARMENT role: bottom / pants / skirt / shorts',
     dress: 'GARMENT role: dress',
     outerwear: 'GARMENT role: outerwear / jacket / coat',
+    shoes: 'GARMENT role: shoes / footwear',
     full_outfit: 'GARMENT role: full outfit',
     accessory: 'GARMENT role: accessory',
   }

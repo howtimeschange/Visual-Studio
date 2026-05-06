@@ -9,7 +9,7 @@ export interface OutfitLook<T = Record<string, unknown>> {
   roles: string[]
 }
 
-const ROLE_ORDER = ['full_outfit', 'dress', 'top', 'bottom', 'outerwear', 'accessory']
+const ROLE_ORDER = ['full_outfit', 'dress', 'top', 'bottom', 'outerwear', 'shoes', 'accessory']
 
 export function buildOutfitLooks<T extends { id: string; role?: string }>(
   garments: Array<OutfitLookItem<T>>,
@@ -20,11 +20,13 @@ export function buildOutfitLooks<T extends { id: string; role?: string }>(
     top: garments.filter((item) => item.role === 'top'),
     bottom: garments.filter((item) => item.role === 'bottom'),
     outerwear: garments.filter((item) => item.role === 'outerwear'),
+    shoes: garments.filter((item) => item.role === 'shoes'),
     accessory: garments.filter((item) => item.role === 'accessory'),
   }
 
   let baseLooks: Array<Array<OutfitLookItem<T>>> = []
   let optionalOuterwear = groups.outerwear
+  let optionalShoes = groups.shoes
   let optionalAccessory = groups.accessory
 
   if (groups.full_outfit.length > 0) baseLooks.push(...groups.full_outfit.map((item) => [item]))
@@ -43,6 +45,11 @@ export function buildOutfitLooks<T extends { id: string; role?: string }>(
     optionalOuterwear = []
   }
 
+  if (baseLooks.length === 0 && groups.shoes.length > 0) {
+    baseLooks.push(...groups.shoes.map((item) => [item]))
+    optionalShoes = []
+  }
+
   if (baseLooks.length === 0 && groups.accessory.length > 0) {
     baseLooks.push(...groups.accessory.map((item) => [item]))
     optionalAccessory = []
@@ -50,6 +57,7 @@ export function buildOutfitLooks<T extends { id: string; role?: string }>(
 
   let looks = [...baseLooks]
   if (optionalOuterwear.length > 0 && looks.length > 0) looks = expandOutfitLooks(looks, optionalOuterwear)
+  if (optionalShoes.length > 0 && looks.length > 0) looks = expandOutfitLooks(looks, optionalShoes)
   if (optionalAccessory.length > 0 && looks.length > 0) looks = expandOutfitLooks(looks, optionalAccessory)
 
   return dedupeOutfitLooks(looks)

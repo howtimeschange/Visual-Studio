@@ -53,6 +53,7 @@ const GARMENT_ROLE_OPTIONS = [
   { value: 'bottom', label: '下装' },
   { value: 'dress', label: '连衣裙' },
   { value: 'outerwear', label: '外套' },
+  { value: 'shoes', label: '鞋品' },
   { value: 'accessory', label: '配饰' },
 ]
 
@@ -6613,11 +6614,13 @@ function buildOutfitLooks() {
     top: state.outfit.garments.filter((item) => item.role === 'top'),
     bottom: state.outfit.garments.filter((item) => item.role === 'bottom'),
     outerwear: state.outfit.garments.filter((item) => item.role === 'outerwear'),
+    shoes: state.outfit.garments.filter((item) => item.role === 'shoes'),
     accessory: state.outfit.garments.filter((item) => item.role === 'accessory'),
   }
 
   let baseLooks = []
   let optionalOuterwear = groups.outerwear
+  let optionalShoes = groups.shoes
   let optionalAccessory = groups.accessory
 
   if (groups.full_outfit.length > 0) {
@@ -6641,6 +6644,11 @@ function buildOutfitLooks() {
     optionalOuterwear = []
   }
 
+  if (baseLooks.length === 0 && groups.shoes.length > 0) {
+    baseLooks.push(...groups.shoes.map((item) => [item]))
+    optionalShoes = []
+  }
+
   if (baseLooks.length === 0 && groups.accessory.length > 0) {
     baseLooks.push(...groups.accessory.map((item) => [item]))
     optionalAccessory = []
@@ -6650,6 +6658,10 @@ function buildOutfitLooks() {
 
   if (optionalOuterwear.length > 0 && looks.length > 0) {
     looks = expandOutfitLooks(looks, optionalOuterwear)
+  }
+
+  if (optionalShoes.length > 0 && looks.length > 0) {
+    looks = expandOutfitLooks(looks, optionalShoes)
   }
 
   if (optionalAccessory.length > 0 && looks.length > 0) {
@@ -6706,7 +6718,8 @@ function createLook(items) {
 }
 
 function garmentRoleOrder(role) {
-  return ['full_outfit', 'dress', 'top', 'bottom', 'outerwear', 'accessory'].indexOf(role || 'full_outfit')
+  const index = ['full_outfit', 'dress', 'top', 'bottom', 'outerwear', 'shoes', 'accessory'].indexOf(role || 'full_outfit')
+  return index === -1 ? 99 : index
 }
 
 function getOutfitLookFileLabel(look) {
