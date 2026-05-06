@@ -4,9 +4,9 @@
 //   modelId,
 //   model:    { base64, mime },     // person photo
 //   garment?: { base64, mime },     // legacy single clothing photo
-//   garments?: [{ base64, mime, role?, label? }],
+//   garments?: [{ base64, mime, role?, label?, instructions? }],
 //   garmentType?: 'top'|'bottom'|'dress'|'outerwear'|'full_outfit'|'shoes'|'accessory',
-//   instructions?: string,          // free-form extra requests (pose, background)
+//   instructions?: string,          // legacy global free-form extra requests
 //   clientKeys?
 // }
 // Returns: { resultDataUrl }
@@ -85,6 +85,7 @@ type GarmentItem = {
   mime?: string
   role?: string
   label?: string
+  instructions?: string
 }
 
 type OutfitAnalysis = {
@@ -121,6 +122,7 @@ function normalizeGarments(
         mime: item.mime || 'image/jpeg',
         role: item.role || garmentType || 'full_outfit',
         label: item.label || '',
+        instructions: cleanGarmentInstructions(item.instructions),
       }))
   }
 
@@ -130,6 +132,7 @@ function normalizeGarments(
       mime: garment.mime || 'image/jpeg',
       role: garmentType || 'full_outfit',
       label: '',
+      instructions: '',
     }]
   }
 
@@ -241,6 +244,7 @@ ${analysis.garments.map((item) => {
   return `- Image #${item.index}: ${details || 'preserve all visible garment details'}`
 }).join('\n')}`
     : ''
+  const perGarmentInstructions = buildPerGarmentInstructions(garments)
 
   return `# VIRTUAL TRY-ON / OUTFIT SWAP
 
@@ -283,7 +287,25 @@ ${garmentLines}
 - If a garment reference is a flat-lay or product cutout, transfer the garment itself only; do not import its background or mannequin
 
 ${instructions ? `## ADDITIONAL INSTRUCTIONS\n${instructions}\n` : ''}
+${perGarmentInstructions ? `## PER-GARMENT ADDITIONAL INSTRUCTIONS\n${perGarmentInstructions}\n` : ''}
 Return one final composed image.`
+}
+
+function cleanGarmentInstructions(value: unknown): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 800)
+}
+
+function buildPerGarmentInstructions(garments: GarmentItem[]): string {
+  return garments
+    .map((item, index) => {
+      const text = cleanGarmentInstructions(item.instructions)
+      if (!text) return ''
+      const role = describeGarmentRole(item.role || 'full_outfit')
+      const label = item.label ? ` · ${item.label}` : ''
+      return `- Image #${index + 2}: ${role}${label}\n  Apply only to this garment: ${text}`
+    })
+    .filter(Boolean)
+    .join('\n')
 }
 
 function describeGarmentRole(role: string): string {

@@ -72,6 +72,19 @@ function clampMs(value: unknown, fallback: number): number {
   return Math.min(24 * 60 * 60_000, Math.max(60_000, numeric))
 }
 
+function cleanInstruction(value: unknown): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 800)
+}
+
+function getOutfitGarmentFingerprint(
+  garments: Array<{ assetId: string; role: string; instructions: string }>,
+): string {
+  return garments
+    .map((item) => `${item.assetId}:${item.role || 'full_outfit'}:${cleanInstruction(item.instructions)}`)
+    .sort()
+    .join('|')
+}
+
 async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
   let index = 0
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -419,20 +432,31 @@ export async function submitOutfitBatch(
   const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
   const session = await ensureSession(env, body?.sessionId, userId)
   const modelAssetIds = Array.isArray(body?.modelAssetIds) ? body.modelAssetIds.filter(Boolean) : []
-  const garments = Array.isArray(body?.garments) ? body.garments.filter((item) => item?.assetId) : []
+  const garments = Array.isArray(body?.garments)
+    ? body.garments
+      .filter((item) => item?.assetId)
+      .map((item: any) => ({
+        assetId: String(item.assetId),
+        role: item.role || 'full_outfit',
+        label: String(item.label || item.assetId),
+        instructions: cleanInstruction(item.instructions),
+      }))
+    : []
   if (modelAssetIds.length === 0) throw createRunnerError('modelAssetIds required', 400)
   if (garments.length === 0) throw createRunnerError('garments required', 400)
 
-  const looks = buildOutfitLooks(garments.map((item: any) => ({
-    id: String(item.assetId),
-    role: item.role || 'full_outfit',
-    assetId: String(item.assetId),
-    label: String(item.label || item.assetId),
+  const looks = buildOutfitLooks(garments.map((item) => ({
+    id: item.assetId,
+    role: item.role,
+    assetId: item.assetId,
+    label: item.label,
+    instructions: item.instructions,
   })))
   if (looks.length === 0) throw createRunnerError('No outfit looks could be built', 400)
 
   const jobId = createId('job')
   const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
+  const garmentFingerprint = getOutfitGarmentFingerprint(garments)
   const job = await createJob(env, {
     id: jobId,
     sessionId: session.id,
@@ -441,13 +465,15 @@ export async function submitOutfitBatch(
     status: 'queued',
     configJson: {
       modelId: body?.modelId || 'nano-banana-pro',
-      instructions: body?.instructions || '',
-      garmentRoles: garments.map((item: any) => `${item.assetId}:${item.role || 'full_outfit'}`).sort(),
+      instructions: cleanInstruction(body?.instructions),
+      garmentRoles: garments.map((item) => `${item.assetId}:${item.role}`).sort(),
+      garmentInstructions: garments.map((item) => `${item.assetId}:${item.instructions}`).sort(),
+      garmentFingerprint,
       concurrency: clampInt(body?.concurrency, 1, 4, 2),
       sealedCredentialId,
       configHash: await stableHash({
         modelId: body?.modelId || 'nano-banana-pro',
-        instructions: body?.instructions || '',
+        instructions: cleanInstruction(body?.instructions),
         garments,
         modelAssetIds,
       }),
@@ -467,6 +493,8 @@ export async function submitOutfitBatch(
         modelAssetId,
         lookAssetIds: look.items.map((item) => item.assetId || item.id),
         lookRoles: look.roles,
+        lookLabels: look.items.map((item) => item.label || item.assetId || item.id),
+        lookInstructions: look.items.map((item) => cleanInstruction(item.instructions)),
         lookId: look.id,
       },
       outputJson: {},
@@ -527,7 +555,12 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
           base64: image.base64,
           mime: image.mime,
           role: Array.isArray(item.inputJson.lookRoles) ? item.inputJson.lookRoles[index] : 'full_outfit',
-          label: Array.isArray(item.inputJson.lookAssetIds) ? String(item.inputJson.lookAssetIds[index]) : '',
+          label: Array.isArray(item.inputJson.lookLabels)
+            ? String(item.inputJson.lookLabels[index] || '')
+            : (Array.isArray(item.inputJson.lookAssetIds) ? String(item.inputJson.lookAssetIds[index]) : ''),
+          instructions: Array.isArray(item.inputJson.lookInstructions)
+            ? cleanInstruction(item.inputJson.lookInstructions[index])
+            : '',
         }
       })
 

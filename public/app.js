@@ -213,7 +213,6 @@ const state = {
     model: 'nano-banana-pro',
     garmentType: 'full_outfit',
     concurrency: 2,
-    instructions: '',
     models: [],
     garments: [],
     results: {},
@@ -375,7 +374,6 @@ const dom = {
   oGarmentList: $('#o-garment-list'),
   oGarmentCount: $('#o-garment-count'),
   oLookCount: $('#o-look-count'),
-  oInstructions: $('#o-instructions'),
   oRun: $('#o-run'),
   oClear: $('#o-clear'),
   oDl: $('#o-dl'),
@@ -597,7 +595,6 @@ function sanitizeOutfitPrefs(raw = {}) {
     model: getModel(raw.model)?.id || state.outfit.model,
     garmentType,
     concurrency: clamp(Number(raw.concurrency) || state.outfit.concurrency, 1, 4),
-    instructions: typeof raw.instructions === 'string' ? raw.instructions : state.outfit.instructions,
   }
 }
 
@@ -622,7 +619,6 @@ function savePrefs() {
       model: state.outfit.model,
       garmentType: state.outfit.garmentType,
       concurrency: state.outfit.concurrency,
-      instructions: state.outfit.instructions,
     },
     style: {
       model: state.style.model,
@@ -653,7 +649,10 @@ function saveRuntimeState(options = {}) {
     outfit: {
       jobId: state.outfit.jobId || '',
       models: state.outfit.models.map((item) => serializeAssetBackedItem(item)),
-      garments: state.outfit.garments.map((item) => serializeAssetBackedItem(item, { role: item.role || 'full_outfit' })),
+      garments: state.outfit.garments.map((item) => serializeAssetBackedItem(item, {
+        role: item.role || 'full_outfit',
+        instructions: normalizeGarmentInstructions(item.instructions),
+      })),
     },
     style: {
       sourceImage: state.style.sourceImage ? serializeAssetBackedItem(state.style.sourceImage) : null,
@@ -845,16 +844,20 @@ function activateAiSession(sessionId) {
   state.generate.aiRefs = []
 }
 
-function ensureCurrentAiSession() {
+function ensureAiSessionSelection() {
   if (!state.generate.aiSessions.length) {
     const session = createAiSessionRecord({ messages: state.generate.aiMessages })
     state.generate.aiSessions = [session]
     state.generate.aiSessionId = session.id
-    state.generate.aiMessages = sanitizeAiMessages(session.messages)
     return session
   }
   const session = state.generate.aiSessions.find((item) => item.id === state.generate.aiSessionId) || state.generate.aiSessions[0]
   state.generate.aiSessionId = session.id
+  return session
+}
+
+function ensureCurrentAiSession() {
+  const session = ensureAiSessionSelection()
   state.generate.aiMessages = sanitizeAiMessages(session.messages)
   return session
 }
@@ -1142,6 +1145,10 @@ function serializeAssetBackedItem(item, extra = {}) {
   }
 }
 
+function normalizeGarmentInstructions(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 800)
+}
+
 function sanitizeStoredAssetItem(raw = {}) {
   const assetId = String(raw.assetId || raw.id || '').trim()
   if (!assetId) return null
@@ -1152,6 +1159,7 @@ function sanitizeStoredAssetItem(raw = {}) {
     mime: String(raw.mime || 'image/png'),
     label: typeof raw.label === 'string' ? raw.label : '',
     role: typeof raw.role === 'string' ? raw.role : '',
+    instructions: typeof raw.instructions === 'string' ? normalizeGarmentInstructions(raw.instructions) : '',
     dataUrl: '',
     base64: '',
   }
@@ -3312,7 +3320,8 @@ function renderAiRefList() {
 
 function renderAiSessionControls() {
   if (!dom.gAiSession) return
-  ensureCurrentAiSession()
+  ensureAiSessionSelection()
+  if (state.generate.aiMessages.length) persistCurrentAiSession()
   const options = state.generate.aiSessions.slice().reverse().map((session, index) => {
     const option = document.createElement('option')
     option.value = session.id
@@ -3747,11 +3756,6 @@ function bindOutfit() {
     renderOutfit()
   })
 
-  dom.oInstructions.addEventListener('input', () => {
-    state.outfit.instructions = dom.oInstructions.value
-    savePrefs()
-  })
-
   dom.oModelAdd.addEventListener('click', () => {
     if (isOutfitBusy()) return
     dom.oModelInput.click()
@@ -3800,6 +3804,7 @@ function bindOutfit() {
       state.outfit.garments.push(...images.map((item) => ({
         ...item,
         role: state.outfit.garmentType,
+        instructions: '',
       })))
       pruneOutfitResults()
       state.outfit.progress = ''
@@ -4549,7 +4554,6 @@ function renderOutfit() {
   dom.oModel.value = state.outfit.model
   dom.oGarmentType.value = state.outfit.garmentType
   dom.oConcurrency.value = String(state.outfit.concurrency)
-  dom.oInstructions.value = state.outfit.instructions
   dom.oProgress.textContent = state.outfit.progress
   dom.oModelCount.textContent = String(state.outfit.models.length)
   dom.oGarmentCount.textContent = String(state.outfit.garments.length)
@@ -4560,7 +4564,6 @@ function renderOutfit() {
   dom.oModel.disabled = busy
   dom.oGarmentType.disabled = busy
   dom.oConcurrency.disabled = busy
-  dom.oInstructions.disabled = busy
   dom.oModelAdd.disabled = busy
   dom.oGarmentAdd.disabled = busy
 
@@ -4577,8 +4580,7 @@ function renderOutfit() {
 
   const signature = getOutfitSignature({
     modelId: state.outfit.model,
-    garmentRoles: getOutfitRoleFingerprint(),
-    instructions: state.outfit.instructions.trim(),
+    garmentFingerprint: getOutfitGarmentFingerprint(),
   })
 
   const thead = document.createElement('thead')
@@ -4650,6 +4652,24 @@ function renderLaneList(container, items, kind) {
         renderOutfit()
       })
       node.append(roleSelect)
+
+      const instructionInput = document.createElement('input')
+      instructionInput.type = 'text'
+      instructionInput.className = 'lane-instruction-input'
+      instructionInput.placeholder = '这个款的特殊要求…'
+      instructionInput.value = item.instructions || ''
+      instructionInput.disabled = busy
+      instructionInput.setAttribute('aria-label', `${basename(item.name)} 的额外要求`)
+      instructionInput.addEventListener('input', () => {
+        item.instructions = instructionInput.value.slice(0, 800)
+        saveRuntimeState()
+      })
+      instructionInput.addEventListener('change', () => {
+        item.instructions = normalizeGarmentInstructions(instructionInput.value)
+        saveRuntimeState()
+        renderOutfit()
+      })
+      node.append(instructionInput)
     }
 
     const caption = document.createElement('div')
@@ -4707,6 +4727,7 @@ async function runTranslateBatch() {
 }
 
 async function runOutfitBatch() {
+  normalizeOutfitGarmentInstructions()
   const looks = buildOutfitLooks()
   if (isOutfitBusy() || state.outfit.models.length === 0 || looks.length === 0) return
 
@@ -4737,9 +4758,9 @@ async function runOutfitBatch() {
         assetId: item.assetId || item.id,
         role: item.role || 'full_outfit',
         label: basename(item.name),
+        instructions: normalizeGarmentInstructions(item.instructions),
       })),
       modelId: runConfig.modelId,
-      instructions: runConfig.instructions,
       concurrency: state.outfit.concurrency,
       clientKeys: runConfig.clientKeys,
     })
@@ -4767,8 +4788,7 @@ function getTranslateRunConfig() {
 function getOutfitRunConfig() {
   return {
     modelId: state.outfit.model,
-    garmentRoles: getOutfitRoleFingerprint(),
-    instructions: state.outfit.instructions.trim(),
+    garmentFingerprint: getOutfitGarmentFingerprint(),
     clientKeys: { ...state.keys },
   }
 }
@@ -4826,8 +4846,8 @@ async function executeOutfitJob({ model, look, key, runConfig, signature }) {
           mime: garment.mime,
           role: garment.role,
           label: basename(garment.name),
+          instructions: normalizeGarmentInstructions(garment.instructions),
         })),
-        instructions: runConfig.instructions,
         clientKeys: runConfig.clientKeys,
       })
     }, {
@@ -5487,6 +5507,7 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       height: image.height,
       label: basename(image.name),
       role: '',
+      instructions: '',
     })
   }
 
@@ -6257,12 +6278,22 @@ function getTranslateSignatureFromJob(job) {
 }
 
 function getOutfitSignatureFromJob(job) {
+  const garmentFingerprint = String(job?.configJson?.garmentFingerprint || '').trim()
+  if (garmentFingerprint) {
+    return getOutfitSignature({
+      modelId: String(job?.configJson?.modelId || state.outfit.model),
+      garmentFingerprint,
+    })
+  }
+
+  const garmentParts = [
+    ...(Array.isArray(job?.configJson?.garmentRoles) ? job.configJson.garmentRoles : []),
+    ...(Array.isArray(job?.configJson?.garmentInstructions) ? job.configJson.garmentInstructions : []),
+    String(job?.configJson?.instructions || ''),
+  ].filter(Boolean)
   return getOutfitSignature({
     modelId: String(job?.configJson?.modelId || state.outfit.model),
-    garmentRoles: Array.isArray(job?.configJson?.garmentRoles)
-      ? job.configJson.garmentRoles.join('|')
-      : String(job?.configJson?.garmentRoles || ''),
-    instructions: String(job?.configJson?.instructions || ''),
+    garmentFingerprint: garmentParts.length ? garmentParts.sort().join('|') : getOutfitGarmentFingerprint(),
   })
 }
 
@@ -6921,16 +6952,21 @@ function getTranslateSignature(config) {
 function getOutfitSignature(config) {
   return JSON.stringify({
     modelId: config.modelId,
-    garmentRoles: config.garmentRoles || '',
-    instructions: config.instructions || '',
+    garmentFingerprint: config.garmentFingerprint || '',
   })
 }
 
-function getOutfitRoleFingerprint() {
+function getOutfitGarmentFingerprint() {
   return state.outfit.garments
-    .map((item) => `${item.id}:${item.role || 'full_outfit'}`)
+    .map((item) => `${item.id}:${item.role || 'full_outfit'}:${normalizeGarmentInstructions(item.instructions)}`)
     .sort()
     .join('|')
+}
+
+function normalizeOutfitGarmentInstructions() {
+  for (const item of state.outfit.garments) {
+    item.instructions = normalizeGarmentInstructions(item.instructions)
+  }
 }
 
 function buildOutfitLooks() {

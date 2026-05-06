@@ -80,6 +80,53 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
   }
 })
 
+test('submitOutfitBatch stores per-garment instructions on each queued look item', async () => {
+  const { mod, cleanup } = await importRunner()
+  const env = {
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  try {
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: 'session_outfit_instructions',
+      modelAssetIds: ['model_1'],
+      modelId: 'gpt-image-2',
+      garments: [
+        {
+          assetId: 'top_1',
+          role: 'top',
+          label: 'top.png',
+          instructions: 'Make the collar more structured.',
+        },
+        {
+          assetId: 'bottom_1',
+          role: 'bottom',
+          label: 'bottom.png',
+          instructions: 'Keep the skirt knee-length.',
+        },
+      ],
+      concurrency: 1,
+    })
+
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    const job = await mod.getJob(env, submitted.jobId)
+
+    assert.deepEqual(item.inputJson.lookAssetIds, ['top_1', 'bottom_1'])
+    assert.deepEqual(item.inputJson.lookInstructions, [
+      'Make the collar more structured.',
+      'Keep the skirt knee-length.',
+    ])
+    assert.equal(
+      job.configJson.garmentFingerprint,
+      'bottom_1:bottom:Keep the skirt knee-length.|top_1:top:Make the collar more structured.',
+    )
+  } finally {
+    await cleanup()
+  }
+})
+
 test('runQueuedJob fails a queued job instead of leaving it pending when setup crashes', async () => {
   const { mod, cleanup } = await importRunner()
   const env = { VS_JOB_CREDENTIAL_KEK: 'shared-job-secret' }

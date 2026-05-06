@@ -111,3 +111,86 @@ test('executeOutfitSwap describes shoes in the prompt sent to the image model', 
     await cleanup()
   }
 })
+
+test('executeOutfitSwap includes per-garment instructions beside the matching reference', async () => {
+  const { mod, cleanup } = await importOutfitSwap()
+  const originalFetch = globalThis.fetch
+  const calls = []
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return okImageResponse('c3R5bGVkLXJlc3VsdA==')
+  }
+
+  try {
+    await mod.executeOutfitSwap({
+      modelId: 'gpt-image-2',
+      model: { base64: 'bW9kZWw=', mime: 'image/png' },
+      garments: [
+        { base64: 'dG9w', mime: 'image/png', role: 'top', label: 'top.png' },
+        {
+          base64: 'c2hvZXM=',
+          mime: 'image/png',
+          role: 'shoes',
+          label: 'shoes.png',
+          instructions: 'Make these shoes bright red and keep the chunky sole visible.',
+        },
+      ],
+      clientKeys: { gptImageApiKey: 'test-key' },
+    }, {})
+
+    const prompt = calls[0].init.body.get('prompt')
+    const instructionSection = prompt.match(/## PER-GARMENT ADDITIONAL INSTRUCTIONS\n([\s\S]*?)(?:\n\n##|\nReturn|$)/i)?.[1] || ''
+
+    assert.match(prompt, /## PER-GARMENT ADDITIONAL INSTRUCTIONS/i)
+    assert.match(instructionSection, /Image #3[\s\S]*Make these shoes bright red and keep the chunky sole visible\./i)
+    assert.doesNotMatch(instructionSection, /Image #2[^\n]*Make these shoes bright red and keep the chunky sole visible\./i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('executeOutfitSwap keeps queued look item instructions aligned with their image order', async () => {
+  const { mod, cleanup } = await importOutfitSwap()
+  const originalFetch = globalThis.fetch
+  const calls = []
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return okImageResponse('bG9vay1yZXN1bHQ=')
+  }
+
+  try {
+    await mod.executeOutfitSwap({
+      modelId: 'gpt-image-2',
+      model: { base64: 'bW9kZWw=', mime: 'image/png' },
+      garments: [
+        {
+          base64: 'Ym90dG9t',
+          mime: 'image/png',
+          role: 'bottom',
+          label: 'bottom.png',
+          instructions: 'Keep the skirt knee-length.',
+        },
+        {
+          base64: 'dG9w',
+          mime: 'image/png',
+          role: 'top',
+          label: 'top.png',
+          instructions: 'Make the collar more structured.',
+        },
+      ],
+      clientKeys: { gptImageApiKey: 'test-key' },
+    }, {})
+
+    const prompt = calls[0].init.body.get('prompt')
+    const instructionSection = prompt.match(/## PER-GARMENT ADDITIONAL INSTRUCTIONS\n([\s\S]*?)(?:\n\n##|\nReturn|$)/i)?.[1] || ''
+
+    assert.match(instructionSection, /Image #2[\s\S]*Keep the skirt knee-length\./i)
+    assert.match(instructionSection, /Image #3[\s\S]*Make the collar more structured\./i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})

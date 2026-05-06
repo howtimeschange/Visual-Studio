@@ -47,6 +47,18 @@ async function createHistoryHarness() {
     renderAiMessages: () => {},
     renderAiRefList: () => {},
     renderAiSessionControls: () => {},
+    dom: {
+      gAiSession: {
+        replaceChildren(...children) { this.children = children },
+        value: '',
+        disabled: false,
+      },
+      gAiNewSession: { disabled: false },
+      gAiClearSession: { disabled: false },
+    },
+    document: {
+      createElement: () => ({ value: '', textContent: '' }),
+    },
     crypto: {
       randomUUID: () => `test-id-${++idCounter}`,
     },
@@ -90,9 +102,11 @@ async function createHistoryHarness() {
     'inferAiSessionTitle',
     'persistCurrentAiSession',
     'activateAiSession',
+    'ensureAiSessionSelection',
     'ensureCurrentAiSession',
     'startNewAiSession',
     'clearCurrentAiSession',
+    'renderAiSessionControls',
     'serializeAiMessage',
     'serializeAiMessageRef',
     'sanitizeAiMessages',
@@ -183,5 +197,24 @@ test('clear AI session empties only the active session', async () => {
   assert.deepEqual(
     harness.state.generate.aiSessions.find((session) => session.id === 'session-a').messages.map((msg) => msg.content),
     ['A 会话'],
+  )
+})
+
+test('rendering AI session controls does not discard newly queued messages', async () => {
+  const harness = await createHistoryHarness()
+  harness.state.generate.aiSessions = [
+    harness.createAiSessionRecord({ id: 'session-a', messages: [] }),
+  ]
+  harness.state.generate.aiSessionId = 'session-a'
+  harness.state.generate.aiMessages = [
+    { id: 'live-1', role: 'user', content: '刚发送的需求' },
+    { id: 'live-2', role: 'assistant', content: '', loading: true },
+  ]
+
+  harness.renderAiSessionControls()
+
+  assert.deepEqual(
+    harness.state.generate.aiMessages.map((msg) => msg.content),
+    ['刚发送的需求', ''],
   )
 })
