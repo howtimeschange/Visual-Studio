@@ -82,3 +82,20 @@ test('unchanged canvas text does not schedule redundant saves', async () => {
   assert.equal(element.content, '同一段文案')
   assert.equal(saveCount, 0)
 })
+
+test('outfit run summary shows real look and item counts before submit', async () => {
+  const harness = await loadHarness(['formatOutfitRunEstimate'])
+
+  assert.equal(
+    harness.formatOutfitRunEstimate(3, 5),
+    '将生成 5 套搭配，共 15 张图',
+  )
+  assert.equal(
+    harness.formatOutfitRunEstimate(1, 1),
+    '将生成 1 套搭配，共 1 张图',
+  )
+  assert.equal(
+    harness.formatOutfitRunEstimate(0, 4),
+    '',
+  )
+})

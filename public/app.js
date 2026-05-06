@@ -143,7 +143,7 @@ const state = {
     targets: ['en'],
     model: 'nano-banana-2',
     preserveBrand: true,
-    concurrency: 2,
+    concurrency: 3,
     items: [],
     running: false,
     progress: '',
@@ -243,9 +243,9 @@ const state = {
     prompt: '',
   },
   outfit: {
-    model: 'nano-banana-pro',
+    model: 'nano-banana-2',
     garmentType: 'full_outfit',
-    concurrency: 2,
+    concurrency: 3,
     models: [],
     garments: [],
     results: {},
@@ -5870,10 +5870,11 @@ function renderOutfit() {
   const busy = isOutfitBusy()
   const showLoadedWorkspace = shouldShowLoadedJobWorkspace('outfit')
   const looks = buildOutfitLooks()
+  const runEstimate = formatOutfitRunEstimate(state.outfit.models.length, looks.length)
   dom.oModel.value = state.outfit.model
   dom.oGarmentType.value = state.outfit.garmentType
   dom.oConcurrency.value = String(state.outfit.concurrency)
-  dom.oProgress.textContent = state.outfit.progress
+  dom.oProgress.textContent = state.outfit.progress || runEstimate
   dom.oModelCount.textContent = String(state.outfit.models.length)
   dom.oGarmentCount.textContent = String(state.outfit.garments.length)
   dom.oLookCount.textContent = String(looks.length)
@@ -5920,6 +5921,13 @@ function renderOutfit() {
   }
 
   dom.oGrid.replaceChildren(thead, tbody)
+}
+
+function formatOutfitRunEstimate(modelCount, lookCount) {
+  const models = Math.max(0, Math.floor(Number(modelCount) || 0))
+  const looks = Math.max(0, Math.floor(Number(lookCount) || 0))
+  if (!models || !looks) return ''
+  return `将生成 ${looks} 套搭配，共 ${models * looks} 张图`
 }
 
 function renderLaneList(container, items, kind) {

@@ -5,6 +5,20 @@ import { readFile } from 'node:fs/promises'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
 
+function extractStateInitializer(source) {
+  const start = source.indexOf('const state = {')
+  if (start === -1) throw new Error('Could not find state initializer')
+  const bodyStart = source.indexOf('{', start)
+  let depth = 0
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '{') depth += 1
+    if (char === '}') depth -= 1
+    if (depth === 0) return source.slice(bodyStart, index + 1)
+  }
+  throw new Error('Could not extract state initializer')
+}
+
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`)
   if (start === -1) return ''
@@ -168,6 +182,18 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
   vm.runInContext(harnessSource, context)
   return { ...context, writes, storage }
 }
+
+test('app defaults batch translation and outfit to nano banana 2 with concurrency 3', async () => {
+  const source = await readFile(APP_PATH, 'utf8')
+  const state = vm.runInNewContext(`(${extractStateInitializer(source)})`, {
+    DEFAULT_CANVAS_PROJECT_TITLE: '未命名画布',
+  })
+
+  assert.equal(state.translate.model, 'nano-banana-2')
+  assert.equal(state.translate.concurrency, 3)
+  assert.equal(state.outfit.model, 'nano-banana-2')
+  assert.equal(state.outfit.concurrency, 3)
+})
 
 test('writeRuntimeStorageSnapshot falls back to a compact snapshot when quota is exceeded', async () => {
   const harness = await createRuntimeHarness({ failLargeWrites: true })

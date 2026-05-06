@@ -6,16 +6,19 @@ import {
 import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
+type OcrTextItem = {
+  original: string
+  translation: string | null
+  translations?: Record<string, string | null>
+  keep: boolean
+  keepReason?: string
+  position: string
+  size: string
+  style: string
+}
+
 interface OcrResult {
-  texts: Array<{
-    original: string
-    translation: string | null
-    keep: boolean
-    keepReason?: string
-    position: string
-    size: string
-    style: string
-  }>
+  texts: OcrTextItem[]
   sourceLang: string
   textCount: number
   keepCount: number
@@ -27,6 +30,7 @@ interface OcrReviewResult {
   texts?: Array<{
     index: number
     translation?: string | null
+    translations?: Record<string, string | null>
     keep?: boolean
     keepReason?: string
   }>
@@ -108,12 +112,15 @@ export async function executeTranslate(body: any, env: Env) {
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
   if (!genKey) throw createTranslateError(`Missing API key for ${modelId}`, 400)
 
-  let ocr: OcrResult | null = null
-  if (visionKey) {
-    ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, targetLanguage, preserveBrand)
+  let ocr: OcrResult | null = body?.ocrPlan
+    ? selectOcrPlanForTarget(body.ocrPlan as OcrResult, targetLanguage)
+    : null
+  if (!ocr && visionKey) {
+    ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, [targetLanguage], preserveBrand)
     if (ocr) {
       ocr.sourceLang = normalizeLanguageCode(ocr.sourceLang, sourceLanguage)
-      ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, targetLanguage, preserveBrand) ?? ocr
+      ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, [targetLanguage], preserveBrand) ?? ocr
+      ocr = selectOcrPlanForTarget(ocr, targetLanguage)
     }
   }
 
@@ -138,6 +145,30 @@ export async function executeTranslate(body: any, env: Env) {
   }
 }
 
+export async function prepareTranslatePlan(body: any, env: Env): Promise<OcrResult | null> {
+  const {
+    imageBase64, mime = 'image/jpeg',
+    sourceLanguage = 'auto',
+    modelId = 'nano-banana-2', preserveBrand = true,
+    clientKeys = {},
+  } = body ?? {}
+  const targetLanguages = normalizeTargetLanguages(body?.targetLanguages || body?.targetLanguage)
+
+  if (!imageBase64) throw createTranslateError('imageBase64 required', 400)
+  if (targetLanguages.length === 0) throw createTranslateError('targetLanguages required', 400)
+  if (!MODEL_MAP[modelId]) throw createTranslateError(`Unknown modelId: ${modelId}`, 400)
+
+  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const { visionKey } = resolveKeys(modelId, env, clientKeys)
+  if (!visionKey) return null
+
+  let ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, targetLanguages, preserveBrand)
+  if (!ocr) return null
+  ocr.sourceLang = normalizeLanguageCode(ocr.sourceLang, sourceLanguage)
+  ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, targetLanguages, preserveBrand) ?? ocr
+  return normalizeOcrPlan(ocr, targetLanguages)
+}
+
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   let body: any
   try { body = await request.json() } catch { return json({ error: 'Invalid JSON' }, 400) }
@@ -160,9 +191,9 @@ function createTranslateError(message: string, status = 502) {
 async function analyzeImageText(
   baseUrl: string, visionKey: string,
   base64: string, mime: string,
-  sourceLanguage: string, targetLanguage: string, preserveBrand: boolean,
+  sourceLanguage: string, targetLanguages: string[], preserveBrand: boolean,
 ): Promise<OcrResult | null> {
-  const targetLangName = LANG_NAMES[targetLanguage] ?? targetLanguage
+  const targetLangName = formatTargetLanguageNames(targetLanguages)
   const sourceLangHint = sourceLanguage === 'auto'
     ? 'Detect the source language automatically.'
     : `The source language is ${LANG_NAMES[sourceLanguage] ?? sourceLanguage}.`
@@ -205,12 +236,14 @@ ${preserveSection}
   "textCount": <n>, "keepCount": <n>, "translateCount": <n>,
   "texts": [{
     "original": "...", "translation": "..." or null, "keep": true|false,
+    "translations": { "ja": "...", "ko": "..." },
     "keepReason": "brand|logo|sku|trademark|product_name|url|certification",
     "position": "topLeft|topCenter|topRight|centerLeft|center|centerRight|bottomLeft|bottomCenter|bottomRight",
     "size": "large|medium|small|tiny", "style": "bold|italic|normal|decorative|outline"
   }]
 }
-CRITICAL: Do NOT omit ANY text. Small/tiny text must all be listed.`
+CRITICAL: Do NOT omit ANY text. Small/tiny text must all be listed.
+For every item where keep=false, fill "translations" for EACH target language code: ${targetLanguages.join(', ')}.`
 
   const raw = await callTextModel(
     baseUrl, visionKey, VISION_MODEL,
@@ -230,15 +263,15 @@ async function reviewOcrPlan(
   baseUrl: string,
   visionKey: string,
   ocr: OcrResult,
-  targetLanguage: string,
+  targetLanguages: string[],
   preserveBrand: boolean,
 ): Promise<OcrResult | null> {
   const reviewable = ocr.texts.filter((item) => item.original?.trim())
   if (reviewable.length === 0) return ocr
 
-  const targetLangName = LANG_NAMES[targetLanguage] ?? targetLanguage
+  const targetLangName = formatTargetLanguageNames(targetLanguages)
   const itemLines = reviewable.map((item, index) => {
-    const translated = item.translation ? `"${item.translation}"` : 'null'
+    const translated = formatOcrTranslationsForPrompt(item, targetLanguages)
     return `${index + 1}. keep=${item.keep} size=${item.size} position=${item.position} original="${item.original}" proposed=${translated}${item.keepReason ? ` keepReason=${item.keepReason}` : ''}`
   }).join('\n')
 
@@ -258,7 +291,7 @@ Return JSON only:
 {
   "sourceLang": "${ocr.sourceLang}",
   "texts": [
-    { "index": 1, "keep": false, "translation": "..." or null, "keepReason": "brand|logo|sku|trademark|product_name|url|certification" or null }
+    { "index": 1, "keep": false, "translations": { "ja": "...", "ko": "..." }, "keepReason": "brand|logo|sku|trademark|product_name|url|certification" or null }
   ]
 }
 
@@ -352,14 +385,18 @@ function mergeReviewedOcr(ocr: OcrResult, reviewed: OcrReviewResult): OcrResult 
     if (!update) return item
 
     const keep = typeof update.keep === 'boolean' ? update.keep : item.keep
+    const translations = keep
+      ? {}
+      : sanitizeReviewedTranslations(update.translations, item.translations, item.translation, item.original)
     const translation = keep
       ? null
-      : sanitizeReviewedTranslation(update.translation, item.translation, item.original)
+      : sanitizeReviewedTranslation(update.translation, item.translation || firstTranslation(translations), item.original)
 
     return {
       ...item,
       keep,
       translation,
+      translations,
       keepReason: keep
         ? normalizeKeepReason(update.keepReason || item.keepReason || 'brand')
         : undefined,
@@ -368,6 +405,116 @@ function mergeReviewedOcr(ocr: OcrResult, reviewed: OcrReviewResult): OcrResult 
 
   return {
     sourceLang: normalizeLanguageCode(reviewed.sourceLang, ocr.sourceLang),
+    texts,
+    textCount: texts.length,
+    keepCount: texts.filter((item) => item.keep).length,
+    translateCount: texts.filter((item) => !item.keep).length,
+  }
+}
+
+function normalizeTargetLanguages(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : [value]
+  return raw
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .filter((item, index, list) => list.indexOf(item) === index)
+}
+
+function formatTargetLanguageNames(targetLanguages: string[]): string {
+  return targetLanguages
+    .map((language) => `${LANG_NAMES[language] ?? language} (${language})`)
+    .join(', ')
+}
+
+function formatOcrTranslationsForPrompt(item: OcrTextItem, targetLanguages: string[]): string {
+  const translations = item.translations && typeof item.translations === 'object' ? item.translations : {}
+  const mapped = targetLanguages.map((language) => {
+    const value = translations[language] || (targetLanguages.length === 1 ? item.translation : '')
+    return `${language}=${value ? `"${value}"` : 'null'}`
+  })
+  return `{ ${mapped.join(', ')} }`
+}
+
+function firstTranslation(translations: Record<string, string | null> = {}): string {
+  for (const value of Object.values(translations)) {
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return ''
+}
+
+function sanitizeReviewedTranslations(
+  candidate: unknown,
+  fallback: unknown,
+  legacyFallback: string | null | undefined,
+  original: string,
+): Record<string, string | null> {
+  const out: Record<string, string | null> = {}
+  const candidateMap = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {}
+  const fallbackMap = fallback && typeof fallback === 'object' ? fallback as Record<string, unknown> : {}
+  for (const key of new Set([...Object.keys(fallbackMap), ...Object.keys(candidateMap)])) {
+    out[key] = sanitizeReviewedTranslation(
+      typeof candidateMap[key] === 'string' ? candidateMap[key] as string : null,
+      typeof fallbackMap[key] === 'string' ? fallbackMap[key] as string : legacyFallback,
+      original,
+    )
+  }
+  return out
+}
+
+function normalizeOcrPlan(ocr: OcrResult, targetLanguages: string[]): OcrResult {
+  const texts = Array.isArray(ocr?.texts) ? ocr.texts : []
+  const normalized = texts.map((item) => {
+    const keep = Boolean(item.keep)
+    const translations = keep
+      ? {}
+      : sanitizePlanTranslations(item, targetLanguages)
+    return {
+      ...item,
+      keep,
+      translation: keep ? null : (firstTranslation(translations) || item.translation || item.original),
+      translations,
+    }
+  })
+  return {
+    sourceLang: normalizeLanguageCode(ocr?.sourceLang, 'auto'),
+    texts: normalized,
+    textCount: normalized.length,
+    keepCount: normalized.filter((item) => item.keep).length,
+    translateCount: normalized.filter((item) => !item.keep).length,
+  }
+}
+
+function sanitizePlanTranslations(item: OcrTextItem, targetLanguages: string[]): Record<string, string | null> {
+  const translations = item.translations && typeof item.translations === 'object' ? item.translations : {}
+  const out: Record<string, string | null> = {}
+  for (const language of targetLanguages) {
+    out[language] = sanitizeReviewedTranslation(
+      typeof translations[language] === 'string' ? translations[language] : null,
+      targetLanguages.length === 1 ? item.translation : '',
+      item.original,
+    )
+  }
+  return out
+}
+
+function selectOcrPlanForTarget(ocr: OcrResult, targetLanguage: string): OcrResult | null {
+  if (!ocr || !Array.isArray(ocr.texts)) return null
+  const texts = ocr.texts.map((item) => {
+    const translations = item.translations && typeof item.translations === 'object' ? item.translations : {}
+    const translation = item.keep
+      ? null
+      : sanitizeReviewedTranslation(
+          typeof translations[targetLanguage] === 'string' ? translations[targetLanguage] : null,
+          item.translation,
+          item.original,
+        )
+    return {
+      ...item,
+      translation,
+    }
+  })
+  return {
+    sourceLang: normalizeLanguageCode(ocr.sourceLang, 'auto'),
     texts,
     textCount: texts.length,
     keepCount: texts.filter((item) => item.keep).length,

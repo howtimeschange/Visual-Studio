@@ -35,8 +35,8 @@ import {
 import { publishEvent } from './v2-events'
 import { createJobQueueMessage, dispatchQueuedJob } from './v2-queue'
 import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
-import { executeTranslate } from '../api/translate'
-import { executeOutfitSwap } from '../api/outfit-swap'
+import { executeTranslate, prepareTranslatePlan } from '../api/translate'
+import { executeOutfitSwap, prepareOutfitAnalysis } from '../api/outfit-swap'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
 import { executeDirectGenerate, normalizeDirectGenerateRequest } from '../api/generate-direct'
 
@@ -87,6 +87,67 @@ function getOutfitGarmentFingerprint(
     .map((item) => `${item.assetId}:${item.role || 'full_outfit'}:${cleanInstruction(item.instructions)}`)
     .sort()
     .join('|')
+}
+
+function createAssetDataUrlCache(env: Env) {
+  const cache = new Map<string, Promise<string | null>>()
+  return (assetId: string) => {
+    const id = String(assetId || '').trim()
+    if (!id) return Promise.resolve(null)
+    if (!cache.has(id)) cache.set(id, getAssetDataUrl(env, id))
+    return cache.get(id) as Promise<string | null>
+  }
+}
+
+function createTranslationPlanCache(env: Env, job: JobRecord, clientKeys: ClientKeys, getCachedAssetDataUrl: (assetId: string) => Promise<string | null>) {
+  const cache = new Map<string, Promise<any | null>>()
+  return async (assetId: string) => {
+    const id = String(assetId || '').trim()
+    if (!id) return null
+    if (!cache.has(id)) {
+      cache.set(id, (async () => {
+        const dataUrl = await getCachedAssetDataUrl(id)
+        if (!dataUrl) throw createRunnerError(`Asset not found: ${id}`, 404)
+        const { mime, base64 } = splitDataUrl(dataUrl)
+        return prepareTranslatePlan({
+          imageBase64: base64,
+          mime,
+          sourceLanguage: job.configJson.sourceLanguage,
+          targetLanguages: job.configJson.targetLanguages,
+          modelId: job.configJson.modelId,
+          preserveBrand: job.configJson.preserveBrand,
+          clientKeys,
+        }, env)
+      })())
+    }
+    return cache.get(id) as Promise<any | null>
+  }
+}
+
+function createOutfitAnalysisCache(env: Env, job: JobRecord, clientKeys: ClientKeys) {
+  const cache = new Map<string, Promise<any | null>>()
+  return (key: string, model: { base64: string; mime: string }, garments: Array<Record<string, unknown>>) => {
+    const cacheKey = String(key || '').trim()
+    if (!cacheKey) return Promise.resolve(null)
+    if (!cache.has(cacheKey)) {
+      cache.set(cacheKey, prepareOutfitAnalysis({
+        modelId: job.configJson.modelId,
+        model,
+        garments,
+        clientKeys,
+      }, env))
+    }
+    return cache.get(cacheKey) as Promise<any | null>
+  }
+}
+
+function getOutfitAnalysisCacheKey(item: JobItemRecord): string {
+  return JSON.stringify({
+    modelAssetId: String(item.inputJson.modelAssetId || ''),
+    lookAssetIds: Array.isArray(item.inputJson.lookAssetIds) ? item.inputJson.lookAssetIds.map(String) : [],
+    lookRoles: Array.isArray(item.inputJson.lookRoles) ? item.inputJson.lookRoles.map(String) : [],
+    lookInstructions: Array.isArray(item.inputJson.lookInstructions) ? item.inputJson.lookInstructions.map(String) : [],
+  })
 }
 
 async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
@@ -266,7 +327,7 @@ export async function submitTranslateBatch(
     sourceLanguage: body?.sourceLanguage || 'auto',
     targetLanguages,
     preserveBrand: body?.preserveBrand !== false,
-    concurrency: Math.max(1, Number(body?.concurrency || 2)),
+    concurrency: Math.max(1, Number(body?.concurrency || 3)),
     assetIds,
     configHash: await stableHash({
       modelId: body?.modelId || 'nano-banana-2',
@@ -324,6 +385,8 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
   const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 6, 2)
   const progress = queueProgressPublisher(env, jobId)
+  const getCachedAssetDataUrl = createAssetDataUrlCache(env)
+  const getCachedTranslatePlan = createTranslationPlanCache(env, initialJob, clientKeys, getCachedAssetDataUrl)
 
   await runPool(items, concurrency, async (item) => {
     const job = await getJob(env, jobId)
@@ -340,7 +403,10 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
 
     try {
       const assetId = String(item.inputJson.assetId || '')
-      const dataUrl = await getAssetDataUrl(env, assetId)
+      const [dataUrl, ocrPlan] = await Promise.all([
+        getCachedAssetDataUrl(assetId),
+        getCachedTranslatePlan(assetId),
+      ])
       if (!dataUrl) throw createRunnerError(`Asset not found: ${assetId}`, 404)
       const { mime, base64 } = splitDataUrl(dataUrl)
       const { result, attempts } = await runWithAutoRetry(() => executeTranslate({
@@ -350,6 +416,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
         targetLanguage: item.inputJson.targetLanguage,
         modelId: job.configJson.modelId,
         preserveBrand: job.configJson.preserveBrand,
+        ocrPlan,
         clientKeys,
       }, env))
 
@@ -473,15 +540,15 @@ export async function submitOutfitBatch(
     type: 'outfit_batch',
     status: 'queued',
     configJson: {
-      modelId: body?.modelId || 'nano-banana-pro',
+      modelId: body?.modelId || 'nano-banana-2',
       instructions: cleanInstruction(body?.instructions),
       garmentRoles: garments.map((item) => `${item.assetId}:${item.role}`).sort(),
       garmentInstructions: garments.map((item) => `${item.assetId}:${item.instructions}`).sort(),
       garmentFingerprint,
-      concurrency: clampInt(body?.concurrency, 1, 4, 2),
+      concurrency: clampInt(body?.concurrency, 1, 4, 3),
       sealedCredentialId,
       configHash: await stableHash({
-        modelId: body?.modelId || 'nano-banana-pro',
+        modelId: body?.modelId || 'nano-banana-2',
         instructions: cleanInstruction(body?.instructions),
         garments,
         modelAssetIds,
@@ -533,6 +600,8 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
   const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 4, 2)
   const progress = queueProgressPublisher(env, jobId)
+  const getCachedAssetDataUrl = createAssetDataUrlCache(env)
+  const getCachedOutfitAnalysis = createOutfitAnalysisCache(env, initialJob, clientKeys)
 
   await runPool(items, concurrency, async (item) => {
     const job = await getJob(env, jobId)
@@ -548,11 +617,11 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
 
     try {
-      const modelDataUrl = await getAssetDataUrl(env, String(item.inputJson.modelAssetId || ''))
+      const modelDataUrl = await getCachedAssetDataUrl(String(item.inputJson.modelAssetId || ''))
       if (!modelDataUrl) throw createRunnerError(`Model asset not found: ${item.inputJson.modelAssetId}`, 404)
       const garmentUrls = await Promise.all(
         (Array.isArray(item.inputJson.lookAssetIds) ? item.inputJson.lookAssetIds : [])
-          .map((assetId) => getAssetDataUrl(env, String(assetId))),
+          .map((assetId) => getCachedAssetDataUrl(String(assetId))),
       )
       if (garmentUrls.some((value) => !value)) {
         throw createRunnerError('One or more garment assets are missing', 404)
@@ -573,12 +642,14 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
             : '',
         }
       })
+      const analysis = await getCachedOutfitAnalysis(getOutfitAnalysisCacheKey(item), modelImage, garments)
 
       const { result, attempts } = await runWithAutoRetry(() => executeOutfitSwap({
         modelId: job.configJson.modelId,
         model: modelImage,
         garments,
         instructions: job.configJson.instructions,
+        analysis,
         clientKeys,
       }, env))
 

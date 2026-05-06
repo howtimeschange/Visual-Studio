@@ -40,9 +40,12 @@ export async function executeOutfitSwap(body: any, env: Env) {
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
   if (!genKey) throw createOutfitError(`Missing API key for ${modelId}`, 400)
 
-  const analysis = visionKey
-    ? await analyzeOutfitReferences(baseUrl, visionKey, model, garmentItems)
-    : null
+  const analysis = body?.analysis || await prepareOutfitAnalysis({
+    modelId,
+    model,
+    garments: garmentItems,
+    clientKeys,
+  }, env)
 
   const prompt = buildSwapPrompt(garmentItems, instructions, analysis)
   const result = await callImageModel(
@@ -59,6 +62,27 @@ export async function executeOutfitSwap(body: any, env: Env) {
   )
   if (!result.ok) throw createOutfitError(result.error, result.status || 502)
   return { resultDataUrl: result.dataUrl }
+}
+
+export async function prepareOutfitAnalysis(body: any, env: Env): Promise<OutfitAnalysis | null> {
+  const {
+    modelId = 'nano-banana-pro',
+    model, garment, garments,
+    garmentType = 'full_outfit',
+    clientKeys = {},
+  } = body ?? {}
+
+  if (!model?.base64) throw createOutfitError('model image required', 400)
+  if (!MODEL_MAP[modelId]) throw createOutfitError(`Unknown modelId: ${modelId}`, 400)
+
+  const garmentItems = normalizeGarments(garments, garment, garmentType)
+  if (garmentItems.length === 0) throw createOutfitError('at least one garment image required', 400)
+
+  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const { visionKey } = resolveKeys(modelId, env, clientKeys)
+  return visionKey
+    ? await analyzeOutfitReferences(baseUrl, visionKey, model, garmentItems)
+    : null
 }
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
