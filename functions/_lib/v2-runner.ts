@@ -1117,6 +1117,8 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       source: 'generate_direct',
       dataUrl: result.dataUrl,
       filename: `${initialJob.id}.png`,
+      width: result.width,
+      height: result.height,
       bucketKind: 'result',
     })
 

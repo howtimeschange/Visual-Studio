@@ -2084,6 +2084,18 @@ button.ghost:disabled,
   white-space: nowrap;
 }
 
+.canvas-project-status.ok {
+  color: var(--ok);
+}
+
+.canvas-project-status.run {
+  color: var(--warn);
+}
+
+.canvas-project-status.err {
+  color: var(--danger);
+}
+
 .canvas-header-right {
   display: flex;
   align-items: center;

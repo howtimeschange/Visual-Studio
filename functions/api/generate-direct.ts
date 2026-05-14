@@ -4,6 +4,7 @@
 import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
+  readPngDimensions,
 } from '../_shared'
 import {
   createAsset,
@@ -100,6 +101,8 @@ async function handleDirectGenerate(env: Env, body: any) {
       source: 'generate_direct',
       dataUrl: result.dataUrl,
       filename: `${job.id}.png`,
+      width: result.width,
+      height: result.height,
       bucketKind: 'result',
     })
 
@@ -129,6 +132,8 @@ async function handleDirectGenerate(env: Env, body: any) {
       jobId: job.id,
       resultAsset,
       resultDataUrl: result.dataUrl,
+      width: result.width,
+      height: result.height,
       aspectRatio: request.aspectRatio,
       resolution: request.resolution,
     }
@@ -171,7 +176,7 @@ export async function executeDirectGenerate(
   env: Env,
   request: ReturnType<typeof normalizeDirectGenerateRequest>,
   clientKeys: any = {},
-): Promise<{ dataUrl: string; finalPrompt: string }> {
+): Promise<{ dataUrl: string; finalPrompt: string; width: number | null; height: number | null }> {
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const { visionKey, genKey } = resolveKeys(request.modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(request.modelId, env, clientKeys)
@@ -223,7 +228,18 @@ export async function executeDirectGenerate(
   )
 
   if (!result.ok) throw createError(result.error, result.status)
-  return { dataUrl: result.dataUrl, finalPrompt }
+  const size = getImageDataUrlDimensions(result.dataUrl)
+  return { dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height }
+}
+
+function getImageDataUrlDimensions(dataUrl: string): { width: number | null; height: number | null } {
+  const { mime, base64 } = splitDataUrl(dataUrl)
+  if (!base64) return { width: null, height: null }
+  if (mime === 'image/png') {
+    const size = readPngDimensions(base64)
+    if (size) return size
+  }
+  return { width: null, height: null }
 }
 
 function buildDirectPrompt(

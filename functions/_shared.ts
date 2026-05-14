@@ -81,6 +81,35 @@ export const corsPreflight = () =>
     },
   })
 
+export function readPngDimensions(base64: string): { width: number; height: number } | null {
+  try {
+    const binary = atob(String(base64 || '').slice(0, 64))
+    if (
+      binary.length < 24
+      || binary.charCodeAt(0) !== 0x89
+      || binary.slice(1, 4) !== 'PNG'
+      || binary.slice(12, 16) !== 'IHDR'
+    ) {
+      return null
+    }
+    const width = readBigEndianUint32(binary, 16)
+    const height = readBigEndianUint32(binary, 20)
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+    return { width, height }
+  } catch {
+    return null
+  }
+}
+
+function readBigEndianUint32(binary: string, offset: number): number {
+  return (
+    (binary.charCodeAt(offset) << 24)
+    | (binary.charCodeAt(offset + 1) << 16)
+    | (binary.charCodeAt(offset + 2) << 8)
+    | binary.charCodeAt(offset + 3)
+  ) >>> 0
+}
+
 export function resolveKeys(modelId: string, env: Env, clientKeys: any = {}) {
   const visionKey = clientKeys.visionApiKey || env.VISION_API_KEY || ''
   const genKey =

@@ -140,6 +140,11 @@ function byteLengthFromDataUrl(dataUrl: string): number {
   return Math.floor((payload.length * 3) / 4)
 }
 
+function normalizeAssetDimension(value: unknown): number | null {
+  const number = Math.round(Number(value))
+  return Number.isFinite(number) && number > 0 ? number : null
+}
+
 function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
   const payload = String(dataUrl || '').split(',', 2)[1] || ''
   const binary = atob(payload)
@@ -652,6 +657,8 @@ export async function createAsset(env: any, input: {
   mime?: string
   filename?: string
   dataUrl: string
+  width?: number | null
+  height?: number | null
   bucketKind?: BlobBucketKind
 }): Promise<AssetRecord> {
   const id = createId('asset')
@@ -670,8 +677,8 @@ export async function createAsset(env: any, input: {
     sha256,
     createdAt,
     filename: input.filename || null,
-    width: null,
-    height: null,
+    width: normalizeAssetDimension(input.width),
+    height: normalizeAssetDimension(input.height),
   }
 
   const bucket = bucketFor(env, input.bucketKind || (input.kind === 'result' || input.kind === 'generated' ? 'result' : 'input'))

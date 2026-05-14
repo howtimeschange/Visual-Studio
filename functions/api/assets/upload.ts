@@ -25,6 +25,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     filename: body?.filename || null,
     mime: body?.mime || undefined,
     dataUrl,
+    width: body?.width ?? body?.originalWidth ?? null,
+    height: body?.height ?? body?.originalHeight ?? null,
     bucketKind: body?.kind === 'result' ? 'result' : 'input',
   })
   await createUsageEvent(env, {

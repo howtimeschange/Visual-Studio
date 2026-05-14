@@ -1,4 +1,10 @@
 import {
+  buildCanvasPsdModel,
+  buildSelectedImagePsdModel,
+  parsePsdColor,
+  validatePsdExtractedLayers,
+} from './js/canvas-psd-export.js'
+import {
   basename,
   clamp,
   ensureImageExtension,
@@ -312,6 +318,9 @@ const state = {
     genUseAgent: false,
     genRefs: [],
     genRunning: false,
+    psdExporting: false,
+    psdExportStatus: '',
+    psdExportTone: '',
     // runtime
     model: 'nano-banana-2',
   },
@@ -1972,6 +1981,8 @@ function sanitizeCanvasElement(raw = {}) {
     name: typeof raw.name === 'string' ? raw.name : '',
     mime: typeof raw.mime === 'string' ? raw.mime : '',
     assetId: typeof raw.assetId === 'string' ? raw.assetId : '',
+    originalWidth: Math.max(0, Number(raw.originalWidth) || Number(raw.naturalWidth) || 0),
+    originalHeight: Math.max(0, Number(raw.originalHeight) || Number(raw.naturalHeight) || 0),
     referenceImageId: raw.referenceImageId ? String(raw.referenceImageId) : null,
     generatingPrompt: typeof raw.generatingPrompt === 'string' ? raw.generatingPrompt : '',
     connectorFrom: typeof raw.connectorFrom === 'string' ? raw.connectorFrom : '',
@@ -2007,6 +2018,8 @@ function serializeCanvasElement(el) {
     name: el.name || '',
     mime: el.mime || '',
     assetId: el.assetId || '',
+    originalWidth: Math.max(0, Number(el.originalWidth) || Number(el.naturalWidth) || 0),
+    originalHeight: Math.max(0, Number(el.originalHeight) || Number(el.naturalHeight) || 0),
     referenceImageId: el.referenceImageId || null,
     generatingPrompt: el.generatingPrompt || '',
     connectorFrom: el.connectorFrom || '',
@@ -3361,7 +3374,7 @@ function showContextMenu(e, elementId) {
     const download = document.createElement('button')
     download.type = 'button'
     download.className = 'context-menu-item'
-    download.textContent = '下载图片'
+    download.textContent = '下载原图'
     download.addEventListener('click', () => {
       if (el.content) downloadAsset(el.content, `canvas-${el.id}.png`)
       hideContextMenu()
@@ -3413,6 +3426,8 @@ function addImageToCanvas(dataUrl, name, x, y, meta = {}) {
     name: name || 'image',
     mime: meta.mime || splitDataUrl(dataUrl)?.mime || 'image/png',
     assetId: meta.assetId || '',
+    originalWidth: Math.max(0, Number(meta.width) || Number(meta.originalWidth) || 0),
+    originalHeight: Math.max(0, Number(meta.height) || Number(meta.originalHeight) || 0),
     aspectRatio: normalizeAspectRatio(meta.aspectRatio || ''),
     resolution: normalizeCanvasResolution(meta.resolution || ''),
     generatingPrompt: typeof meta.prompt === 'string' ? meta.prompt : '',
@@ -3430,6 +3445,8 @@ function replaceCanvasElementWithImage(el, dataUrl, name, meta = {}) {
   el.name = name || el.name || 'image'
   el.mime = meta.mime || splitDataUrl(dataUrl)?.mime || 'image/png'
   el.assetId = meta.assetId || ''
+  el.originalWidth = Math.max(0, Number(meta.width) || Number(meta.originalWidth) || 0)
+  el.originalHeight = Math.max(0, Number(meta.height) || Number(meta.originalHeight) || 0)
   el.aspectRatio = normalizeAspectRatio(meta.aspectRatio || '')
   el.resolution = normalizeCanvasResolution(meta.resolution || '')
   el.generatingPrompt = typeof meta.prompt === 'string' && meta.prompt.trim()
@@ -3847,13 +3864,25 @@ function createCanvasElementActions(el) {
   const download = document.createElement('button')
   download.type = 'button'
   download.className = 'canvas-el-action'
-  download.textContent = '下载'
+  download.textContent = '下载原图'
   download.addEventListener('mousedown', (event) => event.stopPropagation())
   download.addEventListener('click', (event) => {
     event.stopPropagation()
     if (el.content) downloadAsset(el.content, `${sanitizeFileName(el.name || 'canvas-image')}.png`)
   })
   actions.append(download)
+
+  const downloadPsd = document.createElement('button')
+  downloadPsd.type = 'button'
+  downloadPsd.className = 'canvas-el-action'
+  downloadPsd.textContent = '下载PSD源文件'
+  downloadPsd.addEventListener('mousedown', (event) => event.stopPropagation())
+  downloadPsd.addEventListener('click', (event) => {
+    event.stopPropagation()
+    state.generate.selectedIds = [el.id]
+    void exportCanvasAsPsd({ baseImageId: el.id })
+  })
+  actions.append(downloadPsd)
 
   const remove = document.createElement('button')
   remove.type = 'button'
@@ -3955,6 +3984,440 @@ function renderConnectors() {
     path.setAttribute('class', `canvas-connector${selectedIds.has(from.id) || selectedIds.has(to.id) || linkedIds.has(from.id) || linkedIds.has(to.id) ? ' linked' : ''}`)
     svg.append(path)
   }
+}
+
+/* ═══════════════ PSD EXPORT ═══════════════ */
+
+async function exportCanvasAsPsd({ baseImageId = '' } = {}) {
+  if (state.generate.psdExporting) return
+  const visibleElements = state.generate.elements.filter((el) => el.type !== 'connector')
+  if (!visibleElements.length) {
+    setCanvasPsdExportStatus('画布为空，无法导出 PSD', 'err')
+    return
+  }
+  const agPsd = window.agPsd
+  if (!agPsd?.writePsd) {
+    setCanvasPsdExportStatus('PSD 导出组件未加载，请刷新后重试', 'err')
+    return
+  }
+
+  state.generate.psdExporting = true
+  setCanvasPsdExportStatus('正在准备 PSD…', 'run')
+
+  try {
+    const hydratedElements = await hydrateCanvasElements(state.generate.elements)
+    if (hydratedElements !== state.generate.elements) {
+      state.generate.elements = hydratedElements
+      renderCanvas()
+    }
+    const selectedImage = baseImageId
+      ? state.generate.elements.find((element) => element?.type === 'image' && element.id === baseImageId)
+      : null
+    const ocrResult = selectedImage
+      ? await requestCanvasPsdDecomposition(selectedImage).catch(async (error) => {
+          const fallback = await requestCanvasPsdOcrTextLayers(selectedImage).catch((fallbackError) => ({
+            texts: [],
+            semanticLayers: [],
+            warnings: [`PSD 图层分析失败，已降级导出原图层：${trimError(fallbackError)}`],
+          }))
+          return {
+            ...fallback,
+            extractedLayers: [],
+            backgroundLayer: null,
+            warnings: [
+              `透明图层/背景修补失败，已降级为语义裁切：${trimError(error)}`,
+              ...(fallback.warnings || []),
+            ],
+          }
+        })
+      : { texts: [], semanticLayers: [], extractedLayers: [], backgroundLayer: null, warnings: [] }
+    const model = baseImageId
+      ? buildSelectedImagePsdModel({
+          elements: state.generate.elements,
+          imageId: baseImageId,
+          ocrTextLayers: ocrResult.texts || [],
+          semanticLayers: ocrResult.semanticLayers || [],
+          extractedLayers: ocrResult.extractedLayers || [],
+          backgroundLayer: ocrResult.backgroundLayer || null,
+          title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+        })
+      : buildCanvasPsdModel({
+          elements: state.generate.elements,
+          selectedIds: state.generate.selectedIds,
+          title: state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE,
+        })
+    if (!model) throw new Error('请选择一张图片导出 PSD')
+    if (!model.children.length) throw new Error('没有可导出的图层')
+
+    const psd = {
+      width: model.width,
+      height: model.height,
+      children: baseImageId
+        ? await Promise.all(model.children.map((layer) => createPsdLayerFromDescriptor(layer)))
+        : await Promise.all(model.children.map((layer) => createPsdLayerFromDescriptor(layer))),
+    }
+    if (!psd.children.length) throw new Error('没有可导出的图层')
+
+    const buffer = agPsd.writePsd(psd, {
+      noBackground: true,
+      invalidateTextLayers: true,
+      trimImageData: true,
+    })
+    downloadBlob(new Blob([buffer], { type: 'application/octet-stream' }), model.fileName)
+
+    const warnings = [...(model.warnings || []), ...(ocrResult.warnings || [])]
+    const textLabel = model.ocrTextLayerCount ? `，${model.ocrTextLayerCount} 个文字可编辑` : ''
+    const semanticLabel = model.semanticLayerCount ? `，${model.semanticLayerCount} 个语义图层` : ''
+    const warning = warnings.length ? ` · ${warnings[0]}` : ''
+    setCanvasPsdExportStatus(`PSD 已导出：${model.width}×${model.height}，${psd.children.length} 层${textLabel}${semanticLabel}${warning}`, 'ok')
+  } catch (error) {
+    setCanvasPsdExportStatus(`PSD 导出失败：${trimError(error)}`, 'err')
+  } finally {
+    state.generate.psdExporting = false
+    window.setTimeout(() => {
+      if (state.generate.psdExportTone !== 'run') {
+        state.generate.psdExportStatus = ''
+        state.generate.psdExportTone = ''
+        renderCanvasProjectMeta()
+      }
+    }, 5000)
+  }
+}
+
+function setCanvasPsdExportStatus(message, tone = '') {
+  state.generate.psdExportStatus = message
+  state.generate.psdExportTone = tone
+  renderCanvasProjectMeta()
+}
+
+async function requestCanvasPsdOcrTextLayers(imageElement) {
+  if (!imageElement?.content && !imageElement?.assetId) {
+    return { texts: [], semanticLayers: [], warnings: ['图片数据未加载，无法分析 PSD 图层。'] }
+  }
+
+  setCanvasPsdExportStatus('正在分析图片结构，用于生成可编辑文字层和语义 PSD 图层…', 'run')
+  const payload = {
+    sessionId: state.runtime.sessionId || undefined,
+    modelId: state.generate.genModel || state.generate.model || 'nano-banana-2',
+    assetId: imageElement.assetId || '',
+    dataUrl: imageElement.assetId ? '' : (imageElement.content || ''),
+    width: Math.max(1, Math.round(Number(imageElement.originalWidth) || Number(imageElement.naturalWidth) || Number(imageElement.width) || 1)),
+    height: Math.max(1, Math.round(Number(imageElement.originalHeight) || Number(imageElement.naturalHeight) || Number(imageElement.height) || 1)),
+    clientKeys: { ...state.keys },
+  }
+  const data = await postJson('/api/canvas/psd-ocr', payload)
+  state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+  return {
+    texts: Array.isArray(data.texts) ? data.texts : [],
+    semanticLayers: Array.isArray(data.semanticLayers) ? data.semanticLayers : [],
+    warnings: Array.isArray(data.warnings) ? data.warnings : [],
+  }
+}
+
+async function requestCanvasPsdDecomposition(imageElement) {
+  if (!imageElement?.content && !imageElement?.assetId) {
+    return { texts: [], semanticLayers: [], extractedLayers: [], backgroundLayer: null, warnings: ['图片数据未加载，无法分析 PSD 图层。'] }
+  }
+
+  setCanvasPsdExportStatus('正在生成透明图层和修补背景，准备 PSD 源文件…', 'run')
+  const payload = {
+    sessionId: state.runtime.sessionId || undefined,
+    modelId: state.generate.genModel || state.generate.model || 'nano-banana-2',
+    assetId: imageElement.assetId || '',
+    dataUrl: imageElement.assetId ? '' : (imageElement.content || ''),
+    width: Math.max(1, Math.round(Number(imageElement.originalWidth) || Number(imageElement.naturalWidth) || Number(imageElement.width) || 1)),
+    height: Math.max(1, Math.round(Number(imageElement.originalHeight) || Number(imageElement.naturalHeight) || Number(imageElement.height) || 1)),
+    maxLayers: 5,
+    clientKeys: { ...state.keys },
+  }
+  const data = await postJson('/api/canvas/psd-decompose', payload)
+  state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+  const validation = await validatePsdExtractedLayers(
+    Array.isArray(data.extractedLayers) ? data.extractedLayers : [],
+    readPsdLayerImageData,
+    { encodeImageData: encodePsdLayerImageData },
+  )
+  return {
+    texts: Array.isArray(data.texts) ? data.texts : [],
+    semanticLayers: Array.isArray(data.semanticLayers) ? data.semanticLayers : [],
+    extractedLayers: validation.extractedLayers,
+    backgroundLayer: data.backgroundLayer || null,
+    warnings: [
+      ...(Array.isArray(data.warnings) ? data.warnings : []),
+      ...(validation.warnings || []),
+    ],
+  }
+}
+
+async function createPsdLayerFromDescriptor(layer) {
+  if (layer.kind === 'text') {
+    return {
+      name: layer.name,
+      left: layer.left,
+      top: layer.top,
+      canvas: createTextPreviewCanvas(layer),
+      text: layer.text,
+    }
+  }
+
+  const canvas = await createRasterCanvasForPsdLayer(layer)
+  return {
+    name: layer.name,
+    left: layer.left,
+    top: layer.top,
+    canvas,
+  }
+}
+
+async function createRasterCanvasForPsdLayer(layer) {
+  const canvas = createSizedCanvas(layer.width, layer.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas 2D context unavailable')
+
+  if (layer.kind === 'image' || layer.kind === 'semantic-image') {
+    const image = await loadCanvasImage(layer.source)
+    const sourceRect = normalizePsdSourceRect(layer.sourceRect, image)
+    if (sourceRect) {
+      ctx.drawImage(
+        image,
+        sourceRect.x,
+        sourceRect.y,
+        sourceRect.width,
+        sourceRect.height,
+        0,
+        0,
+        layer.width,
+        layer.height,
+      )
+    } else {
+      ctx.drawImage(image, 0, 0, layer.width, layer.height)
+    }
+  } else if (layer.kind === 'shape') {
+    drawPsdShapeLayer(ctx, layer)
+  } else if (layer.kind === 'path') {
+    drawPsdPathLayer(ctx, layer)
+  }
+  return canvas
+}
+
+async function readPsdLayerImageData(layer) {
+  const source = String(layer?.dataUrl || layer?.source || '').trim()
+  const image = await loadCanvasImage(source)
+  const width = Math.max(1, Math.round(Number(image?.naturalWidth) || Number(image?.width) || 1))
+  const height = Math.max(1, Math.round(Number(image?.naturalHeight) || Number(image?.height) || 1))
+  const canvas = createSizedCanvas(width, height)
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) throw new Error('Canvas 2D context unavailable')
+  ctx.drawImage(image, 0, 0, width, height)
+  return ctx.getImageData(0, 0, width, height)
+}
+
+async function encodePsdLayerImageData(imageData) {
+  const width = Math.max(1, Math.round(Number(imageData?.width) || 1))
+  const height = Math.max(1, Math.round(Number(imageData?.height) || 1))
+  const canvas = createSizedCanvas(width, height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas 2D context unavailable')
+  ctx.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+function normalizePsdSourceRect(sourceRect, image) {
+  if (!sourceRect) return null
+  const imageWidth = Math.max(1, Math.round(Number(image?.naturalWidth) || Number(image?.width) || 1))
+  const imageHeight = Math.max(1, Math.round(Number(image?.naturalHeight) || Number(image?.height) || 1))
+  const x = clamp(Math.round(Number(sourceRect.x ?? sourceRect.left) || 0), 0, imageWidth)
+  const y = clamp(Math.round(Number(sourceRect.y ?? sourceRect.top) || 0), 0, imageHeight)
+  const right = clamp(Math.round(x + (Number(sourceRect.width) || 0)), 0, imageWidth)
+  const bottom = clamp(Math.round(y + (Number(sourceRect.height) || 0)), 0, imageHeight)
+  const width = right - x
+  const height = bottom - y
+  if (width < 1 || height < 1) return null
+  return { x, y, width, height }
+}
+
+function createTextPreviewCanvas(layer) {
+  const text = layer.text || {}
+  const width = Math.max(1, Math.round(text.boxBounds?.[2] || layer.width || 1))
+  const height = Math.max(1, Math.round(text.boxBounds?.[3] || layer.height || 1))
+  const canvas = createSizedCanvas(width, height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return canvas
+
+  const style = text.style || {}
+  const color = style.fillColor || { r: 17, g: 17, b: 17 }
+  const fontSize = Math.max(1, Number(style.fontSize) || 16)
+  const fontFamily = style.font?.name === 'ArialMT' ? 'Arial' : (style.font?.name || 'Arial')
+  ctx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`
+  ctx.font = `${fontSize}px ${fontFamily}`
+  ctx.textBaseline = 'top'
+  wrapCanvasText(ctx, text.text || '', 0, 0, width, Math.round(fontSize * 1.22))
+  return canvas
+}
+
+function drawPsdShapeLayer(ctx, layer) {
+  const el = findCanvasElementById(layer.original?.id)
+  const shape = el?.shape || el?.shapeType || 'square'
+  const strokeWidth = Math.max(1, Math.round((Number(el?.strokeWidth) || 2) * getLayerScale(el, layer)))
+  const stroke = el?.stroke || el?.color || '#2563eb'
+  const fill = el?.fill || 'rgba(37, 99, 235, 0.08)'
+  ctx.lineWidth = strokeWidth
+  ctx.strokeStyle = formatCanvasRgbColor(parsePsdColor(stroke))
+  ctx.fillStyle = fill.startsWith?.('rgba') ? fill : formatCanvasRgbaColor(parsePsdColor(fill), 0.08)
+
+  const w = layer.width
+  const h = layer.height
+  const pad = Math.max(2, strokeWidth)
+  if (shape === 'circle') {
+    ctx.beginPath()
+    ctx.ellipse(w / 2, h / 2, Math.max(1, w / 2 - pad), Math.max(1, h / 2 - pad), 0, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.stroke()
+  } else if (shape === 'triangle') {
+    ctx.beginPath()
+    ctx.moveTo(w / 2, pad)
+    ctx.lineTo(w - pad, h - pad)
+    ctx.lineTo(pad, h - pad)
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+  } else if (shape === 'message') {
+    ctx.beginPath()
+    ctx.moveTo(pad + 8, pad)
+    ctx.lineTo(w - pad - 8, pad)
+    ctx.quadraticCurveTo(w - pad, pad, w - pad, pad + 8)
+    ctx.lineTo(w - pad, h * 0.62)
+    ctx.quadraticCurveTo(w - pad, h * 0.7, w - pad - 8, h * 0.7)
+    ctx.lineTo(w * 0.38, h * 0.7)
+    ctx.lineTo(w * 0.24, h - pad)
+    ctx.lineTo(w * 0.24, h * 0.7)
+    ctx.lineTo(pad + 8, h * 0.7)
+    ctx.quadraticCurveTo(pad, h * 0.7, pad, h * 0.62)
+    ctx.lineTo(pad, pad + 8)
+    ctx.quadraticCurveTo(pad, pad, pad + 8, pad)
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+  } else if (shape === 'arrow-left' || shape === 'arrow-right') {
+    const points = shape === 'arrow-left'
+      ? [[pad, h / 2], [w * 0.34, pad], [w * 0.34, h * 0.38], [w - pad, h * 0.38], [w - pad, h * 0.62], [w * 0.34, h * 0.62], [w * 0.34, h - pad]]
+      : [[w - pad, h / 2], [w * 0.66, pad], [w * 0.66, h * 0.38], [pad, h * 0.38], [pad, h * 0.62], [w * 0.66, h * 0.62], [w * 0.66, h - pad]]
+    ctx.beginPath()
+    points.forEach(([x, y], index) => index ? ctx.lineTo(x, y) : ctx.moveTo(x, y))
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+  } else {
+    drawRoundRect(ctx, pad, pad, Math.max(1, w - pad * 2), Math.max(1, h - pad * 2), 8)
+    ctx.fill()
+    ctx.stroke()
+  }
+}
+
+function drawPsdPathLayer(ctx, layer) {
+  const el = findCanvasElementById(layer.original?.id)
+  const points = sanitizeCanvasPath(el?.path)
+  if (!points.length) return
+  const scaleX = layer.width / Math.max(1, Number(el?.pathBoxWidth) || Number(el?.width) || layer.width)
+  const scaleY = layer.height / Math.max(1, Number(el?.pathBoxHeight) || Number(el?.height) || layer.height)
+  ctx.lineWidth = Math.max(1, Math.round((Number(el?.strokeWidth) || 3) * Math.max(scaleX, scaleY)))
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.strokeStyle = el?.color || el?.stroke || '#2563eb'
+  ctx.beginPath()
+  points.forEach((point, index) => {
+    const x = point.x * scaleX
+    const y = point.y * scaleY
+    if (index) ctx.lineTo(x, y)
+    else ctx.moveTo(x, y)
+  })
+  ctx.stroke()
+}
+
+function createSizedCanvas(width, height) {
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(width))
+  canvas.height = Math.max(1, Math.round(height))
+  return canvas
+}
+
+function loadCanvasImage(src) {
+  return new Promise((resolve, reject) => {
+    if (!src) {
+      reject(new Error('图片图层缺少数据'))
+      return
+    }
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片图层加载失败'))
+    image.src = src
+  })
+}
+
+function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight) {
+  const source = String(text || '').split(/\r?\n/)
+  let lineY = y
+  for (const paragraph of source) {
+    let line = ''
+    for (const char of Array.from(paragraph)) {
+      const next = line + char
+      if (line && ctx.measureText(next).width > maxWidth) {
+        ctx.fillText(line, x, lineY)
+        line = char
+        lineY += lineHeight
+      } else {
+        line = next
+      }
+    }
+    ctx.fillText(line, x, lineY)
+    lineY += lineHeight
+  }
+}
+
+function drawRoundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.lineTo(x + width - r, y)
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r)
+  ctx.lineTo(x + width, y + height - r)
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height)
+  ctx.lineTo(x + r, y + height)
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r)
+  ctx.lineTo(x, y + r)
+  ctx.quadraticCurveTo(x, y, x + r, y)
+  ctx.closePath()
+}
+
+function getLayerScale(el, layer) {
+  if (!el) return 1
+  return Math.max(layer.width / Math.max(1, Number(el.width) || layer.width), layer.height / Math.max(1, Number(el.height) || layer.height))
+}
+
+function findCanvasElementById(id) {
+  return state.generate.elements.find((element) => element.id === id)
+}
+
+function downloadBlob(blob, name) {
+  const link = document.createElement('a')
+  const url = URL.createObjectURL(blob)
+  try {
+    link.href = url
+    link.download = name
+    document.body.append(link)
+    link.click()
+    link.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function formatCanvasRgbColor(color) {
+  return `rgb(${color.r}, ${color.g}, ${color.b})`
+}
+
+function formatCanvasRgbaColor(color, alpha) {
+  return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`
 }
 
 /* ═══════════════ TOOLBAR ═══════════════ */
@@ -4404,7 +4867,12 @@ async function executeCanvasGenerate() {
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     setCanvasGenerateStatus(el, '正在保存生成结果…')
     const storedResult = data.resultAsset
-      ? { assetId: data.resultAsset.id, mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png' }
+      ? {
+          assetId: data.resultAsset.id,
+          mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
+          width: data.resultAsset.width || data.width || 0,
+          height: data.resultAsset.height || data.height || 0,
+        }
       : await uploadCanvasImageAsset(data.resultDataUrl, `generated-${el.id}.png`, {
         kind: 'result',
         source: 'canvas_generation',
@@ -4417,8 +4885,8 @@ async function executeCanvasGenerate() {
       aspectRatio: state.generate.genRatio,
       resolution: state.generate.genResolution,
       prompt: finalPrompt,
-      width: imageSize?.width,
-      height: imageSize?.height,
+      width: imageSize?.width || storedResult.width,
+      height: imageSize?.height || storedResult.height,
     })
 
     state.generate.genRefs = []
@@ -4872,7 +5340,12 @@ async function sendCanvasAiMessage() {
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     const storedResult = data.resultAsset
-      ? { assetId: data.resultAsset.id, mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png' }
+      ? {
+          assetId: data.resultAsset.id,
+          mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
+          width: data.resultAsset.width || data.width || 0,
+          height: data.resultAsset.height || data.height || 0,
+        }
       : await uploadCanvasImageAsset(data.resultDataUrl, `ai-${Date.now()}.png`, {
         kind: 'result',
         source: 'canvas_ai_sidebar',
@@ -4892,8 +5365,8 @@ async function sendCanvasAiMessage() {
         aspectRatio: aiAspectRatio,
         resolution: aiResolution,
         prompt: generationPrompt,
-        width: imageSize?.width,
-        height: imageSize?.height,
+        width: imageSize?.width || storedResult.width,
+        height: imageSize?.height || storedResult.height,
       })
     } else {
       addImageToCanvas(data.resultDataUrl, assistantMsg.imageName, undefined, undefined, {
@@ -4902,8 +5375,8 @@ async function sendCanvasAiMessage() {
         aspectRatio: aiAspectRatio,
         resolution: aiResolution,
         prompt: generationPrompt,
-        width: imageSize?.width,
-        height: imageSize?.height,
+        width: imageSize?.width || storedResult.width,
+        height: imageSize?.height || storedResult.height,
       })
     }
     state.generate.aiRefs = []
@@ -7363,6 +7836,7 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
 
 async function uploadCanvasImageAsset(dataUrl, name, { kind = 'upload', source = 'canvas_upload' } = {}) {
   const mime = splitDataUrl(dataUrl)?.mime || 'image/png'
+  const size = await getImageDimensions(dataUrl).catch(() => null)
   const data = await postJson('/api/assets/upload', {
     sessionId: state.runtime.sessionId || undefined,
     kind,
@@ -7370,11 +7844,15 @@ async function uploadCanvasImageAsset(dataUrl, name, { kind = 'upload', source =
     filename: name || 'canvas-image.png',
     mime,
     dataUrl,
+    width: size?.width || undefined,
+    height: size?.height || undefined,
   })
   state.runtime.sessionId = data.sessionId || state.runtime.sessionId
   return {
     assetId: data.asset.id,
     mime: data.asset.mime || mime,
+    width: data.asset.width || size?.width || 0,
+    height: data.asset.height || size?.height || 0,
   }
 }
 
@@ -7390,6 +7868,8 @@ async function hydrateAssetItems(items, projectId = '') {
         assetId: data.asset.id,
         name: item.name || data.asset.filename || data.asset.id,
         mime: data.asset.mime || item.mime || 'image/png',
+        width: data.asset.width || item.width || null,
+        height: data.asset.height || item.height || null,
         dataUrl: data.dataUrl,
         base64: splitDataUrl(data.dataUrl)?.base64 || '',
       }
@@ -7454,6 +7934,14 @@ function renderCanvasProjectMeta() {
     dom.gProjectTitle.value = state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
   }
   if (!dom.gProjectStatus) return
+  if (state.generate.psdExportStatus) {
+    dom.gProjectStatus.textContent = state.generate.psdExportStatus
+    dom.gProjectStatus.classList.toggle('err', state.generate.psdExportTone === 'err')
+    dom.gProjectStatus.classList.toggle('ok', state.generate.psdExportTone === 'ok')
+    dom.gProjectStatus.classList.toggle('run', state.generate.psdExportTone === 'run')
+    return
+  }
+  dom.gProjectStatus.classList.remove('err', 'ok', 'run')
   const status = state.generate.projectSaveStatus
   dom.gProjectStatus.textContent = status === 'saving'
     ? '保存中'
@@ -8009,27 +8497,56 @@ async function loadCanvasProjectSnapshot(projectId) {
 
 async function hydrateCanvasElements(elements) {
   const imageElements = elements.filter((el) => el.type === 'image' && el.assetId)
-  if (!imageElements.length) return elements
+  const byAssetId = new Map()
 
-  const hydratedImages = await hydrateAssetItems(imageElements.map((el) => ({
-    id: el.assetId,
-    assetId: el.assetId,
-    name: el.name,
-    mime: el.mime || 'image/png',
-  })), state.generate.projectId)
-  const byAssetId = new Map(hydratedImages.map((item) => [item.assetId || item.id, item]))
-
-  return elements.map((el) => {
-    if (el.type !== 'image' || !el.assetId) return el
-    const hydrated = byAssetId.get(el.assetId)
-    if (!hydrated?.dataUrl) return el
-    return {
-      ...el,
-      content: hydrated.dataUrl,
-      name: el.name || hydrated.name,
-      mime: hydrated.mime || el.mime,
+  if (imageElements.length) {
+    const hydratedImages = await hydrateAssetItems(imageElements.map((el) => ({
+      id: el.assetId,
+      assetId: el.assetId,
+      name: el.name,
+      mime: el.mime || 'image/png',
+    })), state.generate.projectId)
+    for (const item of hydratedImages) {
+      byAssetId.set(item.assetId || item.id, item)
     }
-  })
+  }
+
+  let changed = false
+  const hydratedElements = await Promise.all(elements.map(async (el) => {
+    if (el.type !== 'image') return el
+    const hydrated = el.assetId ? byAssetId.get(el.assetId) : null
+    const content = hydrated?.dataUrl || el.content || ''
+    let originalWidth = Math.max(0, Number(el.originalWidth) || Number(hydrated?.width) || 0)
+    let originalHeight = Math.max(0, Number(el.originalHeight) || Number(hydrated?.height) || 0)
+
+    if (content && (!originalWidth || !originalHeight)) {
+      const measured = await getImageDimensions(content).catch(() => null)
+      originalWidth = originalWidth || measured?.width || 0
+      originalHeight = originalHeight || measured?.height || 0
+    }
+
+    const next = {
+      ...el,
+      content,
+      name: el.name || hydrated?.name || '',
+      mime: hydrated?.mime || el.mime,
+      originalWidth,
+      originalHeight,
+    }
+    if (
+      next.content !== el.content
+      || next.name !== el.name
+      || next.mime !== el.mime
+      || next.originalWidth !== el.originalWidth
+      || next.originalHeight !== el.originalHeight
+    ) {
+      changed = true
+      return next
+    }
+    return el
+  }))
+
+  return changed ? hydratedElements : elements
 }
 
 async function restoreRuntimeState() {

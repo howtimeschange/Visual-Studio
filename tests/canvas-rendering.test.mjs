@@ -8,6 +8,9 @@ const APP_PATH = new URL('../public/app.js', import.meta.url)
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`)
   if (start === -1) return ''
+  const asyncPrefix = source.slice(Math.max(0, start - 6), start) === 'async '
+    ? start - 6
+    : start
 
   const paramsEnd = source.indexOf(')', start)
   const bodyStart = source.indexOf('{', paramsEnd)
@@ -16,7 +19,7 @@ function extractFunction(source, name) {
     const char = source[index]
     if (char === '{') depth += 1
     if (char === '}') depth -= 1
-    if (depth === 0) return source.slice(start, index + 1)
+    if (depth === 0) return source.slice(asyncPrefix, index + 1)
   }
 
   throw new Error(`Could not extract function ${name}`)
@@ -57,6 +60,73 @@ test('canvas displays explicit image dimensions at half of the original size', a
     width: 400,
     height: 300,
   })
+})
+
+test('canvas image elements preserve original pixel dimensions for PSD export', async () => {
+  const harness = await loadHarness(['addImageToCanvas', 'getCanvasImageSize'], {
+    state: {
+      generate: {
+        elements: [],
+        selectedIds: [],
+        panX: 0,
+        panY: 0,
+        scale: 1,
+      },
+    },
+    dom: {
+      gCanvasContainer: {
+        clientWidth: 1200,
+        clientHeight: 800,
+      },
+    },
+    markCanvasGuideSeen: () => {},
+    crypto: {
+      randomUUID: () => 'image-id',
+    },
+    normalizeCanvasResolution: (value) => value || '',
+  })
+
+  const element = harness.addImageToCanvas('data:image/png;base64,abc', 'hero.png', 0, 0, {
+    width: 2048,
+    height: 1024,
+  })
+
+  assert.equal(element.width, 1024)
+  assert.equal(element.height, 512)
+  assert.equal(element.originalWidth, 2048)
+  assert.equal(element.originalHeight, 1024)
+})
+
+test('hydrating canvas elements measures inline image pixels when original metadata is missing', async () => {
+  const tinyPng = 'data:image/png;base64,abc'
+  const harness = await loadHarness(['hydrateCanvasElements'], {
+    state: {
+      generate: {
+        projectId: '',
+      },
+    },
+    hydrateAssetItems: async () => [],
+    getImageDimensions: async (src) => {
+      assert.equal(src, tinyPng)
+      return { width: 1280, height: 720 }
+    },
+  })
+
+  const original = [{
+    id: 'image-1',
+    type: 'image',
+    assetId: '',
+    content: tinyPng,
+    name: 'hero.png',
+    mime: 'image/png',
+    originalWidth: 0,
+    originalHeight: 0,
+  }]
+  const hydrated = await harness.hydrateCanvasElements(original)
+
+  assert.notEqual(hydrated, original)
+  assert.equal(hydrated[0].originalWidth, 1280)
+  assert.equal(hydrated[0].originalHeight, 720)
 })
 
 test('editing canvas text writes the new copy back to element state immediately', async () => {
