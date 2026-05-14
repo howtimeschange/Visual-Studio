@@ -57,6 +57,108 @@ const GARMENT_ROLE_OPTIONS = [
   { value: 'accessory', label: '配饰' },
 ]
 
+const MODEL_LIBRARY_ITEMS = [
+  {
+    id: 'child-boy-baby',
+    label: '婴儿男孩',
+    age: 'child',
+    ageLabel: '儿童',
+    gender: 'male',
+    genderLabel: '男',
+    src: '/model-library/children/baby-boy.png',
+  },
+  {
+    id: 'child-boy-toddler',
+    label: '幼童男孩',
+    age: 'child',
+    ageLabel: '儿童',
+    gender: 'male',
+    genderLabel: '男',
+    src: '/model-library/children/toddler-boy.jpg',
+  },
+  {
+    id: 'child-boy-kids',
+    label: '儿童男孩',
+    age: 'child',
+    ageLabel: '儿童',
+    gender: 'male',
+    genderLabel: '男',
+    src: '/model-library/children/kids-boy.jpg',
+  },
+  {
+    id: 'child-girl-baby',
+    label: '婴儿女孩',
+    age: 'child',
+    ageLabel: '儿童',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/children/baby-girl.jpg',
+  },
+  {
+    id: 'child-girl-toddler',
+    label: '幼童女孩',
+    age: 'child',
+    ageLabel: '儿童',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/children/toddler-girl.jpg',
+  },
+  {
+    id: 'child-girl-kids',
+    label: '儿童女孩',
+    age: 'child',
+    ageLabel: '儿童',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/children/kids-girl.jpg',
+  },
+  {
+    id: 'adult-female-1',
+    label: '成人女模 1',
+    age: 'adult',
+    ageLabel: '成人',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/adults/female-1.png',
+  },
+  {
+    id: 'adult-female-2',
+    label: '成人女模 2',
+    age: 'adult',
+    ageLabel: '成人',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/adults/female-2.png',
+  },
+  {
+    id: 'adult-female-3',
+    label: '成人女模 3',
+    age: 'adult',
+    ageLabel: '成人',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/adults/female-3.png',
+  },
+  {
+    id: 'adult-female-4',
+    label: '成人女模 4',
+    age: 'adult',
+    ageLabel: '成人',
+    gender: 'female',
+    genderLabel: '女',
+    src: '/model-library/adults/female-4.png',
+  },
+  {
+    id: 'adult-male-1',
+    label: '成人男模 1',
+    age: 'adult',
+    ageLabel: '成人',
+    gender: 'male',
+    genderLabel: '男',
+    src: '/model-library/adults/male-1.png',
+  },
+]
+
 const REFERENCE_ROLES = [
   { value: 'character', label: '人物一致性' },
   { value: 'subject', label: '主体 / 产品' },
@@ -125,6 +227,7 @@ let canvasProjectCreateInFlight = null
 let canvasLastSavedSignature = ''
 let restoringRuntimeState = false
 let runtimeStateReady = false
+let modelLibrarySelectedIds = new Set()
 
 const state = {
   activeView: 'home',
@@ -410,8 +513,17 @@ const dom = {
   oConcurrency: $('#o-concurrency'),
   oModelInput: $('#o-model-input'),
   oModelAdd: $('#o-model-add'),
+  oModelLibraryOpen: $('#o-model-library-open'),
   oModelList: $('#o-model-list'),
   oModelCount: $('#o-model-count'),
+  oModelLibraryDialog: $('#o-model-library-dialog'),
+  oModelLibraryForm: $('#o-model-library-form'),
+  oModelLibraryGrid: $('#o-model-library-grid'),
+  oModelLibraryCount: $('#o-model-library-count'),
+  oModelLibraryConfirm: $('#o-model-library-confirm'),
+  oModelLibraryStatus: $('#o-model-library-status'),
+  oModelLibraryAge: $$('#o-model-library-dialog [name="model-library-age"]'),
+  oModelLibraryGender: $$('#o-model-library-dialog [name="model-library-gender"]'),
   oGarmentInput: $('#o-garment-input'),
   oGarmentAdd: $('#o-garment-add'),
   oGarmentList: $('#o-garment-list'),
@@ -1970,6 +2082,9 @@ function serializeAssetBackedItem(item, extra = {}) {
     mime: item.mime,
     label: item.label || '',
     role: item.role || '',
+    libraryId: item.libraryId || '',
+    age: item.age || '',
+    gender: item.gender || '',
     ...extra,
   }
 }
@@ -2024,6 +2139,9 @@ function sanitizeStoredAssetItem(raw = {}) {
     label: typeof raw.label === 'string' ? raw.label : '',
     role: typeof raw.role === 'string' ? raw.role : '',
     instructions: typeof raw.instructions === 'string' ? normalizeGarmentInstructions(raw.instructions) : '',
+    libraryId: typeof raw.libraryId === 'string' ? raw.libraryId : '',
+    age: typeof raw.age === 'string' ? raw.age : '',
+    gender: typeof raw.gender === 'string' ? raw.gender : '',
     dataUrl: '',
     base64: '',
   }
@@ -4757,6 +4875,25 @@ function bindOutfit() {
     dom.oModelInput.click()
   })
 
+  dom.oModelLibraryOpen?.addEventListener('click', () => {
+    if (isOutfitBusy()) return
+    openModelLibraryDialog()
+  })
+
+  dom.oModelLibraryConfirm?.addEventListener('click', addSelectedModelLibraryItems)
+
+  dom.oModelLibraryDialog?.addEventListener('close', () => {
+    modelLibrarySelectedIds = new Set()
+    if (dom.oModelLibraryStatus) dom.oModelLibraryStatus.textContent = ''
+    renderModelLibraryDialog()
+  })
+
+  for (const input of [...dom.oModelLibraryAge, ...dom.oModelLibraryGender]) {
+    input.addEventListener('change', () => {
+      renderModelLibraryDialog()
+    })
+  }
+
   dom.oGarmentAdd.addEventListener('click', () => {
     if (isOutfitBusy()) return
     dom.oGarmentInput.click()
@@ -5883,6 +6020,7 @@ function renderOutfit() {
   dom.oGarmentType.disabled = busy
   dom.oConcurrency.disabled = busy
   dom.oModelAdd.disabled = busy
+  if (dom.oModelLibraryOpen) dom.oModelLibraryOpen.disabled = busy
   dom.oGarmentAdd.disabled = busy
   renderJobList('outfit')
 
@@ -5928,6 +6066,172 @@ function formatOutfitRunEstimate(modelCount, lookCount) {
   const looks = Math.max(0, Math.floor(Number(lookCount) || 0))
   if (!models || !looks) return ''
   return `将生成 ${looks} 套搭配，共 ${models * looks} 张图`
+}
+
+function getModelLibraryFilters() {
+  return {
+    age: dom.oModelLibraryAge.find((input) => input.checked)?.value || 'all',
+    gender: dom.oModelLibraryGender.find((input) => input.checked)?.value || 'all',
+  }
+}
+
+function filterModelLibraryItems(items, filters = {}) {
+  const age = filters.age || 'all'
+  const gender = filters.gender || 'all'
+  return items.filter((item) =>
+    (age === 'all' || item.age === age) &&
+    (gender === 'all' || item.gender === gender),
+  )
+}
+
+function createModelLibraryFileName(entry) {
+  const extension = entry.src.split('.').pop() || 'png'
+  return `model-library-${entry.id}.${extension}`
+}
+
+function createModelLibraryUploadDescriptor(entry, dataUrl) {
+  return {
+    name: createModelLibraryFileName(entry),
+    mime: splitDataUrl(dataUrl)?.mime || (entry.src.endsWith('.png') ? 'image/png' : 'image/jpeg'),
+    dataUrl,
+    libraryId: entry.id,
+    label: entry.label,
+    age: entry.age,
+    gender: entry.gender,
+  }
+}
+
+function renderModelLibraryDialog() {
+  if (!dom.oModelLibraryGrid) return
+  const visibleItems = filterModelLibraryItems(MODEL_LIBRARY_ITEMS, getModelLibraryFilters())
+  if (dom.oModelLibraryCount) dom.oModelLibraryCount.textContent = String(visibleItems.length)
+  if (dom.oModelLibraryConfirm) {
+    dom.oModelLibraryConfirm.disabled = isOutfitBusy() || modelLibrarySelectedIds.size === 0
+    dom.oModelLibraryConfirm.textContent = modelLibrarySelectedIds.size
+      ? `加入 ${modelLibrarySelectedIds.size} 个模特`
+      : '加入模特列表'
+  }
+
+  dom.oModelLibraryGrid.replaceChildren(...visibleItems.map((item) => {
+    const card = document.createElement('label')
+    card.className = 'model-library-card'
+
+    const input = document.createElement('input')
+    input.type = 'checkbox'
+    input.value = item.id
+    input.checked = modelLibrarySelectedIds.has(item.id)
+    input.addEventListener('change', () => {
+      if (input.checked) modelLibrarySelectedIds.add(item.id)
+      else modelLibrarySelectedIds.delete(item.id)
+      renderModelLibraryDialog()
+    })
+    card.append(input)
+
+    const image = document.createElement('img')
+    image.src = item.src
+    image.alt = item.label
+    image.loading = 'lazy'
+    card.append(image)
+
+    const meta = document.createElement('span')
+    meta.className = 'model-library-meta'
+    const title = document.createElement('strong')
+    title.textContent = item.label
+    const tags = document.createElement('span')
+    tags.textContent = `${item.ageLabel} · ${item.genderLabel}`
+    meta.append(title, tags)
+    card.append(meta)
+
+    return card
+  }))
+}
+
+function openModelLibraryDialog() {
+  modelLibrarySelectedIds = new Set()
+  if (dom.oModelLibraryStatus) dom.oModelLibraryStatus.textContent = ''
+  renderModelLibraryDialog()
+  dom.oModelLibraryDialog?.showModal()
+}
+
+async function fetchModelLibraryDescriptor(entry) {
+  const response = await fetch(entry.src)
+  if (!response.ok) throw new Error(`无法读取模特库图片：${entry.label}`)
+  const blob = await response.blob()
+  const dataUrl = await readAsDataUrl(blobToNamedFile(blob, createModelLibraryFileName(entry)))
+  return createModelLibraryUploadDescriptor(entry, dataUrl.dataUrl)
+}
+
+function blobToNamedFile(blob, name) {
+  if (typeof File === 'function') return new File([blob], name, { type: blob.type || 'image/png' })
+  blob.name = name
+  return blob
+}
+
+async function uploadModelLibraryEntry(entry, { current, total }) {
+  const descriptor = await fetchModelLibraryDescriptor(entry)
+  if (dom.oModelLibraryStatus) dom.oModelLibraryStatus.textContent = `正在加入 ${current}/${total} · ${entry.label}`
+  const data = await postJson('/api/assets/upload', {
+    sessionId: state.runtime.sessionId || undefined,
+    kind: 'upload',
+    source: 'model_library',
+    filename: descriptor.name,
+    mime: descriptor.mime,
+    dataUrl: descriptor.dataUrl,
+  })
+  state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+  const size = await getImageDimensions(descriptor.dataUrl).catch(() => null)
+  return {
+    id: data.asset.id,
+    assetId: data.asset.id,
+    name: descriptor.name,
+    mime: data.asset.mime || descriptor.mime,
+    base64: splitDataUrl(descriptor.dataUrl)?.base64 || '',
+    dataUrl: descriptor.dataUrl,
+    width: size?.width || 0,
+    height: size?.height || 0,
+    label: descriptor.label,
+    role: '',
+    instructions: '',
+    libraryId: descriptor.libraryId,
+    age: descriptor.age,
+    gender: descriptor.gender,
+  }
+}
+
+async function addSelectedModelLibraryItems() {
+  if (isOutfitBusy() || modelLibrarySelectedIds.size === 0) return
+  const selectedItems = MODEL_LIBRARY_ITEMS.filter((item) => modelLibrarySelectedIds.has(item.id))
+  if (selectedItems.length === 0) return
+
+  resetLoadedWorkspaceForDraft('outfit')
+  setJobTab('outfit', 'current')
+  if (dom.oModelLibraryConfirm) dom.oModelLibraryConfirm.disabled = true
+  state.outfit.progress = '正在加入模特库图片…'
+  renderOutfit()
+
+  try {
+    const uploaded = []
+    for (const [index, item] of selectedItems.entries()) {
+      uploaded.push(await uploadModelLibraryEntry(item, {
+        current: index + 1,
+        total: selectedItems.length,
+      }))
+    }
+    state.outfit.models.push(...uploaded)
+    pruneOutfitResults()
+    state.outfit.progress = ''
+    modelLibrarySelectedIds = new Set()
+    saveRuntimeState()
+    renderOutfit()
+    dom.oModelLibraryDialog?.close()
+  } catch (error) {
+    const message = trimError(error)
+    if (dom.oModelLibraryStatus) dom.oModelLibraryStatus.textContent = message
+    state.outfit.progress = message
+    renderOutfit()
+  } finally {
+    renderModelLibraryDialog()
+  }
 }
 
 function renderLaneList(container, items, kind) {
@@ -6000,7 +6304,7 @@ function renderLaneList(container, items, kind) {
 
     const caption = document.createElement('div')
     caption.className = 'lane-name'
-    caption.textContent = basename(item.name)
+    caption.textContent = item.label || basename(item.name)
     node.append(caption)
 
     return node

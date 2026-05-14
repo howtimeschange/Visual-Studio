@@ -26,6 +26,10 @@ async function loadHarness(functionNames, overrides = {}) {
   const source = await readFile(APP_PATH, 'utf8')
   const context = {
     clamp: (value, min, max) => Math.min(Math.max(value, min), max),
+    splitDataUrl: (dataUrl) => {
+      const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/)
+      return match ? { mime: match[1], base64: match[2] } : null
+    },
     normalizeAspectRatio: (value) => (
       ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(String(value || '').trim())
         ? String(value).trim()
@@ -98,4 +102,43 @@ test('outfit run summary shows real look and item counts before submit', async (
     harness.formatOutfitRunEstimate(0, 4),
     '',
   )
+})
+
+test('model library filters templates by age and gender', async () => {
+  const source = await readFile(APP_PATH, 'utf8')
+  const libraryMatch = source.match(/const MODEL_LIBRARY_ITEMS = (\[[\s\S]*?\])\n\n/)
+  assert.ok(libraryMatch, 'MODEL_LIBRARY_ITEMS should be defined')
+  const library = vm.runInNewContext(libraryMatch[1])
+  const harness = await loadHarness(['filterModelLibraryItems'])
+
+  const girls = harness.filterModelLibraryItems(library, { age: 'child', gender: 'female' })
+  const adultMen = harness.filterModelLibraryItems(library, { age: 'adult', gender: 'male' })
+  const allAdults = harness.filterModelLibraryItems(library, { age: 'adult', gender: 'all' })
+
+  assert.equal(girls.length, 3)
+  assert.equal(adultMen.length, 1)
+  assert.equal(allAdults.length, 5)
+  assert.ok(girls.every((item) => item.age === 'child' && item.gender === 'female'))
+})
+
+test('selected model library entries become upload-ready model files', async () => {
+  const harness = await loadHarness(['createModelLibraryFileName', 'createModelLibraryUploadDescriptor'])
+  const entry = {
+    id: 'child-girl-kids',
+    label: '儿童女孩',
+    age: 'child',
+    gender: 'female',
+    src: '/model-library/children/kids-girl.jpg',
+  }
+
+  assert.equal(harness.createModelLibraryFileName(entry), 'model-library-child-girl-kids.jpg')
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.createModelLibraryUploadDescriptor(entry, 'data:image/jpeg;base64,abc'))), {
+    name: 'model-library-child-girl-kids.jpg',
+    mime: 'image/jpeg',
+    dataUrl: 'data:image/jpeg;base64,abc',
+    libraryId: 'child-girl-kids',
+    label: '儿童女孩',
+    age: 'child',
+    gender: 'female',
+  })
 })

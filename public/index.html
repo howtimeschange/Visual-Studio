@@ -518,7 +518,10 @@
           </div>
           <div class="refs-dropzone">
             <input type="file" id="o-model-input" accept="image/*" multiple hidden />
-            <button class="dz-add" id="o-model-add">＋ 添加模特图</button>
+            <div class="model-source-actions">
+              <button class="dz-add" id="o-model-add">＋ 添加模特图</button>
+              <button type="button" class="dz-add model-library-open" id="o-model-library-open">从模特库选择</button>
+            </div>
           </div>
           <div class="lane-list" id="o-model-list"></div>
         </div>
@@ -561,6 +564,36 @@
         <div id="o-empty" class="empty">先上传模特和服装单品，系统会自动组合搭配矩阵</div>
       </div>
     </section>
+
+    <dialog id="o-model-library-dialog" class="model-library-dialog">
+      <form method="dialog" id="o-model-library-form">
+        <div class="dialog-copy">
+          <h3>选择模特</h3>
+          <p class="hint">从内置模特库中多选，选中后会加入当前批量换装的模特列表。</p>
+        </div>
+        <div class="model-library-filters" aria-label="筛选模特">
+          <div class="model-library-filter-group" aria-label="年龄">
+            <label><input type="radio" name="model-library-age" value="all" checked />全部年龄</label>
+            <label><input type="radio" name="model-library-age" value="adult" />成人</label>
+            <label><input type="radio" name="model-library-age" value="child" />儿童</label>
+          </div>
+          <div class="model-library-filter-group" aria-label="性别">
+            <label><input type="radio" name="model-library-gender" value="all" checked />全部性别</label>
+            <label><input type="radio" name="model-library-gender" value="female" />女</label>
+            <label><input type="radio" name="model-library-gender" value="male" />男</label>
+          </div>
+        </div>
+        <div class="model-library-toolbar">
+          <span class="muted"><span id="o-model-library-count">0</span> 个可选模特</span>
+        </div>
+        <div class="model-library-grid" id="o-model-library-grid"></div>
+        <div class="dialog-actions">
+          <span class="prompt-copy-status" id="o-model-library-status"></span>
+          <button type="submit" class="ghost" value="cancel">取消</button>
+          <button type="button" class="primary" id="o-model-library-confirm">加入模特列表</button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- ═══════════════ STYLE TRANSFER VIEW ═══════════════ -->
     <section class="view" id="view-style">
