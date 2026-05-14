@@ -6037,6 +6037,7 @@ function renderOutfit() {
 
   const signature = getOutfitSignature({
     modelId: state.outfit.model,
+    modelFingerprint: getOutfitModelFingerprint(),
     garmentFingerprint: getOutfitGarmentFingerprint(),
   })
 
@@ -6282,14 +6283,16 @@ function renderLaneList(container, items, kind) {
         renderOutfit()
       })
       node.append(roleSelect)
+    }
 
+    if (kind === 'model' || kind === 'garment') {
       const instructionInput = document.createElement('input')
       instructionInput.type = 'text'
       instructionInput.className = 'lane-instruction-input'
-      instructionInput.placeholder = '这个款的特殊要求…'
+      instructionInput.placeholder = kind === 'model' ? '这个模特的特殊要求…' : '这个款的特殊要求…'
       instructionInput.value = item.instructions || ''
       instructionInput.disabled = busy
-      instructionInput.setAttribute('aria-label', `${basename(item.name)} 的额外要求`)
+      instructionInput.setAttribute('aria-label', `${item.label || basename(item.name)} 的额外要求`)
       instructionInput.addEventListener('input', () => {
         item.instructions = instructionInput.value.slice(0, 800)
         saveRuntimeState()
@@ -6297,6 +6300,7 @@ function renderLaneList(container, items, kind) {
       instructionInput.addEventListener('change', () => {
         item.instructions = normalizeGarmentInstructions(instructionInput.value)
         saveRuntimeState()
+        if (kind === 'model') pruneOutfitResults()
         renderOutfit()
       })
       node.append(instructionInput)
@@ -6397,7 +6401,11 @@ async function runOutfitBatch() {
 
     const data = await postJson('/api/jobs/outfit-batch', {
       sessionId: state.runtime.sessionId || undefined,
-      modelAssetIds: state.outfit.models.map((item) => item.assetId || item.id),
+      models: state.outfit.models.map((item) => ({
+        assetId: item.assetId || item.id,
+        label: item.label || basename(item.name),
+        instructions: normalizeGarmentInstructions(item.instructions),
+      })),
       garments: state.outfit.garments.map((item) => ({
         assetId: item.assetId || item.id,
         role: item.role || 'full_outfit',
@@ -6446,6 +6454,7 @@ function getTranslateRunConfig() {
 function getOutfitRunConfig() {
   return {
     modelId: state.outfit.model,
+    modelFingerprint: getOutfitModelFingerprint(),
     garmentFingerprint: getOutfitGarmentFingerprint(),
     clientKeys: { ...state.keys },
   }
@@ -6498,7 +6507,12 @@ async function executeOutfitJob({ model, look, key, runConfig, signature }) {
       renderOutfit()
       return postJson('/api/outfit-swap', {
         modelId: runConfig.modelId,
-        model: { base64: model.base64, mime: model.mime },
+        model: {
+          base64: model.base64,
+          mime: model.mime,
+          label: model.label || basename(model.name),
+          instructions: normalizeGarmentInstructions(model.instructions),
+        },
         garments: look.items.map((garment) => ({
           base64: garment.base64,
           mime: garment.mime,
@@ -6719,18 +6733,63 @@ function createVisualHeaderCell(item) {
   return cell
 }
 
+function getOutfitLookPreviewItems(look) {
+  return (Array.isArray(look?.items) ? look.items : [])
+    .filter((item) => item?.dataUrl)
+    .map((item) => ({
+      src: item.dataUrl,
+      alt: item.name || item.label || '',
+      label: basename(item.name || item.label || ''),
+    }))
+}
+
+function createOutfitLookPreview(look) {
+  const previewItems = getOutfitLookPreviewItems(look)
+  if (previewItems.length <= 1) {
+    return createPreviewButton({
+      src: previewItems[0]?.src || '',
+      alt: look.label,
+      caption: look.label,
+      downloadName: `${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
+      className: 'img-button',
+      imageClassName: 'matrix-thumb',
+    })
+  }
+
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'img-button matrix-stack-button'
+  button.setAttribute('aria-label', `查看 ${look.label}`)
+
+  const stack = document.createElement('span')
+  stack.className = `matrix-thumb-stack matrix-thumb-stack-${Math.min(previewItems.length, 4)}`
+  previewItems.slice(0, 4).forEach((item, index) => {
+    const image = document.createElement('img')
+    image.className = 'matrix-thumb matrix-thumb-stack-item'
+    image.src = item.src
+    image.alt = item.alt || `${look.label} ${index + 1}`
+    image.style.setProperty('--stack-index', String(index))
+    image.style.setProperty('--stack-total', String(Math.min(previewItems.length, 4)))
+    stack.append(image)
+  })
+  button.append(stack)
+
+  button.addEventListener('click', () => {
+    openLightbox({
+      src: previewItems[0]?.src || '',
+      caption: look.label,
+      downloadName: `${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
+    })
+  })
+
+  return button
+}
+
 function createOutfitLookHeaderCell(look) {
   const cell = document.createElement('th')
   cell.className = 'matrix-head matrix-head-look'
 
-  cell.append(createPreviewButton({
-    src: look.items[0]?.dataUrl || '',
-    alt: look.label,
-    caption: look.label,
-    downloadName: `${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
-    className: 'img-button',
-    imageClassName: 'matrix-thumb',
-  }))
+  cell.append(createOutfitLookPreview(look))
 
   const label = document.createElement('div')
   label.className = 'matrix-label'
@@ -7953,9 +8012,13 @@ function getTranslateSignatureFromJob(job) {
 
 function getOutfitSignatureFromJob(job) {
   const garmentFingerprint = String(job?.configJson?.garmentFingerprint || '').trim()
+  const modelFingerprint = Array.isArray(job?.configJson?.modelInstructions)
+    ? job.configJson.modelInstructions.map(String).sort().join('|')
+    : ''
   if (garmentFingerprint) {
     return getOutfitSignature({
       modelId: String(job?.configJson?.modelId || state.outfit.model),
+      modelFingerprint,
       garmentFingerprint,
     })
   }
@@ -7967,6 +8030,7 @@ function getOutfitSignatureFromJob(job) {
   ].filter(Boolean)
   return getOutfitSignature({
     modelId: String(job?.configJson?.modelId || state.outfit.model),
+    modelFingerprint,
     garmentFingerprint: garmentParts.length ? garmentParts.sort().join('|') : getOutfitGarmentFingerprint(),
   })
 }
@@ -8201,8 +8265,16 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
   const garmentIds = unique(items.flatMap((item) =>
     Array.isArray(item.inputJson?.lookAssetIds) ? item.inputJson.lookAssetIds.map(String) : [],
   ).filter(Boolean))
+  const modelMeta = new Map()
   const garmentMeta = new Map()
   for (const item of items) {
+    const modelAssetId = String(item.inputJson?.modelAssetId || '')
+    if (modelAssetId && !modelMeta.has(modelAssetId)) {
+      modelMeta.set(modelAssetId, {
+        label: String(item.inputJson?.modelLabel || modelAssetId),
+        instructions: normalizeGarmentInstructions(item.inputJson?.modelInstructions),
+      })
+    }
     const assetIds = Array.isArray(item.inputJson?.lookAssetIds) ? item.inputJson.lookAssetIds.map(String) : []
     const roles = Array.isArray(item.inputJson?.lookRoles) ? item.inputJson.lookRoles.map(String) : []
     const labels = Array.isArray(item.inputJson?.lookLabels) ? item.inputJson.lookLabels.map(String) : []
@@ -8222,7 +8294,7 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
   const existingGarments = new Map(state.outfit.garments.map((item) => [item.assetId || item.id, item]))
   const missingModels = modelIds
     .filter((assetId) => !existingModels.has(assetId))
-    .map((assetId) => ({ id: assetId, assetId, name: assetId, mime: 'image/png' }))
+    .map((assetId) => ({ id: assetId, assetId, name: modelMeta.get(assetId)?.label || assetId, mime: 'image/png' }))
   const missingGarments = garmentIds
     .filter((assetId) => !existingGarments.has(assetId))
     .map((assetId) => {
@@ -8235,8 +8307,14 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
     hydrateAssetItems(missingGarments),
   ])
   state.outfit.models = [
-    ...state.outfit.models.filter((item) => modelIds.includes(item.assetId || item.id)),
-    ...hydratedModels,
+    ...state.outfit.models.filter((item) => modelIds.includes(item.assetId || item.id)).map((item) => ({
+      ...item,
+      ...(modelMeta.get(item.assetId || item.id) || {}),
+    })),
+    ...hydratedModels.map((item) => ({
+      ...item,
+      instructions: normalizeGarmentInstructions(item.instructions || modelMeta.get(item.assetId || item.id)?.instructions),
+    })),
   ]
   state.outfit.garments = [
     ...state.outfit.garments.filter((item) => garmentIds.includes(item.assetId || item.id)).map((item) => ({
@@ -8771,8 +8849,16 @@ function getTranslateSignature(config) {
 function getOutfitSignature(config) {
   return JSON.stringify({
     modelId: config.modelId,
+    modelFingerprint: config.modelFingerprint || '',
     garmentFingerprint: config.garmentFingerprint || '',
   })
+}
+
+function getOutfitModelFingerprint() {
+  return state.outfit.models
+    .map((item) => `${item.id}:${normalizeGarmentInstructions(item.instructions)}`)
+    .sort()
+    .join('|')
 }
 
 function getOutfitGarmentFingerprint() {
@@ -8783,6 +8869,9 @@ function getOutfitGarmentFingerprint() {
 }
 
 function normalizeOutfitGarmentInstructions() {
+  for (const item of state.outfit.models) {
+    item.instructions = normalizeGarmentInstructions(item.instructions)
+  }
   for (const item of state.outfit.garments) {
     item.instructions = normalizeGarmentInstructions(item.instructions)
   }

@@ -89,6 +89,29 @@ function getOutfitGarmentFingerprint(
     .join('|')
 }
 
+function normalizeOutfitModels(body: any): Array<{ assetId: string; label: string; instructions: string }> {
+  if (Array.isArray(body?.models) && body.models.length > 0) {
+    return body.models
+      .filter((item: any) => item?.assetId || item?.id)
+      .map((item: any) => {
+        const assetId = String(item.assetId || item.id)
+        return {
+          assetId,
+          label: String(item.label || item.name || assetId),
+          instructions: cleanInstruction(item.instructions),
+        }
+      })
+  }
+
+  return (Array.isArray(body?.modelAssetIds) ? body.modelAssetIds : [])
+    .filter(Boolean)
+    .map((assetId: any) => ({
+      assetId: String(assetId),
+      label: String(assetId),
+      instructions: '',
+    }))
+}
+
 function createAssetDataUrlCache(env: Env) {
   const cache = new Map<string, Promise<string | null>>()
   return (assetId: string) => {
@@ -507,7 +530,7 @@ export async function submitOutfitBatch(
 ) {
   const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
   const session = await ensureSession(env, body?.sessionId, userId)
-  const modelAssetIds = Array.isArray(body?.modelAssetIds) ? body.modelAssetIds.filter(Boolean) : []
+  const models = normalizeOutfitModels(body)
   const garments = Array.isArray(body?.garments)
     ? body.garments
       .filter((item) => item?.assetId)
@@ -518,7 +541,7 @@ export async function submitOutfitBatch(
         instructions: cleanInstruction(item.instructions),
       }))
     : []
-  if (modelAssetIds.length === 0) throw createRunnerError('modelAssetIds required', 400)
+  if (models.length === 0) throw createRunnerError('modelAssetIds required', 400)
   if (garments.length === 0) throw createRunnerError('garments required', 400)
 
   const looks = buildOutfitLooks(garments.map((item) => ({
@@ -542,6 +565,7 @@ export async function submitOutfitBatch(
     configJson: {
       modelId: body?.modelId || 'nano-banana-2',
       instructions: cleanInstruction(body?.instructions),
+      modelInstructions: models.map((item) => `${item.assetId}:${item.instructions}`).sort(),
       garmentRoles: garments.map((item) => `${item.assetId}:${item.role}`).sort(),
       garmentInstructions: garments.map((item) => `${item.assetId}:${item.instructions}`).sort(),
       garmentFingerprint,
@@ -551,22 +575,24 @@ export async function submitOutfitBatch(
         modelId: body?.modelId || 'nano-banana-2',
         instructions: cleanInstruction(body?.instructions),
         garments,
-        modelAssetIds,
+        models,
       }),
     },
     summaryJson: { lookCount: looks.length },
-    progressTotal: modelAssetIds.length * looks.length,
+    progressTotal: models.length * looks.length,
     progressDone: 0,
     progressFailed: 0,
   })
 
-  const items = await createJobItems(env, job.id, modelAssetIds.flatMap((modelAssetId: string) =>
+  const items = await createJobItems(env, job.id, models.flatMap((model) =>
     looks.map((look) => ({
       jobId: job.id,
       itemType: 'outfit_cell',
       status: 'queued',
       inputJson: {
-        modelAssetId,
+        modelAssetId: model.assetId,
+        modelLabel: model.label,
+        modelInstructions: model.instructions,
         lookAssetIds: look.items.map((item) => item.assetId || item.id),
         lookRoles: look.roles,
         lookLabels: look.items.map((item) => item.label || item.assetId || item.id),
@@ -646,7 +672,11 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
 
       const { result, attempts } = await runWithAutoRetry(() => executeOutfitSwap({
         modelId: job.configJson.modelId,
-        model: modelImage,
+        model: {
+          ...modelImage,
+          label: String(item.inputJson.modelLabel || item.inputJson.modelAssetId || ''),
+          instructions: cleanInstruction(item.inputJson.modelInstructions),
+        },
         garments,
         instructions: job.configJson.instructions,
         analysis,

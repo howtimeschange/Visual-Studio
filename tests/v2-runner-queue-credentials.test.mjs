@@ -448,6 +448,46 @@ test('submitOutfitBatch stores per-garment instructions on each queued look item
   }
 })
 
+test('submitOutfitBatch stores per-model instructions on each queued look item', async () => {
+  const { mod, cleanup } = await importRunner()
+  const env = {
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  try {
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: 'session_outfit_model_instructions',
+      models: [
+        {
+          assetId: 'model_1',
+          label: 'studio model',
+          instructions: 'Keep her left hand visible and use a calmer smile.',
+        },
+      ],
+      garments: [
+        {
+          assetId: 'dress_1',
+          role: 'dress',
+          label: 'dress.png',
+        },
+      ],
+      concurrency: 1,
+    })
+
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    const job = await mod.getJob(env, submitted.jobId)
+
+    assert.equal(item.inputJson.modelAssetId, 'model_1')
+    assert.equal(item.inputJson.modelLabel, 'studio model')
+    assert.equal(item.inputJson.modelInstructions, 'Keep her left hand visible and use a calmer smile.')
+    assert.equal(job.configJson.modelInstructions[0], 'model_1:Keep her left hand visible and use a calmer smile.')
+  } finally {
+    await cleanup()
+  }
+})
+
 test('pauseJob prevents a queued job from running until it is resumed', async () => {
   const { mod, cleanup } = await importRunner()
   const sent = []

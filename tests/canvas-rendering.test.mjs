@@ -35,6 +35,8 @@ async function loadHarness(functionNames, overrides = {}) {
         ? String(value).trim()
         : '1:1'
     ),
+    basename: (name = '') => String(name).replace(/\.[^.]+$/, ''),
+    normalizeGarmentInstructions: (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 800),
     saveRuntimeState: () => {},
     ...overrides,
   }
@@ -102,6 +104,47 @@ test('outfit run summary shows real look and item counts before submit', async (
     harness.formatOutfitRunEstimate(0, 4),
     '',
   )
+})
+
+test('outfit signature changes when per-model instructions change', async () => {
+  const state = {
+    outfit: {
+      models: [
+        { id: 'model-1', instructions: 'keep left hand visible' },
+      ],
+    },
+  }
+  const harness = await loadHarness(['getOutfitSignature', 'getOutfitModelFingerprint'], { state })
+
+  const first = harness.getOutfitSignature({
+    modelId: 'nano-banana-2',
+    modelFingerprint: harness.getOutfitModelFingerprint(),
+    garmentFingerprint: 'dress-1:dress:',
+  })
+  state.outfit.models[0].instructions = 'use a calmer smile'
+  const second = harness.getOutfitSignature({
+    modelId: 'nano-banana-2',
+    modelFingerprint: harness.getOutfitModelFingerprint(),
+    garmentFingerprint: 'dress-1:dress:',
+  })
+
+  assert.notEqual(first, second)
+})
+
+test('outfit look previews include every garment in a combined look', async () => {
+  const harness = await loadHarness(['getOutfitLookPreviewItems'])
+  const look = {
+    label: '上衣 + 下装',
+    items: [
+      { id: 'top-1', name: 'top.png', dataUrl: 'data:image/png;base64,top' },
+      { id: 'bottom-1', name: 'bottom.png', dataUrl: 'data:image/png;base64,bottom' },
+    ],
+  }
+
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.getOutfitLookPreviewItems(look))), [
+    { src: 'data:image/png;base64,top', alt: 'top.png', label: 'top' },
+    { src: 'data:image/png;base64,bottom', alt: 'bottom.png', label: 'bottom' },
+  ])
 })
 
 test('model library filters templates by age and gender', async () => {

@@ -2,7 +2,7 @@
 // Request:
 // {
 //   modelId,
-//   model:    { base64, mime },     // person photo
+//   model:    { base64, mime, label?, instructions? },     // person photo
 //   garment?: { base64, mime },     // legacy single clothing photo
 //   garments?: [{ base64, mime, role?, label?, instructions? }],
 //   garmentType?: 'top'|'bottom'|'dress'|'outerwear'|'full_outfit'|'shoes'|'accessory',
@@ -47,7 +47,7 @@ export async function executeOutfitSwap(body: any, env: Env) {
     clientKeys,
   }, env)
 
-  const prompt = buildSwapPrompt(garmentItems, instructions, analysis)
+  const prompt = buildSwapPrompt(model, garmentItems, instructions, analysis)
   const result = await callImageModel(
     baseUrl, genKey, MODEL_MAP[modelId],
     [
@@ -233,6 +233,7 @@ Rules:
 }
 
 function buildSwapPrompt(
+  model: any,
   garments: GarmentItem[],
   instructions: string,
   analysis: OutfitAnalysis | null,
@@ -269,6 +270,7 @@ ${analysis.garments.map((item) => {
 }).join('\n')}`
     : ''
   const perGarmentInstructions = buildPerGarmentInstructions(garments)
+  const modelInstructions = cleanGarmentInstructions(model?.instructions)
 
   return `# VIRTUAL TRY-ON / OUTFIT SWAP
 
@@ -311,6 +313,7 @@ ${garmentLines}
 - If a garment reference is a flat-lay or product cutout, transfer the garment itself only; do not import its background or mannequin
 
 ${instructions ? `## ADDITIONAL INSTRUCTIONS\n${instructions}\n` : ''}
+${modelInstructions ? `## MODEL ADDITIONAL INSTRUCTIONS\nApply only to Image #1, the model${model?.label ? ` (${model.label})` : ''}: ${modelInstructions}\n` : ''}
 ${perGarmentInstructions ? `## PER-GARMENT ADDITIONAL INSTRUCTIONS\n${perGarmentInstructions}\n` : ''}
 Return one final composed image.`
 }
