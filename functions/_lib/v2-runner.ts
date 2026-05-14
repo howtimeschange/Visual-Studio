@@ -43,6 +43,7 @@ import { executeDirectGenerate, normalizeDirectGenerateRequest } from '../api/ge
 type WaitUntil = (promise: Promise<unknown>) => void
 
 type ClientKeys = Record<string, unknown>
+type TranslateFontMode = 'match_original' | 'reference'
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
@@ -78,6 +79,29 @@ function clampMs(value: unknown, fallback: number): number {
 
 function cleanInstruction(value: unknown): string {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 800)
+}
+
+function normalizeTranslateFontMode(value: unknown): TranslateFontMode {
+  return value === 'reference' ? value : 'match_original'
+}
+
+function cleanFontReferenceAssetId(value: unknown): string {
+  return String(value || '').trim().slice(0, 120)
+}
+
+function normalizeTranslateFontConfig(body: any): {
+  fontMode: TranslateFontMode
+  fontFamily: string
+  fontReferenceAssetId: string
+  fontPrompt: string
+} {
+  const fontMode = normalizeTranslateFontMode(body?.fontMode)
+  return {
+    fontMode,
+    fontFamily: '',
+    fontReferenceAssetId: fontMode === 'reference' ? cleanFontReferenceAssetId(body?.fontReferenceAssetId) : '',
+    fontPrompt: fontMode === 'reference' ? cleanInstruction(body?.fontPrompt) : '',
+  }
 }
 
 function getOutfitGarmentFingerprint(
@@ -345,6 +369,7 @@ export async function submitTranslateBatch(
   if (targetLanguages.length === 0) throw createRunnerError('targetLanguages required', 400)
 
   const jobId = createId('job')
+  const fontConfig = normalizeTranslateFontConfig(body)
   const configJson = {
     modelId: body?.modelId || 'nano-banana-2',
     sourceLanguage: body?.sourceLanguage || 'auto',
@@ -352,12 +377,14 @@ export async function submitTranslateBatch(
     preserveBrand: body?.preserveBrand !== false,
     concurrency: Math.max(1, Number(body?.concurrency || 3)),
     assetIds,
+    ...fontConfig,
     configHash: await stableHash({
       modelId: body?.modelId || 'nano-banana-2',
       sourceLanguage: body?.sourceLanguage || 'auto',
       targetLanguages,
       preserveBrand: body?.preserveBrand !== false,
       assetIds,
+      ...fontConfig,
     }),
   }
   const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
@@ -426,12 +453,15 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
 
     try {
       const assetId = String(item.inputJson.assetId || '')
-      const [dataUrl, ocrPlan] = await Promise.all([
+      const fontReferenceAssetId = String(job.configJson.fontReferenceAssetId || '').trim()
+      const [dataUrl, ocrPlan, fontReferenceDataUrl] = await Promise.all([
         getCachedAssetDataUrl(assetId),
         getCachedTranslatePlan(assetId),
+        fontReferenceAssetId ? getCachedAssetDataUrl(fontReferenceAssetId) : Promise.resolve(null),
       ])
       if (!dataUrl) throw createRunnerError(`Asset not found: ${assetId}`, 404)
       const { mime, base64 } = splitDataUrl(dataUrl)
+      const fontReferenceImage = fontReferenceDataUrl ? splitDataUrl(fontReferenceDataUrl) : null
       const { result, attempts } = await runWithAutoRetry(() => executeTranslate({
         imageBase64: base64,
         mime,
@@ -439,6 +469,10 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
         targetLanguage: item.inputJson.targetLanguage,
         modelId: job.configJson.modelId,
         preserveBrand: job.configJson.preserveBrand,
+        fontMode: job.configJson.fontMode,
+        fontFamily: job.configJson.fontFamily,
+        fontReferenceImage,
+        fontPrompt: job.configJson.fontPrompt,
         ocrPlan,
         clientKeys,
       }, env))

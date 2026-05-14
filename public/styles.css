@@ -1175,6 +1175,39 @@ dialog select,
   padding-top: var(--space-xs);
 }
 
+.translate-control-grid .font-field {
+  grid-column: span 1;
+}
+
+.translate-control-grid .font-reference-field {
+  grid-column: span 2;
+}
+
+.translate-control-grid .font-prompt-field {
+  grid-column: 1 / -1;
+}
+
+.font-reference-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.font-reference-row button.ghost {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.font-reference-name {
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .target-chipbar {
   min-height: 24px;
   margin-top: var(--space-sm);
@@ -4666,7 +4699,9 @@ button.compact {
     grid-column: span 2;
   }
 
-  .translate-control-grid .preserve-field {
+  .translate-control-grid .preserve-field,
+  .translate-control-grid .font-reference-field,
+  .translate-control-grid .font-prompt-field {
     grid-column: 1 / -1;
   }
 }
@@ -4714,7 +4749,9 @@ button.compact {
   }
 
   .translate-control-grid .target-field,
-  .translate-control-grid .preserve-field {
+  .translate-control-grid .preserve-field,
+  .translate-control-grid .font-reference-field,
+  .translate-control-grid .font-prompt-field {
     grid-column: 1 / -1;
   }
 
@@ -4806,7 +4843,10 @@ button.compact {
 
   .translate-control-grid,
   .translate-control-grid .target-field,
-  .translate-control-grid .preserve-field {
+  .translate-control-grid .preserve-field,
+  .translate-control-grid .font-field,
+  .translate-control-grid .font-reference-field,
+  .translate-control-grid .font-prompt-field {
     grid-column: auto;
   }
 

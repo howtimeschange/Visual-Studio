@@ -54,6 +54,58 @@ async function createUploadHarness() {
   return context
 }
 
+async function createTranslateRunConfigHarness() {
+  const source = await readFile(APP_PATH, 'utf8')
+  const uploads = []
+  const context = {
+    TRANSLATE_FONT_MODES: new Set(['match_original', 'reference']),
+    state: {
+      runtime: {
+        sessionId: 'sess_existing',
+      },
+      keys: {},
+      translate: {
+        source: 'auto',
+        targets: ['th'],
+        model: 'nano-banana-2',
+        preserveBrand: true,
+        fontMode: 'preset',
+        fontFamily: '',
+        fontPrompt: 'Rounded campaign headline.',
+        fontReference: null,
+      },
+    },
+    splitDataUrl: (dataUrl) => {
+      const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/)
+      return match ? { mime: match[1], base64: match[2] } : null
+    },
+    saveRuntimeState: () => {},
+    postJson: async (url, body) => {
+      uploads.push({ url, body })
+      return {
+        sessionId: 'sess_uploaded',
+        asset: {
+          id: 'asset_kanit_reference',
+          mime: 'image/png',
+        },
+      }
+    },
+  }
+
+  const harnessSource = [
+    extractFunction(source, 'normalizeTranslateFontMode'),
+    extractFunction(source, 'normalizeTranslateFontFamily'),
+    extractFunction(source, 'normalizeTranslateFontPrompt'),
+    extractFunction(source, 'getEffectiveTranslateFontMode'),
+    extractFunction(source, 'getTranslateRunConfig'),
+    extractFunction(source, 'prepareTranslateRunConfig'),
+  ].join('\n')
+
+  vm.createContext(context)
+  vm.runInContext(harnessSource, context)
+  return { ...context, uploads }
+}
+
 test('prepareAssetItems reports upload progress for each file', async () => {
   const harness = await createUploadHarness()
   const progress = []
@@ -68,4 +120,17 @@ test('prepareAssetItems reports upload progress for each file', async () => {
     { current: 2, total: 2, filename: 'b.png' },
   ])
   assert.equal(harness.state.runtime.sessionId, 'sess_uploaded')
+})
+
+test('removed font preset mode does not generate or upload a font reference image', async () => {
+  const harness = await createTranslateRunConfigHarness()
+
+  const config = await harness.prepareTranslateRunConfig()
+
+  assert.equal(harness.uploads.length, 0)
+  assert.equal(config.fontMode, 'match_original')
+  assert.equal(config.fontFamily, '')
+  assert.equal(config.fontReferenceAssetId, '')
+  assert.equal(config.fontReferenceImage, null)
+  assert.equal(config.fontPrompt, '')
 })

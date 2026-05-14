@@ -47,6 +47,8 @@ const MODEL_OPTIONS = [
   { id: 'gpt-image-2', label: 'GPT Image 2', hint: 'OpenAI 图像模型' },
 ]
 
+const TRANSLATE_FONT_MODES = new Set(['match_original', 'reference'])
+
 const GARMENT_ROLE_OPTIONS = [
   { value: 'full_outfit', label: '整套' },
   { value: 'top', label: '上衣' },
@@ -247,6 +249,10 @@ const state = {
     model: 'nano-banana-2',
     preserveBrand: true,
     concurrency: 3,
+    fontMode: 'match_original',
+    fontFamily: '',
+    fontPrompt: '',
+    fontReference: null,
     items: [],
     running: false,
     progress: '',
@@ -400,6 +406,14 @@ const dom = {
   tModel: $('#t-model'),
   tConcurrency: $('#t-concurrency'),
   tPreserve: $('#t-preserve'),
+  tFontMode: $('#t-font-mode'),
+  tFontPrompt: $('#t-font-prompt'),
+  tFontPromptWrap: $('#t-font-prompt-wrap'),
+  tFontReferenceWrap: $('#t-font-reference-wrap'),
+  tFontFileInput: $('#t-font-file-input'),
+  tFontBrowseBtn: $('#t-font-browse-btn'),
+  tFontClearBtn: $('#t-font-clear-btn'),
+  tFontReferenceName: $('#t-font-reference-name'),
   tDropzone: $('#t-dropzone'),
   tFileInput: $('#t-file-input'),
   tBrowseBtn: $('#t-browse-btn'),
@@ -713,6 +727,7 @@ function hydrateStoredState() {
   state.translate.jobPage = runtime.translate.jobPage
   state.translate.jobs = runtime.translate.jobs
   state.translate.items = runtime.translate.items
+  state.translate.fontReference = runtime.translate.fontReference || null
   state.generate.elements = runtime.generate.elements || []
   state.generate.aiMessages = []
   state.generate.scale = runtime.generate.scale || 1
@@ -762,7 +777,34 @@ function sanitizeTranslatePrefs(raw = {}) {
     model: getModel(raw.model)?.id || state.translate.model,
     preserveBrand: typeof raw.preserveBrand === 'boolean' ? raw.preserveBrand : state.translate.preserveBrand,
     concurrency: clamp(Number(raw.concurrency) || state.translate.concurrency, 1, 6),
+    fontMode: normalizeTranslateFontMode(raw.fontMode),
+    fontFamily: '',
+    fontPrompt: normalizeTranslateFontPrompt(raw.fontPrompt),
   }
+}
+
+function normalizeTranslateFontMode(value) {
+  return TRANSLATE_FONT_MODES.has(String(value || '')) ? String(value) : 'match_original'
+}
+
+function normalizeTranslateFontFamily(value) {
+  return ''
+}
+
+function normalizeTranslateFontPrompt(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 500)
+}
+
+function getEffectiveTranslateFontMode(config = state.translate) {
+  const mode = normalizeTranslateFontMode(config.fontMode)
+  if (mode === 'reference' && !config.fontReferenceAssetId && !config.fontReference?.assetId) {
+    return 'match_original'
+  }
+  return mode
+}
+
+async function prepareTranslateRunConfig() {
+  return getTranslateRunConfig()
 }
 
 function sanitizeGeneratePrefs(raw = {}) {
@@ -797,6 +839,9 @@ function savePrefs() {
       model: state.translate.model,
       preserveBrand: state.translate.preserveBrand,
       concurrency: state.translate.concurrency,
+      fontMode: state.translate.fontMode,
+      fontFamily: state.translate.fontFamily,
+      fontPrompt: state.translate.fontPrompt,
     },
     generate: {
       model: state.generate.model,
@@ -833,6 +878,9 @@ function createRuntimeStorageSnapshot() {
       jobPage: Math.max(1, Number(state.translate.jobPage) || 1),
       jobs: state.translate.jobs.map(serializeJobTask),
       items: state.translate.items.map((item) => serializeAssetBackedItem(item)),
+      fontReference: state.translate.fontReference
+        ? serializeAssetBackedItem(state.translate.fontReference)
+        : null,
     },
     generate: {
       projectId: state.generate.projectId || '',
@@ -874,6 +922,7 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
       jobPage: Math.max(1, Number(snapshot.translate?.jobPage) || 1),
       jobs: Array.isArray(snapshot.translate?.jobs) ? snapshot.translate.jobs.slice(-RUNTIME_FALLBACK_TASK_LIMIT) : [],
       items: Array.isArray(snapshot.translate?.items) ? snapshot.translate.items.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
+      fontReference: snapshot.translate?.fontReference || null,
     },
     generate: {
       projectId: String(snapshot.generate?.projectId || ''),
@@ -1277,6 +1326,9 @@ function sanitizeRuntimeState(raw = {}) {
       .filter(Boolean)
       .map((item) => ({ ...item, results: {} }))
     : []
+  const translateFontReference = raw.translate?.fontReference
+    ? sanitizeStoredAssetItem(raw.translate.fontReference)
+    : null
   const generateElements = Array.isArray(raw.generate?.elements)
     ? raw.generate.elements.map((el) => sanitizeCanvasElement(el)).filter(Boolean)
     : []
@@ -1302,6 +1354,7 @@ function sanitizeRuntimeState(raw = {}) {
       jobPage: Math.max(1, Number(raw.translate?.jobPage) || 1),
       jobs: translateJobs,
       items: translateItems,
+      fontReference: translateFontReference,
     },
     generate: {
       projectId: typeof raw.generate?.projectId === 'string' ? raw.generate.projectId : '',
@@ -2503,6 +2556,57 @@ function bindTranslate() {
     state.translate.preserveBrand = dom.tPreserve.checked
     savePrefs()
     renderTranslate()
+  })
+
+  dom.tFontMode?.addEventListener('change', () => {
+    state.translate.fontMode = normalizeTranslateFontMode(dom.tFontMode.value)
+    pruneTranslateResults()
+    savePrefs()
+    renderTranslate()
+  })
+
+  dom.tFontPrompt?.addEventListener('input', () => {
+    state.translate.fontPrompt = normalizeTranslateFontPrompt(dom.tFontPrompt.value)
+    pruneTranslateResults()
+    savePrefs()
+  })
+
+  dom.tFontBrowseBtn?.addEventListener('click', () => {
+    if (isTranslateBusy()) return
+    dom.tFontFileInput.click()
+  })
+
+  dom.tFontClearBtn?.addEventListener('click', () => {
+    if (isTranslateBusy()) return
+    state.translate.fontReference = null
+    if (state.translate.fontMode === 'reference') state.translate.fontMode = 'match_original'
+    pruneTranslateResults()
+    saveRuntimeState()
+    renderTranslate()
+  })
+
+  dom.tFontFileInput?.addEventListener('change', async () => {
+    if (!dom.tFontFileInput.files?.length || isTranslateBusy()) return
+    state.translate.progress = '正在上传字体参考图…'
+    renderTranslate()
+    try {
+      const [reference] = await prepareAssetItems(dom.tFontFileInput.files, {
+        kind: 'reference',
+        source: 'translate_font_reference',
+      })
+      if (reference) {
+        state.translate.fontReference = reference
+        state.translate.fontMode = 'reference'
+        pruneTranslateResults()
+        saveRuntimeState()
+      }
+      state.translate.progress = ''
+    } catch (error) {
+      state.translate.progress = trimError(error)
+    } finally {
+      dom.tFontFileInput.value = ''
+      renderTranslate()
+    }
   })
 
   dom.tBrowseBtn.addEventListener('click', (event) => {
@@ -5467,9 +5571,17 @@ function renderTargetDropdown() {
 function renderTranslate() {
   const busy = isTranslateBusy()
   const showLoadedWorkspace = shouldShowLoadedJobWorkspace('translate')
+  const effectiveFontMode = getEffectiveTranslateFontMode()
   dom.tModel.value = state.translate.model
   dom.tConcurrency.value = String(state.translate.concurrency)
   dom.tPreserve.checked = state.translate.preserveBrand
+  if (dom.tFontMode) {
+    dom.tFontMode.value = state.translate.fontMode
+  }
+  if (dom.tFontPrompt) dom.tFontPrompt.value = state.translate.fontPrompt
+  if (dom.tFontPromptWrap) dom.tFontPromptWrap.classList.toggle('hidden', state.translate.fontMode === 'match_original')
+  if (dom.tFontReferenceWrap) dom.tFontReferenceWrap.classList.toggle('hidden', state.translate.fontMode !== 'reference')
+  if (dom.tFontReferenceName) dom.tFontReferenceName.textContent = state.translate.fontReference?.name || '未选择'
   dom.tProgress.textContent = state.translate.progress
 
   const hasItems = showLoadedWorkspace && state.translate.items.length > 0
@@ -5478,6 +5590,10 @@ function renderTranslate() {
   dom.tModel.disabled = busy
   dom.tConcurrency.disabled = busy
   dom.tPreserve.disabled = busy
+  if (dom.tFontMode) dom.tFontMode.disabled = busy
+  if (dom.tFontPrompt) dom.tFontPrompt.disabled = busy
+  if (dom.tFontBrowseBtn) dom.tFontBrowseBtn.disabled = busy
+  if (dom.tFontClearBtn) dom.tFontClearBtn.disabled = busy || !state.translate.fontReference
   dom.tDropzone.classList.toggle('disabled', busy)
   dom.tEmpty.classList.toggle('hidden', hasItems)
   renderJobList('translate')
@@ -5491,6 +5607,12 @@ function renderTranslate() {
     sourceLanguage: state.translate.source,
     modelId: state.translate.model,
     preserveBrand: state.translate.preserveBrand,
+    fontMode: effectiveFontMode,
+    fontFamily: state.translate.fontFamily,
+    fontReferenceAssetId: effectiveFontMode === 'reference'
+      ? state.translate.fontReference?.assetId || ''
+      : '',
+    fontPrompt: state.translate.fontPrompt,
   })
 
   const thead = document.createElement('thead')
@@ -6318,23 +6440,27 @@ function renderLaneList(container, items, kind) {
 async function runTranslateBatch() {
   if (isTranslateBusy() || state.translate.targets.length === 0 || state.translate.items.length === 0) return
 
-  const runConfig = getTranslateRunConfig()
-  const signature = getTranslateSignature(runConfig)
-  const needsWork = state.translate.items.some((item) =>
-    state.translate.targets.some((language) => {
-      const existing = item.results[language]
-      return !(existing?.status === 'done' && existing.signature === signature)
-    }),
-  )
-
-  if (!needsWork) {
-    state.translate.progress = '当前参数下已全部完成'
-    renderTranslate()
-    return
-  }
-
   try {
     state.translate.running = true
+    state.translate.progress = '正在准备字体策略…'
+    renderTranslate()
+
+    const runConfig = await prepareTranslateRunConfig()
+    const signature = getTranslateSignature(runConfig)
+    const needsWork = state.translate.items.some((item) =>
+      state.translate.targets.some((language) => {
+        const existing = item.results[language]
+        return !(existing?.status === 'done' && existing.signature === signature)
+      }),
+    )
+
+    if (!needsWork) {
+      state.translate.running = false
+      state.translate.progress = '当前参数下已全部完成'
+      renderTranslate()
+      return
+    }
+
     state.translate.progress = '正在提交翻译任务…'
     renderTranslate()
 
@@ -6345,6 +6471,10 @@ async function runTranslateBatch() {
       sourceLanguage: runConfig.sourceLanguage,
       modelId: runConfig.modelId,
       preserveBrand: runConfig.preserveBrand,
+      fontMode: runConfig.fontMode,
+      fontFamily: runConfig.fontFamily,
+      fontReferenceAssetId: runConfig.fontReferenceAssetId,
+      fontPrompt: runConfig.fontPrompt,
       concurrency: state.translate.concurrency,
       clientKeys: runConfig.clientKeys,
     })
@@ -6443,10 +6573,26 @@ async function runOutfitBatch() {
 }
 
 function getTranslateRunConfig() {
+  const fontMode = getEffectiveTranslateFontMode()
+  const activeReference = fontMode === 'reference'
+    ? state.translate.fontReference
+    : null
+  const fontReferenceAssetId = activeReference?.assetId ? String(activeReference.assetId) : ''
+  const fontReferenceImage = activeReference?.base64
+    ? {
+        base64: activeReference.base64,
+        mime: activeReference.mime || 'image/png',
+      }
+    : null
   return {
     sourceLanguage: state.translate.source,
     modelId: state.translate.model,
     preserveBrand: state.translate.preserveBrand,
+    fontMode,
+    fontFamily: '',
+    fontReferenceAssetId,
+    fontReferenceImage,
+    fontPrompt: fontMode === 'match_original' ? '' : normalizeTranslateFontPrompt(state.translate.fontPrompt),
     clientKeys: { ...state.keys },
   }
 }
@@ -7052,6 +7198,7 @@ function toggleTargetLanguage(code) {
   } else {
     state.translate.targets = [...state.translate.targets, code]
   }
+  pruneTranslateResults()
   savePrefs()
   renderTranslateDropdowns()
   renderTranslate()
@@ -7946,6 +8093,10 @@ async function restoreRuntimeState() {
   ])
 
   state.translate.items = translateItems.map((item) => ({ ...item, results: {} }))
+  if (runtime.translate.fontReference) {
+    const hydratedFontRefs = await hydrateAssetItems([runtime.translate.fontReference])
+    state.translate.fontReference = hydratedFontRefs[0] || runtime.translate.fontReference
+  }
   state.outfit.models = outfitModels
   state.outfit.garments = outfitGarments.map((item) => ({
     ...item,
@@ -8007,6 +8158,10 @@ function getTranslateSignatureFromJob(job) {
     sourceLanguage: String(job?.configJson?.sourceLanguage || 'auto'),
     modelId: String(job?.configJson?.modelId || state.translate.model),
     preserveBrand: job?.configJson?.preserveBrand !== false,
+    fontMode: normalizeTranslateFontMode(job?.configJson?.fontMode),
+    fontFamily: normalizeTranslateFontFamily(job?.configJson?.fontFamily),
+    fontReferenceAssetId: String(job?.configJson?.fontReferenceAssetId || ''),
+    fontPrompt: normalizeTranslateFontPrompt(job?.configJson?.fontPrompt),
   })
 }
 
@@ -8103,6 +8258,26 @@ async function hydrateTranslateWorkspaceFromJob(job, items) {
   state.translate.model = getModel(job?.configJson?.modelId)?.id || state.translate.model
   state.translate.preserveBrand = job?.configJson?.preserveBrand !== false
   state.translate.concurrency = clamp(Number(job?.configJson?.concurrency) || state.translate.concurrency, 1, 6)
+  state.translate.fontMode = normalizeTranslateFontMode(job?.configJson?.fontMode)
+  state.translate.fontFamily = normalizeTranslateFontFamily(job?.configJson?.fontFamily)
+  state.translate.fontPrompt = normalizeTranslateFontPrompt(job?.configJson?.fontPrompt)
+  const fontReferenceAssetId = String(job?.configJson?.fontReferenceAssetId || '')
+  if (fontReferenceAssetId && state.translate.fontReference?.assetId !== fontReferenceAssetId) {
+    const [fontReference] = await hydrateAssetItems([{
+      id: fontReferenceAssetId,
+      assetId: fontReferenceAssetId,
+      name: fontReferenceAssetId,
+      mime: 'image/png',
+    }])
+    state.translate.fontReference = fontReference || {
+      id: fontReferenceAssetId,
+      assetId: fontReferenceAssetId,
+      name: fontReferenceAssetId,
+      mime: 'image/png',
+    }
+  } else if ('fontReferenceAssetId' in (job?.configJson || {}) && !fontReferenceAssetId && state.translate.fontReference) {
+    state.translate.fontReference = null
+  }
 }
 
 function applyTranslateJobSnapshot(job, items) {
@@ -8121,6 +8296,9 @@ function applyTranslateJobSnapshot(job, items) {
     const target = translateByAsset.get(assetId)
     if (!target || !language) continue
     const mapped = mapTranslateJobItem(item, signature)
+    if (target.results[language]?.signature && target.results[language].signature !== signature) {
+      delete target.results[language]
+    }
     target.results[language] = mapped
     if (mapped.status === 'done' && mapped.dataUrl) {
       saveTranslateResult(assetId, language, mapped)
@@ -8693,6 +8871,17 @@ function pruneOutfitResults() {
   state.outfit.results = next
 }
 
+function pruneTranslateResults() {
+  const signature = getTranslateSignature(getTranslateRunConfig())
+  for (const item of state.translate.items) {
+    for (const [language, result] of Object.entries(item.results || {})) {
+      if (!state.translate.targets.includes(language) || result?.signature !== signature) {
+        delete item.results[language]
+      }
+    }
+  }
+}
+
 function createDropdownItem({ primary, secondary, selected, multiple }) {
   const button = document.createElement('button')
   button.type = 'button'
@@ -8843,6 +9032,10 @@ function getTranslateSignature(config) {
     sourceLanguage: config.sourceLanguage,
     modelId: config.modelId,
     preserveBrand: Boolean(config.preserveBrand),
+    fontMode: normalizeTranslateFontMode(config.fontMode),
+    fontFamily: '',
+    fontReferenceAssetId: String(config.fontReferenceAssetId || ''),
+    fontPrompt: normalizeTranslateFontPrompt(config.fontPrompt),
   })
 }
 

@@ -57,6 +57,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     RUNTIME_FALLBACK_SUBJECT_REF_LIMIT: 12,
     CANVAS_SAVE_DEBOUNCE_MS: 2200,
     CANVAS_SHAPES: new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right']),
+    TRANSLATE_FONT_MODES: new Set(['match_original', 'reference']),
     state: {
       runtime: { sessionId: 'session-1' },
       translate: {
@@ -114,6 +115,18 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         ? String(value).trim().toLowerCase()
         : fallback
     ),
+    TARGET_LANGUAGES: [{ code: 'en' }, { code: 'ja' }, { code: 'th' }],
+    getLanguage: (code) => (
+      ['auto', 'en', 'ja', 'th'].includes(String(code || ''))
+        ? { code: String(code) }
+        : null
+    ),
+    getModel: (id) => (
+      ['nano-banana-2', 'nano-banana-pro', 'gpt-image-2'].includes(String(id || ''))
+        ? { id: String(id) }
+        : null
+    ),
+    unique: (items) => [...new Set(items)],
     serializeAiSessions: (value) => value || [],
     getSerializedAiHistory: () => [],
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
@@ -176,6 +189,12 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'loadResultsStore',
     'saveResultsStore',
     'pruneResultsStore',
+    'normalizeTranslateFontMode',
+    'normalizeTranslateFontFamily',
+    'normalizeTranslateFontPrompt',
+    'getEffectiveTranslateFontMode',
+    'sanitizeTranslatePrefs',
+    'getTranslateSignature',
   ]
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
   vm.createContext(context)
@@ -191,8 +210,73 @@ test('app defaults batch translation and outfit to nano banana 2 with concurrenc
 
   assert.equal(state.translate.model, 'nano-banana-2')
   assert.equal(state.translate.concurrency, 3)
+  assert.equal(state.translate.fontMode, 'match_original')
+  assert.equal(state.translate.fontFamily, '')
+  assert.equal(state.translate.fontPrompt, '')
+  assert.equal(state.translate.fontReference, null)
   assert.equal(state.outfit.model, 'nano-banana-2')
   assert.equal(state.outfit.concurrency, 3)
+})
+
+test('sanitizeTranslatePrefs keeps uploaded font reference preferences and drops removed preset mode', async () => {
+  const harness = await createRuntimeHarness()
+
+  const referencePrefs = harness.sanitizeTranslatePrefs({
+    source: 'auto',
+    targets: ['th'],
+    model: 'nano-banana-2',
+    preserveBrand: true,
+    concurrency: 3,
+    fontMode: 'reference',
+    fontPrompt: 'Use a condensed headline style.',
+  })
+  const removedPresetPrefs = harness.sanitizeTranslatePrefs({
+    targets: ['th'],
+    fontMode: 'preset',
+    fontFamily: 'Kanit',
+  })
+
+  assert.equal(referencePrefs.fontMode, 'reference')
+  assert.equal(referencePrefs.fontFamily, '')
+  assert.equal(referencePrefs.fontPrompt, 'Use a condensed headline style.')
+  assert.equal(removedPresetPrefs.fontMode, 'match_original')
+  assert.equal(removedPresetPrefs.fontFamily, '')
+})
+
+test('getTranslateSignature changes when font strategy changes', async () => {
+  const harness = await createRuntimeHarness()
+
+  const base = harness.getTranslateSignature({
+    sourceLanguage: 'auto',
+    modelId: 'nano-banana-2',
+    preserveBrand: true,
+    fontMode: 'match_original',
+    fontFamily: '',
+    fontReferenceAssetId: '',
+    fontPrompt: '',
+  })
+  const legacyPreset = harness.getTranslateSignature({
+    sourceLanguage: 'auto',
+    modelId: 'nano-banana-2',
+    preserveBrand: true,
+    fontMode: 'preset',
+    fontFamily: '',
+    fontReferenceAssetId: '',
+    fontPrompt: '',
+  })
+  const withReference = harness.getTranslateSignature({
+    sourceLanguage: 'auto',
+    modelId: 'nano-banana-2',
+    preserveBrand: true,
+    fontMode: 'reference',
+    fontFamily: '',
+    fontReferenceAssetId: 'asset_font_1',
+    fontPrompt: 'Match the sample.',
+  })
+
+  assert.equal(base, legacyPreset)
+  assert.notEqual(base, withReference)
+  assert.match(withReference, /asset_font_1/)
 })
 
 test('writeRuntimeStorageSnapshot falls back to a compact snapshot when quota is exceeded', async () => {

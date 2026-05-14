@@ -17,6 +17,8 @@ type OcrTextItem = {
   style: string
 }
 
+type TranslateFontMode = 'match_original' | 'reference'
+
 interface OcrResult {
   texts: OcrTextItem[]
   sourceLang: string
@@ -100,6 +102,7 @@ export async function executeTranslate(body: any, env: Env) {
     imageBase64, mime = 'image/jpeg',
     sourceLanguage = 'auto', targetLanguage,
     modelId = 'nano-banana-2', preserveBrand = true,
+    fontMode = 'match_original', fontFamily = '', fontPrompt = '', fontReferenceImage = null,
     clientKeys = {},
   } = body ?? {}
 
@@ -124,12 +127,21 @@ export async function executeTranslate(body: any, env: Env) {
     }
   }
 
-  const prompt = buildTranslationPrompt(targetLanguage, sourceLanguage, ocr, preserveBrand)
+  const normalizedFontMode = normalizeTranslateFontMode(fontMode)
+  const fontReference = normalizeFontReferenceImage(fontReferenceImage)
+  const prompt = buildTranslationPrompt(targetLanguage, sourceLanguage, ocr, preserveBrand, {
+    mode: normalizedFontMode,
+    family: fontFamily,
+    prompt: fontPrompt,
+    hasReferenceImage: Boolean(fontReference),
+  })
+  const imageInputs = [{ base64: imageBase64, mime }]
+  if (fontReference) imageInputs.push(fontReference)
   const generated = await callImageModel(
     baseUrl,
     genKey,
     MODEL_MAP[modelId],
-    [{ base64: imageBase64, mime }],
+    imageInputs,
     prompt,
     imageModelOptions,
   )
@@ -321,6 +333,12 @@ ${itemLines}`
 function buildTranslationPrompt(
   targetLanguage: string, sourceLanguage: string,
   ocr: OcrResult | null, preserveBrand: boolean,
+  fontConfig: {
+    mode?: TranslateFontMode
+    family?: unknown
+    prompt?: unknown
+    hasReferenceImage?: boolean
+  } = {},
 ): string {
   const targetLangName = LANG_NAMES[targetLanguage] ?? targetLanguage
   const normalizedSourceLang = normalizeLanguageCode(ocr?.sourceLang, sourceLanguage)
@@ -352,15 +370,21 @@ function buildTranslationPrompt(
 - NEVER alter: logos, brand wordmarks, product names, SKU codes, trademark text, certification marks
 - These must appear pixel-perfect identical to the original
 - The product itself, packaging shape, model number must remain unchanged` : ''
+  const typographySection = buildTypographyPrompt(fontConfig)
 
   return `You are a professional e-commerce image localization specialist.
 
 ## TASK
 Recreate this image with selected text translated to ${targetLangName}.
 
+## IMAGE INPUTS
+- Image #1 is the source image to translate.
+${fontConfig.hasReferenceImage ? '- Image #2 is a font reference. Use it only for typography: typeface shape, stroke contrast, weight, width, spacing, corners, and decorative treatment. Do NOT copy its words, layout, colors, background, or composition.' : '- No separate font reference image is provided.'}
+
 ## SOURCE
 ${sourceLangHint}
 ${preserveSection}
+${typographySection}
 
 ## ABSOLUTE REQUIREMENTS
 1. PRESERVE: overall layout, composition, background, product visuals, packaging, illustrations
@@ -375,6 +399,48 @@ ${preserveSection}
 ${!ocr ? `Translate all descriptive/marketing text to ${targetLangName}.${preserveBrand ? ' Preserve all logos, brand names, product model numbers, and SKU codes exactly.' : ''}` : ''}
 
 Regenerate the complete image with these precise text changes only.`
+}
+
+function buildTypographyPrompt(fontConfig: {
+  mode?: TranslateFontMode
+  family?: unknown
+  prompt?: unknown
+  hasReferenceImage?: boolean
+}): string {
+  const mode = normalizeTranslateFontMode(fontConfig.mode)
+  const prompt = cleanFontText(fontConfig.prompt, 500)
+  const extra = prompt ? `\n- Extra typography instruction from the user: ${prompt}` : ''
+
+  if (mode === 'reference') {
+    return `
+## TYPOGRAPHY STRATEGY
+- Use Image #2 as the typography reference only.
+- Match its typeface shape, weight, width, letter spacing, stroke contrast, corner radius, and decorative features.
+- Do not copy any words or layout from Image #2.
+- Preserve the source image layout, text positions, colors, effects, and hierarchy from Image #1.${extra}`
+  }
+
+  return `
+## TYPOGRAPHY STRATEGY
+- Follow Image #1 typography directly: match each original text element's font style, weight, width, size, color, outline, shadow, alignment, and spacing.
+- Do not substitute generic default fonts when the original has distinctive typography.${extra}`
+}
+
+function normalizeTranslateFontMode(value: unknown): TranslateFontMode {
+  return value === 'reference' ? value : 'match_original'
+}
+
+function cleanFontText(value: unknown, limit: number): string {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit)
+}
+
+function normalizeFontReferenceImage(value: unknown): { base64: string; mime: string } | null {
+  if (!value || typeof value !== 'object') return null
+  const image = value as { base64?: unknown; mime?: unknown }
+  const base64 = String(image.base64 || '').trim()
+  if (!base64) return null
+  const mime = String(image.mime || 'image/png').trim() || 'image/png'
+  return { base64, mime }
 }
 
 function mergeReviewedOcr(ocr: OcrResult, reviewed: OcrReviewResult): OcrResult {

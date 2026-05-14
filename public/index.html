@@ -223,6 +223,26 @@
               <span>保留品牌 / SKU</span>
             </label>
           </div>
+          <div class="field font-field">
+            <label>字体策略</label>
+            <select id="t-font-mode" class="input">
+              <option value="match_original">跟随原图</option>
+              <option value="reference">上传字体参考图</option>
+            </select>
+          </div>
+          <div class="field font-reference-field" id="t-font-reference-wrap">
+            <label>字体参考</label>
+            <input id="t-font-file-input" type="file" accept="image/*" hidden />
+            <div class="font-reference-row">
+              <button type="button" id="t-font-browse-btn" class="ghost">上传样张</button>
+              <button type="button" id="t-font-clear-btn" class="ghost">清除</button>
+              <span id="t-font-reference-name" class="font-reference-name">未选择</span>
+            </div>
+          </div>
+          <div class="field font-prompt-field" id="t-font-prompt-wrap">
+            <label>字体说明 <span class="muted">（可选）</span></label>
+            <input id="t-font-prompt" type="text" class="input" maxlength="500" placeholder="例如：圆润粗标题、窄体、描边字…" />
+          </div>
         </div>
         <div class="chips target-chipbar" id="target-chips"></div>
 
@@ -241,6 +261,11 @@
         </div>
       </div>
 
+      <div class="grid-wrap" id="t-grid-wrap">
+        <table class="grid" id="t-grid"></table>
+        <div id="t-empty" class="empty">还没有图片，先上传几张开始吧</div>
+      </div>
+
       <section class="job-panel" aria-label="翻译任务">
         <div class="job-panel-head">
           <h3>任务管理</h3>
@@ -252,11 +277,6 @@
         </div>
         <div class="job-list" id="t-job-list"></div>
       </section>
-
-      <div class="grid-wrap" id="t-grid-wrap">
-        <table class="grid" id="t-grid"></table>
-        <div id="t-empty" class="empty">还没有图片，先上传几张开始吧</div>
-      </div>
     </section>
 
     <!-- ═══════════════ PROJECTS VIEW ═══════════════ -->

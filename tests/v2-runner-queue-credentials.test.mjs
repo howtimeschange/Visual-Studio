@@ -147,6 +147,121 @@ test('batch submit defaults use nano banana 2 and concurrency 3', async () => {
   }
 })
 
+test('submitTranslateBatch stores uploaded font reference fields and treats removed preset as match original', async () => {
+  const { mod, cleanup } = await importRunner()
+  const env = {
+    VS_TRANSLATE_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  try {
+    const reference = await mod.submitTranslateBatch(env, {
+      sessionId: 'session_translate_font_config',
+      assetIds: ['source_1'],
+      targetLanguages: ['th'],
+      fontMode: 'reference',
+      fontReferenceAssetId: 'font_ref_1',
+      fontPrompt: 'Use the rounded headline letterforms from the reference.',
+    })
+    const removedPreset = await mod.submitTranslateBatch(env, {
+      sessionId: 'session_translate_font_config',
+      assetIds: ['source_1'],
+      targetLanguages: ['th'],
+      fontMode: 'preset',
+      fontFamily: 'Kanit',
+      fontReferenceAssetId: 'font_ref_1',
+      fontPrompt: 'Use the rounded headline letterforms from the reference.',
+    })
+
+    const referenceJob = await mod.getJob(env, reference.jobId)
+    const removedPresetJob = await mod.getJob(env, removedPreset.jobId)
+
+    assert.equal(referenceJob.configJson.fontMode, 'reference')
+    assert.equal(referenceJob.configJson.fontFamily, '')
+    assert.equal(referenceJob.configJson.fontReferenceAssetId, 'font_ref_1')
+    assert.equal(referenceJob.configJson.fontPrompt, 'Use the rounded headline letterforms from the reference.')
+    assert.equal(removedPresetJob.configJson.fontMode, 'match_original')
+    assert.equal(removedPresetJob.configJson.fontFamily, '')
+    assert.equal(removedPresetJob.configJson.fontReferenceAssetId, '')
+    assert.equal(removedPresetJob.configJson.fontPrompt, '')
+    assert.notEqual(referenceJob.configJson.configHash, removedPresetJob.configJson.configHash)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped prompt instructions', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    VS_TRANSLATE_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    calls.push({ input: String(input), payload })
+    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZC1pbWFnZQ==' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_translate_font_reference', null)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c291cmNlLWltYWdl',
+      filename: 'source.png',
+    })
+    const fontReference = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'reference',
+      source: 'translate_font_reference',
+      dataUrl: 'data:image/png;base64,Zm9udC1yZWZlcmVuY2U=',
+      filename: 'kanit-sample.png',
+    })
+    const submitted = await mod.submitTranslateBatch(env, {
+      sessionId: session.id,
+      assetIds: [source.id],
+      targetLanguages: ['th'],
+      fontMode: 'reference',
+      fontReferenceAssetId: fontReference.id,
+      fontPrompt: 'Match the rounded Kanit headline sample.',
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [call] = calls
+    const content = call.payload.messages[0].content
+    const images = content.filter((part) => part.type === 'image_url')
+    const prompt = content.find((part) => part.type === 'text')?.text || ''
+
+    assert.equal(job.status, 'completed')
+    assert.equal(images.length, 2)
+    assert.equal(images[0].image_url.url, 'data:image/png;base64,c291cmNlLWltYWdl')
+    assert.equal(images[1].image_url.url, 'data:image/png;base64,Zm9udC1yZWZlcmVuY2U=')
+    assert.match(prompt, /Image #1 is the source image/i)
+    assert.match(prompt, /Image #2 is a font reference/i)
+    assert.match(prompt, /only for typography/i)
+    assert.match(prompt, /Match the rounded Kanit headline sample/)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runTranslateBatchJob reuses one OCR plan and one asset read per source image', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
