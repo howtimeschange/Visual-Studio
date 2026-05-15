@@ -342,10 +342,17 @@ function buildTranslationPrompt(
 ): string {
   const targetLangName = LANG_NAMES[targetLanguage] ?? targetLanguage
   const normalizedSourceLang = normalizeLanguageCode(ocr?.sourceLang, sourceLanguage)
+  const promptSourceLang = normalizedSourceLang && normalizedSourceLang !== 'auto'
+    ? normalizedSourceLang
+    : normalizeLanguageCode(sourceLanguage, 'auto')
+  const sourceLangName = formatPromptLanguageName(promptSourceLang)
+  const sourceTextLabel = promptSourceLang === 'auto'
+    ? 'source-language'
+    : sourceLangName
   const sourceLangHint = normalizedSourceLang && normalizedSourceLang !== 'auto'
-    ? `The original image text is in ${LANG_NAMES[normalizedSourceLang] ?? normalizedSourceLang}.`
+    ? `The original image text is in ${sourceLangName}.`
     : sourceLanguage !== 'auto'
-      ? `The original image text is in ${LANG_NAMES[sourceLanguage] ?? sourceLanguage}.`
+      ? `The original image text is in ${formatPromptLanguageName(sourceLanguage)}.`
       : 'Detect the source language from the image.'
 
   let keepList = '', translateList = ''
@@ -371,11 +378,19 @@ function buildTranslationPrompt(
 - These must appear pixel-perfect identical to the original
 - The product itself, packaging shape, model number must remain unchanged` : ''
   const typographySection = buildTypographyPrompt(fontConfig)
+  const omittedTextFallback = ocr
+    ? `
+## OCR PLAN SAFETY NET
+- Treat the TRANSLATE list as the minimum required replacements, not as the only translatable text in the image.
+- Also translate any other visible ${sourceTextLabel} marketing copy, feature description, slogan, instruction, UI label, note, or body text that is not listed in the OCR plan.
+- Do not translate text explicitly listed in DO NOT TRANSLATE, brand marks, product names, SKU/model codes, URLs, chemical names, patent text, or certification labels.
+- Replace source-language text in place. Do not leave the original ${sourceTextLabel} next to, above, or below the translated text unless it is in DO NOT TRANSLATE.`
+    : ''
 
   return `You are a professional e-commerce image localization specialist.
 
 ## TASK
-Recreate this image with selected text translated to ${targetLangName}.
+Recreate this image with source-language marketing and descriptive text translated to ${targetLangName}.
 
 ## IMAGE INPUTS
 - Image #1 is the source image to translate.
@@ -385,20 +400,49 @@ ${fontConfig.hasReferenceImage ? '- Image #2 is a font reference. Use it only fo
 ${sourceLangHint}
 ${preserveSection}
 ${typographySection}
+${omittedTextFallback}
 
 ## ABSOLUTE REQUIREMENTS
 1. PRESERVE: overall layout, composition, background, product visuals, packaging, illustrations
 2. PRESERVE: image dimensions, proportions, color grading
 3. MATCH: original font style, weight, size, color, shadow for each translated text element
-4. TRANSLATE: only the items listed in the TRANSLATE section below
+4. TRANSLATE: every item listed in the TRANSLATE section below, plus any other visible source-language descriptive text not protected by the keep rules
 5. KEEP VERBATIM: all items in the DO NOT TRANSLATE section
 6. Do NOT add watermarks, borders, or any elements not in the original
 7. Small/tiny text in the translate list MUST be translated — do not skip them
-8. For right-to-left languages (Arabic, Hebrew), mirror the text direction${keepList}${translateList}
+8. Replace source text with translated text; do not create bilingual duplicates or leave leftover source-language text
+9. For right-to-left languages (Arabic, Hebrew), mirror the text direction${keepList}${translateList}
 
 ${!ocr ? `Translate all descriptive/marketing text to ${targetLangName}.${preserveBrand ? ' Preserve all logos, brand names, product model numbers, and SKU codes exactly.' : ''}` : ''}
 
-Regenerate the complete image with these precise text changes only.`
+Regenerate the complete image with these precise localization changes only.`
+}
+
+function formatPromptLanguageName(language: string): string {
+  const normalized = normalizeLanguageCode(language, language)
+  const names: Record<string, string> = {
+    auto: 'the detected source language',
+    zh: 'Simplified Chinese',
+    'zh-TW': 'Traditional Chinese',
+    en: 'English',
+    ja: 'Japanese',
+    ko: 'Korean',
+    fr: 'French',
+    de: 'German',
+    es: 'Spanish',
+    pt: 'Portuguese',
+    ru: 'Russian',
+    ar: 'Arabic',
+    th: 'Thai',
+    vi: 'Vietnamese',
+    id: 'Indonesian',
+    ms: 'Malay',
+    tl: 'Filipino',
+    my: 'Burmese',
+    km: 'Khmer',
+    lo: 'Lao',
+  }
+  return names[normalized] || LANG_NAMES[normalized] || normalized || 'the source language'
 }
 
 function buildTypographyPrompt(fontConfig: {
