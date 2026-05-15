@@ -20,6 +20,7 @@ import {
   deleteJobRecord,
   deleteSealedCredential,
   ensureSession,
+  getAsset,
   getAssetDataUrl,
   getConversation,
   getConversationTurn,
@@ -454,7 +455,8 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
     try {
       const assetId = String(item.inputJson.assetId || '')
       const fontReferenceAssetId = String(job.configJson.fontReferenceAssetId || '').trim()
-      const [dataUrl, ocrPlan, fontReferenceDataUrl] = await Promise.all([
+      const [sourceAsset, dataUrl, ocrPlan, fontReferenceDataUrl] = await Promise.all([
+        getAsset(env, assetId),
         getCachedAssetDataUrl(assetId),
         getCachedTranslatePlan(assetId),
         fontReferenceAssetId ? getCachedAssetDataUrl(fontReferenceAssetId) : Promise.resolve(null),
@@ -473,6 +475,8 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
         fontFamily: job.configJson.fontFamily,
         fontReferenceImage,
         fontPrompt: job.configJson.fontPrompt,
+        sourceWidth: sourceAsset?.width || null,
+        sourceHeight: sourceAsset?.height || null,
         ocrPlan,
         clientKeys,
       }, env))

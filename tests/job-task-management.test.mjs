@@ -43,12 +43,14 @@ async function createJobHarness() {
     'getJobTasks',
     'getLoadedJobId',
     'getJobTab',
+    'setJobTab',
     'setLoadedJobId',
     'markJobTaskLoaded',
     'clearJobTaskLoaded',
     'removeJobTask',
     'getJobTaskBucket',
     'filterJobTasksForTab',
+    'releaseCompletedLoadedTasksForKind',
     'getTaskSortTime',
     'getSortedJobTasksForTab',
     'getPagedJobTasksForTab',
@@ -96,6 +98,37 @@ test('filterJobTasksForTab separates current work from generated history', async
   assert.deepEqual(
     harness.filterJobTasksForTab(tasks, 'history').map((task) => task.jobId),
     ['completed-job', 'cancelled-job'],
+  )
+})
+
+test('loaded completed jobs remain current until the user leaves and returns', async () => {
+  const harness = await createJobHarness()
+  harness.state.translate.jobId = 'just-completed'
+  harness.state.translate.jobs = [
+    { jobId: 'just-completed', status: 'completed', loaded: true, holdInCurrent: true, createdAt: '2026-05-15T10:00:00.000Z' },
+    { jobId: 'older-completed', status: 'completed', loaded: false, createdAt: '2026-05-15T09:00:00.000Z' },
+  ]
+
+  assert.deepEqual(
+    harness.filterJobTasksForTab(harness.state.translate.jobs, 'current').map((task) => task.jobId),
+    ['just-completed'],
+  )
+  assert.deepEqual(
+    harness.filterJobTasksForTab(harness.state.translate.jobs, 'history').map((task) => task.jobId),
+    ['older-completed'],
+  )
+  assert.equal(harness.shouldShowLoadedJobWorkspace('translate'), true)
+
+  harness.releaseCompletedLoadedTasksForKind('translate')
+
+  assert.equal(harness.state.translate.jobId, '')
+  assert.deepEqual(
+    harness.filterJobTasksForTab(harness.state.translate.jobs, 'current').map((task) => task.jobId),
+    [],
+  )
+  assert.deepEqual(
+    harness.filterJobTasksForTab(harness.state.translate.jobs, 'history').map((task) => task.jobId),
+    ['just-completed', 'older-completed'],
   )
 })
 

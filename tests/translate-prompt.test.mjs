@@ -69,3 +69,50 @@ test('executeTranslate tells the image model to translate visible source text om
     await cleanup()
   }
 })
+
+test('executeTranslate preserves the source image canvas when a font reference has a different orientation', async () => {
+  const { mod, cleanup } = await importTranslate()
+  const originalFetch = globalThis.fetch
+  let prompt = ''
+  let images = []
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    const content = payload.messages?.[0]?.content || []
+    prompt = content.find((part) => part.type === 'text')?.text || ''
+    images = content.filter((part) => part.type === 'image_url')
+    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZA==' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    await mod.executeTranslate({
+      imageBase64: 'dmVydGljYWwtc291cmNl',
+      mime: 'image/jpeg',
+      sourceWidth: 790,
+      sourceHeight: 1914,
+      sourceLanguage: 'zh',
+      targetLanguage: 'en',
+      modelId: 'nano-banana-2',
+      preserveBrand: true,
+      fontMode: 'reference',
+      fontReferenceImage: {
+        base64: 'aG9yaXpvbnRhbC1mb250LXJlZg==',
+        mime: 'image/png',
+      },
+      clientKeys: { banana2ApiKey: 'image-key' },
+    }, {})
+
+    assert.equal(images.length, 2)
+    assert.match(prompt, /output canvas must match Image #1/i)
+    assert.match(prompt, /790\s*x\s*1914/i)
+    assert.match(prompt, /portrait/i)
+    assert.match(prompt, /Do NOT use Image #2's landscape orientation/i)
+    assert.match(prompt, /Do NOT add.+AI generated/i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})

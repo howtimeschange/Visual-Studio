@@ -262,6 +262,70 @@ test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped 
   }
 })
 
+test('runTranslateBatchJob passes source asset dimensions so font references cannot change orientation', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const prompts = []
+  const env = {
+    VS_TRANSLATE_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    const prompt = payload.messages?.[0]?.content?.find((part) => part.type === 'text')?.text || ''
+    prompts.push(prompt)
+    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZC1pbWFnZQ==' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_translate_source_dimensions', null)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/jpeg;base64,c291cmNlLWltYWdl',
+      filename: 'source.jpg',
+      width: 790,
+      height: 1914,
+    })
+    const fontReference = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'reference',
+      source: 'translate_font_reference',
+      dataUrl: 'data:image/png;base64,Zm9udC1yZWZlcmVuY2U=',
+      filename: 'wide-font-sample.png',
+      width: 1598,
+      height: 466,
+    })
+    const submitted = await mod.submitTranslateBatch(env, {
+      sessionId: session.id,
+      assetIds: [source.id],
+      targetLanguages: ['en'],
+      fontMode: 'reference',
+      fontReferenceAssetId: fontReference.id,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    assert.match(prompts[0], /790\s*x\s*1914/i)
+    assert.match(prompts[0], /portrait/i)
+    assert.match(prompts[0], /Do NOT use Image #2's landscape orientation/i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runTranslateBatchJob reuses one OCR plan and one asset read per source image', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch

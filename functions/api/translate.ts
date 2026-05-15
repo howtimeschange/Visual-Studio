@@ -103,6 +103,7 @@ export async function executeTranslate(body: any, env: Env) {
     sourceLanguage = 'auto', targetLanguage,
     modelId = 'nano-banana-2', preserveBrand = true,
     fontMode = 'match_original', fontFamily = '', fontPrompt = '', fontReferenceImage = null,
+    sourceWidth = null, sourceHeight = null,
     clientKeys = {},
   } = body ?? {}
 
@@ -129,11 +130,13 @@ export async function executeTranslate(body: any, env: Env) {
 
   const normalizedFontMode = normalizeTranslateFontMode(fontMode)
   const fontReference = normalizeFontReferenceImage(fontReferenceImage)
+  const sourceDimensions = normalizeSourceDimensions(sourceWidth, sourceHeight)
   const prompt = buildTranslationPrompt(targetLanguage, sourceLanguage, ocr, preserveBrand, {
     mode: normalizedFontMode,
     family: fontFamily,
     prompt: fontPrompt,
     hasReferenceImage: Boolean(fontReference),
+    sourceDimensions,
   })
   const imageInputs = [{ base64: imageBase64, mime }]
   if (fontReference) imageInputs.push(fontReference)
@@ -338,6 +341,7 @@ function buildTranslationPrompt(
     family?: unknown
     prompt?: unknown
     hasReferenceImage?: boolean
+    sourceDimensions?: SourceDimensions | null
   } = {},
 ): string {
   const targetLangName = LANG_NAMES[targetLanguage] ?? targetLanguage
@@ -377,6 +381,7 @@ function buildTranslationPrompt(
 - NEVER alter: logos, brand wordmarks, product names, SKU codes, trademark text, certification marks
 - These must appear pixel-perfect identical to the original
 - The product itself, packaging shape, model number must remain unchanged` : ''
+  const canvasSection = buildCanvasPrompt(fontConfig.sourceDimensions || null, Boolean(fontConfig.hasReferenceImage))
   const typographySection = buildTypographyPrompt(fontConfig)
   const omittedTextFallback = ocr
     ? `
@@ -399,6 +404,7 @@ ${fontConfig.hasReferenceImage ? '- Image #2 is a font reference. Use it only fo
 ## SOURCE
 ${sourceLangHint}
 ${preserveSection}
+${canvasSection}
 ${typographySection}
 ${omittedTextFallback}
 
@@ -408,7 +414,7 @@ ${omittedTextFallback}
 3. MATCH: original font style, weight, size, color, shadow for each translated text element
 4. TRANSLATE: every item listed in the TRANSLATE section below, plus any other visible source-language descriptive text not protected by the keep rules
 5. KEEP VERBATIM: all items in the DO NOT TRANSLATE section
-6. Do NOT add watermarks, borders, or any elements not in the original
+6. Do NOT add watermarks, AI generated labels, badges, captions, borders, or any elements not in the original
 7. Small/tiny text in the translate list MUST be translated — do not skip them
 8. Replace source text with translated text; do not create bilingual duplicates or leave leftover source-language text
 9. For right-to-left languages (Arabic, Hebrew), mirror the text direction${keepList}${translateList}
@@ -416,6 +422,43 @@ ${omittedTextFallback}
 ${!ocr ? `Translate all descriptive/marketing text to ${targetLangName}.${preserveBrand ? ' Preserve all logos, brand names, product model numbers, and SKU codes exactly.' : ''}` : ''}
 
 Regenerate the complete image with these precise localization changes only.`
+}
+
+type SourceDimensions = {
+  width: number
+  height: number
+  orientation: 'portrait' | 'landscape' | 'square'
+}
+
+function normalizeSourceDimensions(width: unknown, height: unknown): SourceDimensions | null {
+  const normalizedWidth = Math.floor(Number(width))
+  const normalizedHeight = Math.floor(Number(height))
+  if (!Number.isFinite(normalizedWidth) || !Number.isFinite(normalizedHeight)) return null
+  if (normalizedWidth <= 0 || normalizedHeight <= 0) return null
+  return {
+    width: normalizedWidth,
+    height: normalizedHeight,
+    orientation: normalizedWidth === normalizedHeight
+      ? 'square'
+      : normalizedWidth > normalizedHeight
+        ? 'landscape'
+        : 'portrait',
+  }
+}
+
+function buildCanvasPrompt(sourceDimensions: SourceDimensions | null, hasFontReferenceImage: boolean): string {
+  const sourceSize = sourceDimensions
+    ? ` Source canvas: ${sourceDimensions.width} x ${sourceDimensions.height} px (${sourceDimensions.orientation}). Preserve this exact ${sourceDimensions.orientation} orientation and aspect ratio.`
+    : ' Preserve Image #1 aspect ratio, orientation, and canvas dimensions exactly.'
+  const referenceWarning = hasFontReferenceImage
+    ? "\n- Do NOT use Image #2's landscape orientation, aspect ratio, layout, margins, or canvas dimensions."
+    : ''
+
+  return `
+## CANVAS LOCK
+- The output canvas must match Image #1 exactly.${sourceSize}
+- Image #1 is the only source for composition, layout, crop, aspect ratio, and canvas size.${referenceWarning}
+- Do NOT add \"AI generated\", \"AI-generated\", labels, badges, captions, watermarks, signatures, or provenance marks.`
 }
 
 function formatPromptLanguageName(language: string): string {

@@ -1541,6 +1541,7 @@ function removeJobTask(kind, jobId) {
 }
 
 function getJobTaskBucket(task = {}) {
+  if (task.holdInCurrent && task.loaded && task.status === 'completed') return 'current'
   return CURRENT_TASK_JOB_STATUSES.has(task.status) || !task.status ? 'current' : 'history'
 }
 
@@ -1731,6 +1732,28 @@ function clearJobTaskLoaded(kind) {
     task.loaded = false
   }
   setLoadedJobId(kind, '')
+}
+
+function releaseCompletedLoadedTasksForKind(kind) {
+  let released = false
+  for (const task of getJobTasks(kind)) {
+    if (task.loaded && task.holdInCurrent && task.status === 'completed') {
+      task.loaded = false
+      task.holdInCurrent = false
+      released = true
+    }
+  }
+  if (released) {
+    setLoadedJobId(kind, '')
+    setJobTab(kind, 'history')
+  }
+  return released
+}
+
+function releaseCompletedLoadedTasksForView(view) {
+  if (view === 'translate') return releaseCompletedLoadedTasksForKind('translate')
+  if (view === 'outfit') return releaseCompletedLoadedTasksForKind('outfit')
+  return false
 }
 
 async function loadJobIntoWorkspace(kind, jobId) {
@@ -2165,6 +2188,7 @@ function serializeJobTask(task = {}) {
     createdAt: String(task.createdAt || ''),
     updatedAt: String(task.updatedAt || ''),
     loaded: Boolean(task.loaded),
+    holdInCurrent: Boolean(task.holdInCurrent),
     error: String(task.error || ''),
     itemCount: Number(task.itemCount || 0),
     progressTotal: Number(task.progressTotal || 0),
@@ -7087,6 +7111,8 @@ async function executeTranslateJob({ item, language, runConfig, signature }) {
       return postJson('/api/translate', {
         imageBase64: item.base64,
         mime: item.mime,
+        sourceWidth: item.width || undefined,
+        sourceHeight: item.height || undefined,
         targetLanguage: language,
         ...runConfig,
       })
@@ -7678,6 +7704,10 @@ function toggleTargetLanguage(code) {
 }
 
 function setActiveView(view, { updateRoute = true } = {}) {
+  const previousView = state.activeView
+  if (previousView && previousView !== normalizeView(view)) {
+    if (releaseCompletedLoadedTasksForView(previousView)) saveRuntimeState()
+  }
   state.activeView = normalizeView(view)
   if (state.activeView === 'generate') {
     ensureCanvasFirstOpenAiPanel()
@@ -7701,6 +7731,10 @@ function setActiveView(view, { updateRoute = true } = {}) {
   } else if (state.activeView === 'projects') {
     renderProjects()
     void loadCanvasProjects()
+  } else if (state.activeView === 'translate') {
+    renderTranslate()
+  } else if (state.activeView === 'outfit') {
+    renderOutfit()
   }
   const scrollToTop = () => {
     $('.main')?.scrollTo({ top: 0, behavior: 'auto' })
@@ -7812,6 +7846,8 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       filename: image.name,
       mime: image.mime,
       dataUrl: image.dataUrl,
+      width: image.width || undefined,
+      height: image.height || undefined,
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
@@ -8864,6 +8900,11 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
 
       const shouldApply = applyToWorkspace || getLoadedJobId('translate') === jobId
       upsertJobTask('translate', jobId, { job, items, loaded: shouldApply })
+      const task = getJobTasks('translate').find((entry) => entry.jobId === jobId)
+      if (shouldApply && task && job.status === 'completed') {
+        task.loaded = true
+        task.holdInCurrent = true
+      }
       if (shouldApply) {
         if (getLoadedJobId('translate') !== jobId) {
           renderJobList('translate')
@@ -9065,6 +9106,11 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
 
       const shouldApply = applyToWorkspace || getLoadedJobId('outfit') === jobId
       upsertJobTask('outfit', jobId, { job, items, loaded: shouldApply })
+      const task = getJobTasks('outfit').find((entry) => entry.jobId === jobId)
+      if (shouldApply && task && job.status === 'completed') {
+        task.loaded = true
+        task.holdInCurrent = true
+      }
       if (shouldApply) {
         if (getLoadedJobId('outfit') !== jobId) {
           renderJobList('outfit')

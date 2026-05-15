@@ -25,6 +25,7 @@ function extractFunction(source, name) {
 
 async function createUploadHarness() {
   const source = await readFile(APP_PATH, 'utf8')
+  const uploads = []
   const context = {
     state: {
       runtime: {
@@ -37,12 +38,15 @@ async function createUploadHarness() {
       { name: 'a.png', mime: 'image/png', base64: 'aaa', dataUrl: 'data:image/png;base64,aaa', width: 10, height: 10 },
       { name: 'b.png', mime: 'image/png', base64: 'bbb', dataUrl: 'data:image/png;base64,bbb', width: 20, height: 20 },
     ]),
-    postJson: async (_url, body) => ({
-      sessionId: 'sess_uploaded',
-      asset: {
-        id: `asset_${body.filename}`,
-      },
-    }),
+    postJson: async (url, body) => {
+      uploads.push({ url, body })
+      return {
+        sessionId: 'sess_uploaded',
+        asset: {
+          id: `asset_${body.filename}`,
+        },
+      }
+    },
   }
 
   const harnessSource = [
@@ -51,7 +55,7 @@ async function createUploadHarness() {
 
   vm.createContext(context)
   vm.runInContext(harnessSource, context)
-  return context
+  return { ...context, uploads }
 }
 
 async function createTranslateRunConfigHarness() {
@@ -119,6 +123,10 @@ test('prepareAssetItems reports upload progress for each file', async () => {
     { current: 1, total: 2, filename: 'a.png' },
     { current: 2, total: 2, filename: 'b.png' },
   ])
+  assert.equal(harness.uploads[0].body.width, 10)
+  assert.equal(harness.uploads[0].body.height, 10)
+  assert.equal(harness.uploads[1].body.width, 20)
+  assert.equal(harness.uploads[1].body.height, 20)
   assert.equal(harness.state.runtime.sessionId, 'sess_uploaded')
 })
 
