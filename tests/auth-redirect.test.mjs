@@ -110,6 +110,7 @@ async function createAuthRedirectHarness() {
     },
     renderHome: () => {},
     renderProjects: () => {},
+    releaseCompletedLoadedTasksForView: () => {},
     loadCanvasProjects: async () => {},
     $: () => ({ scrollTo() {} }),
     trimError: (error) => String(error?.message || error || ''),

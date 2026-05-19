@@ -1187,6 +1187,14 @@ dialog select,
   grid-column: 1 / -1;
 }
 
+.translate-control-grid .text-color-mode-field {
+  grid-column: span 1;
+}
+
+.translate-control-grid .text-color-field {
+  grid-column: span 2;
+}
+
 .font-reference-row {
   display: flex;
   align-items: center;
@@ -1206,6 +1214,59 @@ dialog select,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.color-control {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+}
+
+.color-swatch {
+  width: 28px;
+  aspect-ratio: 1;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background:
+    linear-gradient(var(--swatch-color), var(--swatch-color)),
+    var(--bg-2);
+  box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--bg) 82%, transparent);
+  cursor: pointer;
+}
+
+.color-swatch.active {
+  border-color: color-mix(in oklch, var(--accent) 72%, var(--line-strong));
+  box-shadow:
+    0 0 0 2px color-mix(in oklch, var(--accent) 24%, transparent),
+    inset 0 0 0 2px color-mix(in oklch, var(--bg) 82%, transparent);
+}
+
+.color-input-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.color-picker {
+  width: 44px;
+  height: 40px;
+  padding: 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  cursor: pointer;
+}
+
+.color-code-input {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
 }
 
 .target-chipbar {
@@ -4713,7 +4774,8 @@ button.compact {
 
   .translate-control-grid .preserve-field,
   .translate-control-grid .font-reference-field,
-  .translate-control-grid .font-prompt-field {
+  .translate-control-grid .font-prompt-field,
+  .translate-control-grid .text-color-field {
     grid-column: 1 / -1;
   }
 }
@@ -4858,7 +4920,9 @@ button.compact {
   .translate-control-grid .preserve-field,
   .translate-control-grid .font-field,
   .translate-control-grid .font-reference-field,
-  .translate-control-grid .font-prompt-field {
+  .translate-control-grid .font-prompt-field,
+  .translate-control-grid .text-color-mode-field,
+  .translate-control-grid .text-color-field {
     grid-column: auto;
   }
 

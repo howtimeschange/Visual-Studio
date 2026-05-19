@@ -18,6 +18,7 @@ type OcrTextItem = {
 }
 
 type TranslateFontMode = 'match_original' | 'reference'
+type TranslateTextColorMode = 'match_original' | 'custom'
 
 interface OcrResult {
   texts: OcrTextItem[]
@@ -103,6 +104,7 @@ export async function executeTranslate(body: any, env: Env) {
     sourceLanguage = 'auto', targetLanguage,
     modelId = 'nano-banana-2', preserveBrand = true,
     fontMode = 'match_original', fontFamily = '', fontPrompt = '', fontReferenceImage = null,
+    textColorMode = 'match_original', headlineColor = '', bodyColor = '',
     sourceWidth = null, sourceHeight = null,
     clientKeys = {},
   } = body ?? {}
@@ -137,6 +139,9 @@ export async function executeTranslate(body: any, env: Env) {
     prompt: fontPrompt,
     hasReferenceImage: Boolean(fontReference),
     sourceDimensions,
+    textColorMode,
+    headlineColor,
+    bodyColor,
   })
   const imageInputs = [{ base64: imageBase64, mime }]
   if (fontReference) imageInputs.push(fontReference)
@@ -342,6 +347,9 @@ function buildTranslationPrompt(
     prompt?: unknown
     hasReferenceImage?: boolean
     sourceDimensions?: SourceDimensions | null
+    textColorMode?: unknown
+    headlineColor?: unknown
+    bodyColor?: unknown
   } = {},
 ): string {
   const targetLangName = LANG_NAMES[targetLanguage] ?? targetLanguage
@@ -383,6 +391,7 @@ function buildTranslationPrompt(
 - The product itself, packaging shape, model number must remain unchanged` : ''
   const canvasSection = buildCanvasPrompt(fontConfig.sourceDimensions || null, Boolean(fontConfig.hasReferenceImage))
   const typographySection = buildTypographyPrompt(fontConfig)
+  const textColorSection = buildTextColorPrompt(fontConfig)
   const omittedTextFallback = ocr
     ? `
 ## OCR PLAN SAFETY NET
@@ -406,6 +415,7 @@ ${sourceLangHint}
 ${preserveSection}
 ${canvasSection}
 ${typographySection}
+${textColorSection}
 ${omittedTextFallback}
 
 ## ABSOLUTE REQUIREMENTS
@@ -513,8 +523,61 @@ function buildTypographyPrompt(fontConfig: {
 - Do not substitute generic default fonts when the original has distinctive typography.${extra}`
 }
 
+function buildTextColorPrompt(fontConfig: {
+  textColorMode?: unknown
+  headlineColor?: unknown
+  bodyColor?: unknown
+}): string {
+  const mode = normalizeTranslateTextColorMode(fontConfig.textColorMode)
+  if (mode !== 'custom') {
+    return `
+## TEXT COLOR STRATEGY
+- Follow Image #1 text colors directly for every translated text element.`
+  }
+
+  const headlineColor = normalizeHexColor(fontConfig.headlineColor)
+  const bodyColor = normalizeHexColor(fontConfig.bodyColor)
+  if (!headlineColor && !bodyColor) {
+    return `
+## TEXT COLOR STRATEGY
+- Follow Image #1 text colors directly for every translated text element.`
+  }
+
+  const rules: string[] = [
+    '## TEXT COLOR STRATEGY',
+    '- Identify the main headline first: the largest, most prominent slogan, hero claim, campaign line, or primary selling point.',
+    '- Identify body text separately: supporting copy, feature details, product notes, labels, bullets, and descriptive text.',
+  ]
+  if (headlineColor) {
+    rules.push(`- Render translated main headline text in ${headlineColor}. Preserve its original effects such as outline, shadow, glow, texture, and opacity unless they conflict with legibility.`)
+  } else {
+    rules.push("- Keep main headline color matched to Image #1 because no custom headline color was provided.")
+  }
+  if (bodyColor) {
+    rules.push(`- Render translated body text in ${bodyColor}. Preserve its original hierarchy, effects, opacity, and contrast relationships as much as possible.`)
+  } else {
+    rules.push("- Keep body text color matched to Image #1 because no custom body color was provided.")
+  }
+  rules.push('- Do not recolor protected brand marks, logos, SKUs, URLs, certifications, or any text listed in DO NOT TRANSLATE.')
+  return `\n${rules.join('\n')}`
+}
+
 function normalizeTranslateFontMode(value: unknown): TranslateFontMode {
   return value === 'reference' ? value : 'match_original'
+}
+
+function normalizeTranslateTextColorMode(value: unknown): TranslateTextColorMode {
+  return value === 'custom' ? value : 'match_original'
+}
+
+function normalizeHexColor(value: unknown): string {
+  const raw = String(value || '').trim()
+  const shortMatch = raw.match(/^#?([0-9a-f]{3})$/i)
+  if (shortMatch) {
+    return `#${shortMatch[1].split('').map((char) => `${char}${char}`).join('').toUpperCase()}`
+  }
+  const longMatch = raw.match(/^#?([0-9a-f]{6})$/i)
+  return longMatch ? `#${longMatch[1].toUpperCase()}` : ''
 }
 
 function cleanFontText(value: unknown, limit: number): string {

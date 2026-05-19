@@ -116,3 +116,68 @@ test('executeTranslate preserves the source image canvas when a font reference h
     await cleanup()
   }
 })
+
+test('executeTranslate adds headline and body color rules to the image prompt', async () => {
+  const { mod, cleanup } = await importTranslate()
+  const originalFetch = globalThis.fetch
+  let prompt = ''
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    const content = payload.messages?.[0]?.content || []
+    prompt = content.find((part) => part.type === 'text')?.text || ''
+    return new Response(JSON.stringify({ data: [{ b64_json: 'Y29sb3JlZA==' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    await mod.executeTranslate({
+      imageBase64: 'c291cmNl',
+      mime: 'image/png',
+      sourceLanguage: 'zh',
+      targetLanguage: 'en',
+      modelId: 'nano-banana-2',
+      preserveBrand: true,
+      textColorMode: 'custom',
+      headlineColor: '#ff6600',
+      bodyColor: '#1f2937',
+      clientKeys: { banana2ApiKey: 'image-key' },
+      ocrPlan: {
+        sourceLang: 'zh',
+        textCount: 2,
+        keepCount: 0,
+        translateCount: 2,
+        texts: [
+          {
+            original: '夏日新品',
+            translation: 'Summer New Arrivals',
+            translations: { en: 'Summer New Arrivals' },
+            keep: false,
+            position: 'topCenter',
+            size: 'large',
+            style: 'bold',
+          },
+          {
+            original: '轻盈透气，全天舒适',
+            translation: 'Light and breathable, all-day comfort',
+            translations: { en: 'Light and breathable, all-day comfort' },
+            keep: false,
+            position: 'bottomCenter',
+            size: 'medium',
+            style: 'regular',
+          },
+        ],
+      },
+    }, {})
+
+    assert.match(prompt, /TEXT COLOR STRATEGY/i)
+    assert.match(prompt, /Identify the main headline/i)
+    assert.match(prompt, /main headline.+#FF6600/i)
+    assert.match(prompt, /body text.+#1F2937/i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})

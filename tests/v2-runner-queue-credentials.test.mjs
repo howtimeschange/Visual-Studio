@@ -109,7 +109,7 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
   }
 })
 
-test('batch submit defaults use nano banana 2 and concurrency 3', async () => {
+test('batch submit defaults use gpt image 2 for translation and nano banana 2 for outfit', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
     VS_TRANSLATE_JOBS_QUEUE: {
@@ -138,7 +138,7 @@ test('batch submit defaults use nano banana 2 and concurrency 3', async () => {
     const translateJob = await mod.getJob(env, translate.jobId)
     const outfitJob = await mod.getJob(env, outfit.jobId)
 
-    assert.equal(translateJob.configJson.modelId, 'nano-banana-2')
+    assert.equal(translateJob.configJson.modelId, 'gpt-image-2')
     assert.equal(translateJob.configJson.concurrency, 3)
     assert.equal(outfitJob.configJson.modelId, 'nano-banana-2')
     assert.equal(outfitJob.configJson.concurrency, 3)
@@ -232,6 +232,7 @@ test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped 
       sessionId: session.id,
       assetIds: [source.id],
       targetLanguages: ['th'],
+      modelId: 'nano-banana-2',
       fontMode: 'reference',
       fontReferenceAssetId: fontReference.id,
       fontPrompt: 'Match the rounded Kanit headline sample.',
@@ -308,6 +309,7 @@ test('runTranslateBatchJob passes source asset dimensions so font references can
       sessionId: session.id,
       assetIds: [source.id],
       targetLanguages: ['en'],
+      modelId: 'nano-banana-2',
       fontMode: 'reference',
       fontReferenceAssetId: fontReference.id,
       clientKeys: {
@@ -397,6 +399,7 @@ test('runTranslateBatchJob reuses one OCR plan and one asset read per source ima
       sessionId: session.id,
       assetIds: [asset.id],
       targetLanguages: ['ja', 'ko'],
+      modelId: 'nano-banana-2',
       concurrency: 2,
       clientKeys: {
         banana2ApiKey: 'image-key',

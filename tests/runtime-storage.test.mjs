@@ -58,6 +58,10 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     CANVAS_SAVE_DEBOUNCE_MS: 2200,
     CANVAS_SHAPES: new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right']),
     TRANSLATE_FONT_MODES: new Set(['match_original', 'reference']),
+    DEFAULT_TRANSLATE_MODEL: 'gpt-image-2',
+    TRANSLATE_TEXT_COLOR_MODES: new Set(['match_original', 'custom']),
+    DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
+    DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
     state: {
       runtime: { sessionId: 'session-1' },
       translate: {
@@ -192,6 +196,8 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'normalizeTranslateFontMode',
     'normalizeTranslateFontFamily',
     'normalizeTranslateFontPrompt',
+    'normalizeTranslateTextColorMode',
+    'normalizeTranslateTextColor',
     'getEffectiveTranslateFontMode',
     'sanitizeTranslatePrefs',
     'getTranslateSignature',
@@ -202,18 +208,24 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
   return { ...context, writes, storage }
 }
 
-test('app defaults batch translation and outfit to nano banana 2 with concurrency 3', async () => {
+test('app defaults batch translation to gpt image 2 and outfit to nano banana 2', async () => {
   const source = await readFile(APP_PATH, 'utf8')
   const state = vm.runInNewContext(`(${extractStateInitializer(source)})`, {
     DEFAULT_CANVAS_PROJECT_TITLE: '未命名画布',
+    DEFAULT_TRANSLATE_MODEL: 'gpt-image-2',
+    DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
+    DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
   })
 
-  assert.equal(state.translate.model, 'nano-banana-2')
+  assert.equal(state.translate.model, 'gpt-image-2')
   assert.equal(state.translate.concurrency, 3)
   assert.equal(state.translate.fontMode, 'match_original')
   assert.equal(state.translate.fontFamily, '')
   assert.equal(state.translate.fontPrompt, '')
   assert.equal(state.translate.fontReference, null)
+  assert.equal(state.translate.textColorMode, 'match_original')
+  assert.equal(state.translate.headlineColor, '#111827')
+  assert.equal(state.translate.bodyColor, '#374151')
   assert.equal(state.outfit.model, 'nano-banana-2')
   assert.equal(state.outfit.concurrency, 3)
 })
@@ -239,6 +251,9 @@ test('sanitizeTranslatePrefs keeps uploaded font reference preferences and drops
   assert.equal(referencePrefs.fontMode, 'reference')
   assert.equal(referencePrefs.fontFamily, '')
   assert.equal(referencePrefs.fontPrompt, 'Use a condensed headline style.')
+  assert.equal(referencePrefs.textColorMode, 'match_original')
+  assert.equal(referencePrefs.headlineColor, '#111827')
+  assert.equal(referencePrefs.bodyColor, '#374151')
   assert.equal(removedPresetPrefs.fontMode, 'match_original')
   assert.equal(removedPresetPrefs.fontFamily, '')
 })
@@ -254,6 +269,7 @@ test('getTranslateSignature changes when font strategy changes', async () => {
     fontFamily: '',
     fontReferenceAssetId: '',
     fontPrompt: '',
+    textColorMode: 'match_original',
   })
   const legacyPreset = harness.getTranslateSignature({
     sourceLanguage: 'auto',
@@ -263,6 +279,7 @@ test('getTranslateSignature changes when font strategy changes', async () => {
     fontFamily: '',
     fontReferenceAssetId: '',
     fontPrompt: '',
+    textColorMode: 'match_original',
   })
   const withReference = harness.getTranslateSignature({
     sourceLanguage: 'auto',
@@ -272,11 +289,26 @@ test('getTranslateSignature changes when font strategy changes', async () => {
     fontFamily: '',
     fontReferenceAssetId: 'asset_font_1',
     fontPrompt: 'Match the sample.',
+    textColorMode: 'match_original',
+  })
+  const withCustomColors = harness.getTranslateSignature({
+    sourceLanguage: 'auto',
+    modelId: 'nano-banana-2',
+    preserveBrand: true,
+    fontMode: 'match_original',
+    fontFamily: '',
+    fontReferenceAssetId: '',
+    fontPrompt: '',
+    textColorMode: 'custom',
+    headlineColor: '#f97316',
+    bodyColor: '#111827',
   })
 
   assert.equal(base, legacyPreset)
   assert.notEqual(base, withReference)
+  assert.notEqual(base, withCustomColors)
   assert.match(withReference, /asset_font_1/)
+  assert.match(withCustomColors, /#F97316/)
 })
 
 test('writeRuntimeStorageSnapshot falls back to a compact snapshot when quota is exceeded', async () => {
