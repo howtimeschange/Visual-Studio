@@ -183,6 +183,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'createAiSessionRecord',
     'sanitizeAiSessions',
     'sanitizeAiMessages',
+    'sanitizeAiMessageStyleIntent',
     'sanitizeAiMessageRefs',
     'shouldInlineHistoryDataUrl',
     'serializeStoredAiSessions',
