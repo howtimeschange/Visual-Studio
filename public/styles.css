@@ -3264,6 +3264,31 @@ button.ghost:disabled,
   line-height: 1.35;
 }
 
+.ai-suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+}
+
+.ai-suggestion-chip {
+  max-width: 100%;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  line-height: 1.25;
+  text-align: left;
+}
+
+.ai-suggestion-chip:hover {
+  border-color: var(--line-strong);
+  background: var(--accent-soft);
+}
+
 /* ── Toolbar ── */
 
 .canvas-toolbar {

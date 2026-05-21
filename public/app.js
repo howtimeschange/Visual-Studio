@@ -2131,6 +2131,9 @@ function serializeAiMessage(msg = {}) {
     imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
     imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
     aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+    suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
+    needsClarification: Boolean(msg.needsClarification),
+    styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
   }
 }
 
@@ -2163,6 +2166,9 @@ function sanitizeAiMessages(value) {
         imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
         imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
         aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+        suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
+        needsClarification: Boolean(msg.needsClarification),
+        styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
         loading: false,
         loadingText: '',
         streaming: false,
@@ -2170,6 +2176,17 @@ function sanitizeAiMessages(value) {
     })
     .filter(Boolean)
     .slice(-AI_HISTORY_LIMIT)
+}
+
+function sanitizeAiMessageStyleIntent(value) {
+  if (!value || typeof value !== 'object') return null
+  const styleIntent = {
+    category: typeof value.category === 'string' ? value.category.slice(0, 160) : '',
+    medium: typeof value.medium === 'string' ? value.medium.slice(0, 160) : '',
+    visualLanguage: typeof value.visualLanguage === 'string' ? value.visualLanguage.slice(0, 160) : '',
+    reason: typeof value.reason === 'string' ? value.reason.slice(0, 160) : '',
+  }
+  return Object.values(styleIntent).some(Boolean) ? styleIntent : null
 }
 
 function sanitizeAiMessageRefs(value) {
@@ -4804,20 +4821,19 @@ function setCanvasGenerateStatus(el, message) {
   renderCanvas()
 }
 
-function shouldUseAsyncCanvasGenerate(modelId, resolution, refImages = []) {
+function shouldUseAsyncCanvasGenerate(modelId) {
   return modelId === 'gpt-image-2'
-    && (normalizeCanvasResolution(resolution) === '4k' || refImages.length > 0)
 }
 
 async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
-  if (!shouldUseAsyncCanvasGenerate(payload.modelId, payload.resolution, payload.referenceImages || [])) {
+  if (!shouldUseAsyncCanvasGenerate(payload.modelId)) {
     return postJson('/api/generate-direct', payload)
   }
 
-  onStatus?.('正在提交 4K 生成任务…')
+  onStatus?.('正在提交生成任务…')
   const submitted = await postJson('/api/jobs/generate-direct', payload)
   state.runtime.sessionId = submitted.sessionId || state.runtime.sessionId
-  onStatus?.('4K 任务已提交，正在等待生成完成…')
+  onStatus?.('生成任务已提交，正在等待完成…')
   return waitForCanvasGenerateJob(submitted.jobId, {
     projectId: state.generate.projectId,
     onStatus,
@@ -4870,7 +4886,7 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
 function formatCanvasGenerateJobStatus(status) {
   return ({
     queued: '任务排队中…',
-    running: '图像模型正在生成 4K 图片…',
+    running: '图像模型正在生成图片…',
     completed: '正在读取生成结果…',
     failed: '生成任务失败',
     cancelled: '生成任务已取消',
@@ -4930,6 +4946,10 @@ async function executeCanvasGenerate() {
         clientKeys: { ...state.keys },
       })
       state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
+      // This path is the compact generator card, so keep clarification visible in status only.
+      if (agentData.needsClarification && !agentData.shouldGenerate) {
+        throw new Error(agentData.reply || '请先在 AI 助手里选择一个风格方向。')
+      }
       finalPrompt = String(agentData.prompt || '').trim() || prompt
     }
 
@@ -5183,9 +5203,45 @@ function renderAiMessages() {
       imgWrap.append(img)
       node.append(imgWrap)
     }
+    const suggestionNodes = createAiSuggestionNodes(msg.suggestions, {
+      numbered: Boolean(msg.needsClarification),
+    })
+    if (suggestionNodes) node.append(suggestionNodes)
     return node
   }))
   dom.gAiMessages.scrollTop = dom.gAiMessages.scrollHeight
+}
+
+function createAiSuggestionNodes(items, options = {}) {
+  const prompts = Array.isArray(items)
+    ? items.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 4)
+    : []
+  if (!prompts.length) return null
+
+  const suggestions = document.createElement('div')
+  const numbered = Boolean(options.numbered)
+  suggestions.className = numbered ? 'ai-suggestions' : 'ai-suggestion-chips'
+  prompts.forEach((prompt, index) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = numbered ? 'ai-suggestion' : 'ai-suggestion-chip'
+    button.dataset.aiPrompt = prompt
+    button.addEventListener('click', () => {
+      dom.gInput.value = prompt
+      dom.gInput.focus()
+    })
+    if (numbered) {
+      const strong = document.createElement('strong')
+      strong.textContent = `风格选项 ${index + 1}`
+      const span = document.createElement('span')
+      span.textContent = prompt
+      button.append(strong, span)
+    } else {
+      button.textContent = prompt
+    }
+    suggestions.append(button)
+  })
+  return suggestions
 }
 
 function createAiLoadingNode(text) {
@@ -5392,6 +5448,9 @@ async function sendCanvasAiMessage() {
     const replyText = agentData.reply || '我已经整理好设计方向。'
     await streamAiMessageContent(assistantMsg, replyText)
     assistantMsg.steps = Array.isArray(agentData.steps) ? agentData.steps : []
+    assistantMsg.suggestions = Array.isArray(agentData.suggestions) ? agentData.suggestions : []
+    assistantMsg.needsClarification = Boolean(agentData.needsClarification)
+    assistantMsg.styleIntent = agentData.styleIntent || null
     renderAiMessages()
 
     if (!agentData.shouldGenerate) {
