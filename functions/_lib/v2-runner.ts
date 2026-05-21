@@ -45,6 +45,8 @@ type WaitUntil = (promise: Promise<unknown>) => void
 
 type ClientKeys = Record<string, unknown>
 type TranslateFontMode = 'match_original' | 'reference'
+type TranslateTextColorMode = 'match_original' | 'custom'
+const DEFAULT_TRANSLATE_MODEL_ID = 'gpt-image-2'
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
@@ -90,18 +92,39 @@ function cleanFontReferenceAssetId(value: unknown): string {
   return String(value || '').trim().slice(0, 120)
 }
 
+function normalizeTranslateTextColorMode(value: unknown): TranslateTextColorMode {
+  return value === 'custom' ? value : 'match_original'
+}
+
+function normalizeHexColor(value: unknown): string {
+  const raw = String(value || '').trim()
+  const shortMatch = raw.match(/^#?([0-9a-f]{3})$/i)
+  if (shortMatch) {
+    return `#${shortMatch[1].split('').map((char) => `${char}${char}`).join('').toUpperCase()}`
+  }
+  const longMatch = raw.match(/^#?([0-9a-f]{6})$/i)
+  return longMatch ? `#${longMatch[1].toUpperCase()}` : ''
+}
+
 function normalizeTranslateFontConfig(body: any): {
   fontMode: TranslateFontMode
   fontFamily: string
   fontReferenceAssetId: string
   fontPrompt: string
+  textColorMode: TranslateTextColorMode
+  headlineColor: string
+  bodyColor: string
 } {
   const fontMode = normalizeTranslateFontMode(body?.fontMode)
+  const textColorMode = normalizeTranslateTextColorMode(body?.textColorMode)
   return {
     fontMode,
     fontFamily: '',
     fontReferenceAssetId: fontMode === 'reference' ? cleanFontReferenceAssetId(body?.fontReferenceAssetId) : '',
     fontPrompt: fontMode === 'reference' ? cleanInstruction(body?.fontPrompt) : '',
+    textColorMode,
+    headlineColor: textColorMode === 'custom' ? normalizeHexColor(body?.headlineColor) : '',
+    bodyColor: textColorMode === 'custom' ? normalizeHexColor(body?.bodyColor) : '',
   }
 }
 
@@ -371,8 +394,9 @@ export async function submitTranslateBatch(
 
   const jobId = createId('job')
   const fontConfig = normalizeTranslateFontConfig(body)
+  const modelId = body?.modelId || DEFAULT_TRANSLATE_MODEL_ID
   const configJson = {
-    modelId: body?.modelId || 'nano-banana-2',
+    modelId,
     sourceLanguage: body?.sourceLanguage || 'auto',
     targetLanguages,
     preserveBrand: body?.preserveBrand !== false,
@@ -380,7 +404,7 @@ export async function submitTranslateBatch(
     assetIds,
     ...fontConfig,
     configHash: await stableHash({
-      modelId: body?.modelId || 'nano-banana-2',
+      modelId,
       sourceLanguage: body?.sourceLanguage || 'auto',
       targetLanguages,
       preserveBrand: body?.preserveBrand !== false,
@@ -475,6 +499,9 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
         fontFamily: job.configJson.fontFamily,
         fontReferenceImage,
         fontPrompt: job.configJson.fontPrompt,
+        textColorMode: job.configJson.textColorMode,
+        headlineColor: job.configJson.headlineColor,
+        bodyColor: job.configJson.bodyColor,
         sourceWidth: sourceAsset?.width || null,
         sourceHeight: sourceAsset?.height || null,
         ocrPlan,

@@ -243,6 +243,33 @@
             <label>字体说明 <span class="muted">（可选）</span></label>
             <input id="t-font-prompt" type="text" class="input" maxlength="500" placeholder="例如：圆润粗标题、窄体、描边字…" />
           </div>
+          <div class="field text-color-mode-field">
+            <label>文字颜色</label>
+            <select id="t-text-color-mode" class="input">
+              <option value="match_original">跟随原图颜色</option>
+              <option value="custom">自定义主标题 / 正文</option>
+            </select>
+          </div>
+          <div class="field text-color-field" id="t-headline-color-wrap">
+            <label>主标题颜色</label>
+            <div class="color-control" data-color-role="headline">
+              <div class="color-swatches" id="t-headline-swatches"></div>
+              <div class="color-input-row">
+                <input id="t-headline-color-picker" type="color" class="color-picker" value="#111827" />
+                <input id="t-headline-color" type="text" class="input color-code-input" maxlength="7" value="#111827" placeholder="#111827" />
+              </div>
+            </div>
+          </div>
+          <div class="field text-color-field" id="t-body-color-wrap">
+            <label>正文颜色</label>
+            <div class="color-control" data-color-role="body">
+              <div class="color-swatches" id="t-body-swatches"></div>
+              <div class="color-input-row">
+                <input id="t-body-color-picker" type="color" class="color-picker" value="#374151" />
+                <input id="t-body-color" type="text" class="input color-code-input" maxlength="7" value="#374151" placeholder="#374151" />
+              </div>
+            </div>
+          </div>
         </div>
         <div class="chips target-chipbar" id="target-chips"></div>
 

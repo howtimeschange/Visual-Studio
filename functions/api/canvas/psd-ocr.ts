@@ -52,6 +52,28 @@ type CanvasPsdDecomposeResult = CanvasPsdOcrResult & {
   backgroundLayer: CanvasPsdBackgroundLayer | null
 }
 
+type CanvasPsdCutoutResult = { ok: true; dataUrl: string } | { ok: false; error: string; status?: number }
+
+const DEFAULT_PSD_CUTOUT_CONCURRENCY = 2
+const DEFAULT_SEMANTIC_LAYER_LIMIT = 12
+const MIN_TARGET_AREA_RATIO = 0.001
+const SEMANTIC_GROUP_TYPES = new Set<CanvasPsdSemanticLayer['type']>([
+  'decoration',
+  'effect',
+  'shadow',
+  'foreground',
+])
+const EXTRACTION_TYPE_SCORE: Record<CanvasPsdSemanticLayer['type'], number> = {
+  background: 0,
+  shadow: 20,
+  effect: 32,
+  decoration: 38,
+  foreground: 52,
+  object: 62,
+  logo: 72,
+  subject: 100,
+}
+
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
@@ -140,16 +162,10 @@ export async function decomposeCanvasPsdImage(env: Env, body: any): Promise<Canv
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
   imageModelOptions.size = buildImageModelSize(width, height)
   imageModelOptions.quality = 'high'
-  const warnings: string[] = []
-  const extractedLayers: CanvasPsdExtractedLayer[] = []
-  const targets = analysis.semanticLayers
-    .filter((layer) => layer.type !== 'background')
-    .sort((a, b) => b.zIndex - a.zIndex)
-    .slice(0, normalizeLayerLimit(body?.maxLayers))
-
-  for (const layer of targets) {
+  const targets = selectCanvasPsdExtractionTargets(analysis.semanticLayers, normalizeLayerLimit(body?.maxLayers), width, height)
+  const cutoutJobs = runCanvasPsdCutoutJobs(targets, (layer) => {
     const prompt = buildCutoutPrompt(layer, width, height)
-    const result = await callImageModel(
+    return callImageModel(
       baseUrl,
       genKey,
       MODEL_MAP[modelId],
@@ -157,16 +173,10 @@ export async function decomposeCanvasPsdImage(env: Env, body: any): Promise<Canv
       prompt,
       imageModelOptions,
     )
-    if (result.ok && isImageDataUrl(result.dataUrl)) {
-      extractedLayers.push({ ...layer, dataUrl: result.dataUrl })
-    } else {
-      warnings.push(`${layer.name} 透明图层生成失败：${result.ok ? '模型未返回图片' : result.error}`)
-    }
-  }
+  }, { concurrency: normalizeCutoutConcurrency(body?.layerConcurrency || body?.concurrency) })
 
-  let backgroundLayer: CanvasPsdBackgroundLayer | null = null
   const backgroundPrompt = buildCleanBackgroundPrompt(targets, analysis.texts, width, height)
-  const backgroundResult = await callImageModel(
+  const backgroundJob = callImageModel(
     baseUrl,
     genKey,
     MODEL_MAP[modelId],
@@ -174,6 +184,10 @@ export async function decomposeCanvasPsdImage(env: Env, body: any): Promise<Canv
     backgroundPrompt,
     imageModelOptions,
   )
+
+  const [cutoutResult, backgroundResult] = await Promise.all([cutoutJobs, backgroundJob])
+  const warnings: string[] = [...cutoutResult.warnings]
+  let backgroundLayer: CanvasPsdBackgroundLayer | null = null
   if (backgroundResult.ok && isImageDataUrl(backgroundResult.dataUrl)) {
     backgroundLayer = {
       name: 'Clean Background',
@@ -188,7 +202,7 @@ export async function decomposeCanvasPsdImage(env: Env, body: any): Promise<Canv
     sessionId: session.id,
     ...normalizeCanvasPsdDecomposeResult({
       analysis,
-      extractedLayers,
+      extractedLayers: cutoutResult.extractedLayers,
       backgroundLayer,
       warnings: [...analysis.warnings, ...warnings],
     }, width, height),
@@ -241,8 +255,9 @@ export function normalizeCanvasPsdOcrResult(raw: any, width: number, height: num
   const semanticLayers = sourceSemanticLayers
     .map((item, index) => normalizeSemanticLayerItem(item, index, canvasWidth, canvasHeight))
     .filter((item): item is CanvasPsdSemanticLayer => Boolean(item))
+    .reduce((layers, layer) => mergeSemanticLayerIntoPlan(layers, layer, canvasWidth, canvasHeight), [] as CanvasPsdSemanticLayer[])
     .sort((a, b) => a.zIndex - b.zIndex)
-    .slice(0, 12)
+    .slice(0, DEFAULT_SEMANTIC_LAYER_LIMIT)
 
   return {
     texts,
@@ -280,6 +295,234 @@ export function normalizeCanvasPsdDecomposeResult(raw: any, width: number, heigh
     backgroundLayer,
     warnings: [...new Set(warnings)],
   }
+}
+
+export function selectCanvasPsdExtractionTargets(
+  semanticLayers: CanvasPsdSemanticLayer[] = [],
+  maxLayers = 5,
+  width = 1,
+  height = 1,
+): CanvasPsdSemanticLayer[] {
+  const canvasArea = Math.max(1, normalizeDimension(width) * normalizeDimension(height))
+  const limit = normalizeLayerLimit(maxLayers)
+  const seenTypes = new Set<CanvasPsdSemanticLayer['type']>()
+  const candidates = semanticLayers
+    .filter((layer) => layer?.type !== 'background')
+    .filter((layer) => {
+      const area = Math.max(0, Number(layer?.bbox?.width) || 0) * Math.max(0, Number(layer?.bbox?.height) || 0)
+      const areaRatio = area / canvasArea
+      if (areaRatio >= MIN_TARGET_AREA_RATIO) return true
+      return ['subject', 'logo', 'object'].includes(layer?.type)
+    })
+    .map((layer, index) => {
+      const area = Math.max(0, Number(layer.bbox.width) || 0) * Math.max(0, Number(layer.bbox.height) || 0)
+      const areaRatio = area / canvasArea
+      const typeScore = EXTRACTION_TYPE_SCORE[layer.type] || EXTRACTION_TYPE_SCORE.object
+      const areaScore = Math.min(18, Math.sqrt(Math.max(0, areaRatio)) * 32)
+      const confidenceScore = normalizeConfidence(layer.confidence) * 12
+      const zScore = clampNumber(Number(layer.zIndex) || 0, 0, 100) / 20
+      return {
+        layer,
+        index,
+        score: typeScore + areaScore + confidenceScore + zScore,
+      }
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score
+      return a.index - b.index
+    })
+
+  const targets: CanvasPsdSemanticLayer[] = []
+  for (const candidate of candidates) {
+    if (targets.length >= limit) break
+    if (candidate.layer.type !== 'subject' && seenTypes.has(candidate.layer.type)) continue
+    targets.push(candidate.layer)
+    seenTypes.add(candidate.layer.type)
+  }
+  return targets
+}
+
+export async function runCanvasPsdCutoutJobs(
+  layers: CanvasPsdSemanticLayer[] = [],
+  runLayer: (layer: CanvasPsdSemanticLayer, index: number) => Promise<CanvasPsdCutoutResult>,
+  opts: { concurrency?: number } = {},
+): Promise<{ extractedLayers: CanvasPsdExtractedLayer[]; warnings: string[] }> {
+  const sourceLayers = Array.isArray(layers) ? layers : []
+  const concurrency = normalizeCutoutConcurrency(opts.concurrency)
+  const results: Array<CanvasPsdExtractedLayer | null> = new Array(sourceLayers.length).fill(null)
+  const warnings: string[] = []
+  let nextIndex = 0
+
+  const worker = async () => {
+    while (nextIndex < sourceLayers.length) {
+      const index = nextIndex
+      nextIndex += 1
+      const layer = sourceLayers[index]
+      try {
+        const result = await runLayer(layer, index)
+        if (result.ok && isImageDataUrl(result.dataUrl)) {
+          results[index] = { ...layer, dataUrl: result.dataUrl }
+        } else {
+          warnings.push(`${layer.name} 透明图层生成失败：${result.ok ? '模型未返回图片' : result.error}`)
+        }
+      } catch (error: any) {
+        warnings.push(`${layer.name} 透明图层生成失败：${String(error?.message || error || '未知错误')}`)
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, sourceLayers.length) }, () => worker()))
+  return {
+    extractedLayers: results.filter((layer): layer is CanvasPsdExtractedLayer => Boolean(layer)),
+    warnings,
+  }
+}
+
+function mergeSemanticLayerIntoPlan(
+  layers: CanvasPsdSemanticLayer[],
+  layer: CanvasPsdSemanticLayer,
+  canvasWidth: number,
+  canvasHeight: number,
+): CanvasPsdSemanticLayer[] {
+  const existingIndex = layers.findIndex((candidate) => shouldMergeSemanticLayers(candidate, layer))
+  if (existingIndex < 0) return [...layers, layer]
+
+  const existing = layers[existingIndex]
+  const merged = mergeSemanticLayers(existing, layer, canvasWidth, canvasHeight)
+  return layers.map((candidate, index) => (index === existingIndex ? merged : candidate))
+}
+
+function shouldMergeSemanticLayers(a: CanvasPsdSemanticLayer, b: CanvasPsdSemanticLayer): boolean {
+  if (!a || !b || a.type !== b.type) return false
+  if (a.type === 'background') return true
+  if (SEMANTIC_GROUP_TYPES.has(a.type)) return true
+  if (a.type === 'subject') return true
+  if (a.type === 'object') return bboxesOverlapOrNearlyTouch(a.bbox, b.bbox, 0.2)
+  if (a.type === 'logo') return bboxesOverlapOrNearlyTouch(a.bbox, b.bbox, 0.45)
+  return false
+}
+
+function mergeSemanticLayers(
+  a: CanvasPsdSemanticLayer,
+  b: CanvasPsdSemanticLayer,
+  canvasWidth: number,
+  canvasHeight: number,
+): CanvasPsdSemanticLayer {
+  const raw = unionBbox(a.bbox, b.bbox)
+  const bbox = a.type === 'background'
+    ? clampBbox(raw, canvasWidth, canvasHeight)
+    : expandBbox(raw, canvasWidth, canvasHeight, semanticLayerPadding(raw, a.type))
+  return {
+    name: createMergedSemanticLayerName(a, b),
+    type: a.type,
+    bbox,
+    description: mergeDescriptions(a.description, b.description),
+    confidence: Math.max(normalizeConfidence(a.confidence), normalizeConfidence(b.confidence)),
+    zIndex: Math.round((a.zIndex + b.zIndex) / 2),
+  }
+}
+
+function createMergedSemanticLayerName(a: CanvasPsdSemanticLayer, b: CanvasPsdSemanticLayer): string {
+  const fallback: Record<CanvasPsdSemanticLayer['type'], string> = {
+    background: 'Background',
+    subject: 'Main subject',
+    logo: 'Logo',
+    decoration: 'Decorations',
+    foreground: 'Foreground',
+    effect: 'Effects',
+    shadow: 'Shadows',
+    object: 'Objects',
+  }
+  if (a.type === 'subject' || SEMANTIC_GROUP_TYPES.has(a.type) || a.type === 'object') {
+    return fallback[a.type]
+  }
+  const first = String(a.name || '').trim()
+  const second = String(b.name || '').trim()
+  if (!first) return second || fallback[a.type]
+  if (!second || first === second) return first
+  return `${first} + ${second}`.slice(0, 80)
+}
+
+function mergeDescriptions(a: string, b: string): string {
+  const parts = [a, b].map((item) => String(item || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+  return [...new Set(parts)].join('; ').slice(0, 240)
+}
+
+function unionBbox(
+  a: CanvasPsdSemanticLayer['bbox'],
+  b: CanvasPsdSemanticLayer['bbox'],
+): CanvasPsdSemanticLayer['bbox'] {
+  const left = Math.min(a.x, b.x)
+  const top = Math.min(a.y, b.y)
+  const right = Math.max(a.x + a.width, b.x + b.width)
+  const bottom = Math.max(a.y + a.height, b.y + b.height)
+  return {
+    x: left,
+    y: top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  }
+}
+
+function semanticLayerPadding(
+  bbox: CanvasPsdSemanticLayer['bbox'],
+  type: CanvasPsdSemanticLayer['type'],
+): { x: number; y: number } {
+  const baseX = type === 'decoration' || type === 'effect'
+    ? Math.max(20, Math.round(bbox.width * 0.025))
+    : Math.max(10, Math.round(bbox.width * 0.04))
+  const baseY = type === 'decoration' || type === 'effect'
+    ? Math.max(20, Math.round(bbox.height * 0.18))
+    : Math.max(12, Math.round(bbox.height * 0.03))
+  return { x: baseX, y: baseY }
+}
+
+function expandBbox(
+  bbox: CanvasPsdSemanticLayer['bbox'],
+  canvasWidth: number,
+  canvasHeight: number,
+  padding: { x: number; y: number },
+): CanvasPsdSemanticLayer['bbox'] {
+  return clampBbox({
+    x: bbox.x - padding.x,
+    y: bbox.y - padding.y,
+    width: bbox.width + padding.x * 2,
+    height: bbox.height + padding.y * 2,
+  }, canvasWidth, canvasHeight)
+}
+
+function clampBbox(
+  bbox: CanvasPsdSemanticLayer['bbox'],
+  canvasWidth: number,
+  canvasHeight: number,
+): CanvasPsdSemanticLayer['bbox'] {
+  const left = clampNumber(Math.round(bbox.x), 0, canvasWidth)
+  const top = clampNumber(Math.round(bbox.y), 0, canvasHeight)
+  const right = clampNumber(Math.round(bbox.x + bbox.width), left + 1, canvasWidth)
+  const bottom = clampNumber(Math.round(bbox.y + bbox.height), top + 1, canvasHeight)
+  return {
+    x: left,
+    y: top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  }
+}
+
+function bboxesOverlapOrNearlyTouch(
+  a: CanvasPsdSemanticLayer['bbox'],
+  b: CanvasPsdSemanticLayer['bbox'],
+  toleranceRatio: number,
+): boolean {
+  const tolerance = Math.max(8, Math.min(
+    Math.max(a.width, a.height),
+    Math.max(b.width, b.height),
+  ) * toleranceRatio)
+  return !(
+    a.x + a.width + tolerance < b.x
+    || b.x + b.width + tolerance < a.x
+    || a.y + a.height + tolerance < b.y
+    || b.y + b.height + tolerance < a.y
+  )
 }
 
 function normalizeOcrTextItem(item: any, canvasWidth: number, canvasHeight: number): CanvasPsdOcrText | null {
@@ -594,6 +837,13 @@ function normalizeZIndex(value: unknown, type: CanvasPsdSemanticLayer['type'], i
 function normalizeLayerLimit(value: unknown): number {
   const number = Math.round(Number(value) || 0)
   return Number.isFinite(number) && number > 0 ? clampNumber(number, 1, 6) : 5
+}
+
+function normalizeCutoutConcurrency(value: unknown): number {
+  const number = Math.round(Number(value) || 0)
+  return Number.isFinite(number) && number > 0
+    ? clampNumber(number, 1, 3)
+    : DEFAULT_PSD_CUTOUT_CONCURRENCY
 }
 
 function buildImageModelSize(width: number, height: number): string {

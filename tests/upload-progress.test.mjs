@@ -63,6 +63,9 @@ async function createTranslateRunConfigHarness() {
   const uploads = []
   const context = {
     TRANSLATE_FONT_MODES: new Set(['match_original', 'reference']),
+    TRANSLATE_TEXT_COLOR_MODES: new Set(['match_original', 'custom']),
+    DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
+    DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
     state: {
       runtime: {
         sessionId: 'sess_existing',
@@ -77,6 +80,9 @@ async function createTranslateRunConfigHarness() {
         fontFamily: '',
         fontPrompt: 'Rounded campaign headline.',
         fontReference: null,
+        textColorMode: 'custom',
+        headlineColor: '#f97316',
+        bodyColor: '#111827',
       },
     },
     splitDataUrl: (dataUrl) => {
@@ -100,6 +106,8 @@ async function createTranslateRunConfigHarness() {
     extractFunction(source, 'normalizeTranslateFontMode'),
     extractFunction(source, 'normalizeTranslateFontFamily'),
     extractFunction(source, 'normalizeTranslateFontPrompt'),
+    extractFunction(source, 'normalizeTranslateTextColorMode'),
+    extractFunction(source, 'normalizeTranslateTextColor'),
     extractFunction(source, 'getEffectiveTranslateFontMode'),
     extractFunction(source, 'getTranslateRunConfig'),
     extractFunction(source, 'prepareTranslateRunConfig'),
@@ -141,4 +149,7 @@ test('removed font preset mode does not generate or upload a font reference imag
   assert.equal(config.fontReferenceAssetId, '')
   assert.equal(config.fontReferenceImage, null)
   assert.equal(config.fontPrompt, '')
+  assert.equal(config.textColorMode, 'custom')
+  assert.equal(config.headlineColor, '#F97316')
+  assert.equal(config.bodyColor, '#111827')
 })

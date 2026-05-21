@@ -54,6 +54,21 @@ const MODEL_OPTIONS = [
 ]
 
 const TRANSLATE_FONT_MODES = new Set(['match_original', 'reference'])
+const DEFAULT_TRANSLATE_MODEL = 'gpt-image-2'
+const TRANSLATE_TEXT_COLOR_MODES = new Set(['match_original', 'custom'])
+const TRANSLATE_TEXT_COLOR_SWATCHES = [
+  '#111827',
+  '#FFFFFF',
+  '#EF4444',
+  '#F97316',
+  '#FACC15',
+  '#22C55E',
+  '#2563EB',
+  '#7C3AED',
+  '#374151',
+]
+const DEFAULT_TRANSLATE_HEADLINE_COLOR = '#111827'
+const DEFAULT_TRANSLATE_BODY_COLOR = '#374151'
 
 const GARMENT_ROLE_OPTIONS = [
   { value: 'full_outfit', label: '整套' },
@@ -252,13 +267,16 @@ const state = {
   translate: {
     source: 'auto',
     targets: ['en'],
-    model: 'nano-banana-2',
+    model: DEFAULT_TRANSLATE_MODEL,
     preserveBrand: true,
     concurrency: 3,
     fontMode: 'match_original',
     fontFamily: '',
     fontPrompt: '',
     fontReference: null,
+    textColorMode: 'match_original',
+    headlineColor: DEFAULT_TRANSLATE_HEADLINE_COLOR,
+    bodyColor: DEFAULT_TRANSLATE_BODY_COLOR,
     items: [],
     running: false,
     progress: '',
@@ -423,6 +441,15 @@ const dom = {
   tFontBrowseBtn: $('#t-font-browse-btn'),
   tFontClearBtn: $('#t-font-clear-btn'),
   tFontReferenceName: $('#t-font-reference-name'),
+  tTextColorMode: $('#t-text-color-mode'),
+  tHeadlineColorWrap: $('#t-headline-color-wrap'),
+  tBodyColorWrap: $('#t-body-color-wrap'),
+  tHeadlineSwatches: $('#t-headline-swatches'),
+  tBodySwatches: $('#t-body-swatches'),
+  tHeadlineColorPicker: $('#t-headline-color-picker'),
+  tBodyColorPicker: $('#t-body-color-picker'),
+  tHeadlineColor: $('#t-headline-color'),
+  tBodyColor: $('#t-body-color'),
   tDropzone: $('#t-dropzone'),
   tFileInput: $('#t-file-input'),
   tBrowseBtn: $('#t-browse-btn'),
@@ -631,6 +658,7 @@ function init() {
   bindTaskDeleteDialog()
   bindHome()
   bindTranslate()
+  renderTranslateColorSwatches()
   bindProjects()
   bindShare()
   bindGenerate()
@@ -789,6 +817,9 @@ function sanitizeTranslatePrefs(raw = {}) {
     fontMode: normalizeTranslateFontMode(raw.fontMode),
     fontFamily: '',
     fontPrompt: normalizeTranslateFontPrompt(raw.fontPrompt),
+    textColorMode: normalizeTranslateTextColorMode(raw.textColorMode),
+    headlineColor: normalizeTranslateTextColor(raw.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR),
+    bodyColor: normalizeTranslateTextColor(raw.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR),
   }
 }
 
@@ -802,6 +833,21 @@ function normalizeTranslateFontFamily(value) {
 
 function normalizeTranslateFontPrompt(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 500)
+}
+
+function normalizeTranslateTextColorMode(value) {
+  return TRANSLATE_TEXT_COLOR_MODES.has(String(value || '')) ? String(value) : 'match_original'
+}
+
+function normalizeTranslateTextColor(value, fallback = '') {
+  const raw = String(value || '').trim()
+  const shortMatch = raw.match(/^#?([0-9a-f]{3})$/i)
+  if (shortMatch) {
+    return `#${shortMatch[1].split('').map((char) => `${char}${char}`).join('').toUpperCase()}`
+  }
+  const longMatch = raw.match(/^#?([0-9a-f]{6})$/i)
+  if (longMatch) return `#${longMatch[1].toUpperCase()}`
+  return fallback
 }
 
 function getEffectiveTranslateFontMode(config = state.translate) {
@@ -851,6 +897,9 @@ function savePrefs() {
       fontMode: state.translate.fontMode,
       fontFamily: state.translate.fontFamily,
       fontPrompt: state.translate.fontPrompt,
+      textColorMode: state.translate.textColorMode,
+      headlineColor: state.translate.headlineColor,
+      bodyColor: state.translate.bodyColor,
     },
     generate: {
       model: state.generate.model,
@@ -2082,6 +2131,9 @@ function serializeAiMessage(msg = {}) {
     imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
     imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
     aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+    suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
+    needsClarification: Boolean(msg.needsClarification),
+    styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
   }
 }
 
@@ -2114,6 +2166,9 @@ function sanitizeAiMessages(value) {
         imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
         imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
         aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+        suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
+        needsClarification: Boolean(msg.needsClarification),
+        styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
         loading: false,
         loadingText: '',
         streaming: false,
@@ -2121,6 +2176,17 @@ function sanitizeAiMessages(value) {
     })
     .filter(Boolean)
     .slice(-AI_HISTORY_LIMIT)
+}
+
+function sanitizeAiMessageStyleIntent(value) {
+  if (!value || typeof value !== 'object') return null
+  const styleIntent = {
+    category: typeof value.category === 'string' ? value.category.slice(0, 160) : '',
+    medium: typeof value.medium === 'string' ? value.medium.slice(0, 160) : '',
+    visualLanguage: typeof value.visualLanguage === 'string' ? value.visualLanguage.slice(0, 160) : '',
+    reason: typeof value.reason === 'string' ? value.reason.slice(0, 160) : '',
+  }
+  return Object.values(styleIntent).some(Boolean) ? styleIntent : null
 }
 
 function sanitizeAiMessageRefs(value) {
@@ -2607,6 +2673,16 @@ function bindTranslate() {
     pruneTranslateResults()
     savePrefs()
   })
+
+  dom.tTextColorMode?.addEventListener('change', () => {
+    state.translate.textColorMode = normalizeTranslateTextColorMode(dom.tTextColorMode.value)
+    pruneTranslateResults()
+    savePrefs()
+    renderTranslate()
+  })
+
+  bindTranslateColorInputs('headline', dom.tHeadlineColor, dom.tHeadlineColorPicker)
+  bindTranslateColorInputs('body', dom.tBodyColor, dom.tBodyColorPicker)
 
   dom.tFontBrowseBtn?.addEventListener('click', () => {
     if (isTranslateBusy()) return
@@ -4745,20 +4821,19 @@ function setCanvasGenerateStatus(el, message) {
   renderCanvas()
 }
 
-function shouldUseAsyncCanvasGenerate(modelId, resolution, refImages = []) {
+function shouldUseAsyncCanvasGenerate(modelId) {
   return modelId === 'gpt-image-2'
-    && (normalizeCanvasResolution(resolution) === '4k' || refImages.length > 0)
 }
 
 async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
-  if (!shouldUseAsyncCanvasGenerate(payload.modelId, payload.resolution, payload.referenceImages || [])) {
+  if (!shouldUseAsyncCanvasGenerate(payload.modelId)) {
     return postJson('/api/generate-direct', payload)
   }
 
-  onStatus?.('正在提交 4K 生成任务…')
+  onStatus?.('正在提交生成任务…')
   const submitted = await postJson('/api/jobs/generate-direct', payload)
   state.runtime.sessionId = submitted.sessionId || state.runtime.sessionId
-  onStatus?.('4K 任务已提交，正在等待生成完成…')
+  onStatus?.('生成任务已提交，正在等待完成…')
   return waitForCanvasGenerateJob(submitted.jobId, {
     projectId: state.generate.projectId,
     onStatus,
@@ -4811,7 +4886,7 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
 function formatCanvasGenerateJobStatus(status) {
   return ({
     queued: '任务排队中…',
-    running: '图像模型正在生成 4K 图片…',
+    running: '图像模型正在生成图片…',
     completed: '正在读取生成结果…',
     failed: '生成任务失败',
     cancelled: '生成任务已取消',
@@ -4871,6 +4946,10 @@ async function executeCanvasGenerate() {
         clientKeys: { ...state.keys },
       })
       state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
+      // This path is the compact generator card, so keep clarification visible in status only.
+      if (agentData.needsClarification && !agentData.shouldGenerate) {
+        throw new Error(agentData.reply || '请先在 AI 助手里选择一个风格方向。')
+      }
       finalPrompt = String(agentData.prompt || '').trim() || prompt
     }
 
@@ -5124,9 +5203,45 @@ function renderAiMessages() {
       imgWrap.append(img)
       node.append(imgWrap)
     }
+    const suggestionNodes = createAiSuggestionNodes(msg.suggestions, {
+      numbered: Boolean(msg.needsClarification),
+    })
+    if (suggestionNodes) node.append(suggestionNodes)
     return node
   }))
   dom.gAiMessages.scrollTop = dom.gAiMessages.scrollHeight
+}
+
+function createAiSuggestionNodes(items, options = {}) {
+  const prompts = Array.isArray(items)
+    ? items.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 4)
+    : []
+  if (!prompts.length) return null
+
+  const suggestions = document.createElement('div')
+  const numbered = Boolean(options.numbered)
+  suggestions.className = numbered ? 'ai-suggestions' : 'ai-suggestion-chips'
+  prompts.forEach((prompt, index) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = numbered ? 'ai-suggestion' : 'ai-suggestion-chip'
+    button.dataset.aiPrompt = prompt
+    button.addEventListener('click', () => {
+      dom.gInput.value = prompt
+      dom.gInput.focus()
+    })
+    if (numbered) {
+      const strong = document.createElement('strong')
+      strong.textContent = `风格选项 ${index + 1}`
+      const span = document.createElement('span')
+      span.textContent = prompt
+      button.append(strong, span)
+    } else {
+      button.textContent = prompt
+    }
+    suggestions.append(button)
+  })
+  return suggestions
 }
 
 function createAiLoadingNode(text) {
@@ -5333,6 +5448,9 @@ async function sendCanvasAiMessage() {
     const replyText = agentData.reply || '我已经整理好设计方向。'
     await streamAiMessageContent(assistantMsg, replyText)
     assistantMsg.steps = Array.isArray(agentData.steps) ? agentData.steps : []
+    assistantMsg.suggestions = Array.isArray(agentData.suggestions) ? agentData.suggestions : []
+    assistantMsg.needsClarification = Boolean(agentData.needsClarification)
+    assistantMsg.styleIntent = agentData.styleIntent || null
     renderAiMessages()
 
     if (!agentData.shouldGenerate) {
@@ -6065,10 +6183,77 @@ function renderTargetDropdown() {
   }))
 }
 
+function bindTranslateColorInputs(role, textInput, pickerInput) {
+  const stateKey = role === 'headline' ? 'headlineColor' : 'bodyColor'
+  const fallback = role === 'headline' ? DEFAULT_TRANSLATE_HEADLINE_COLOR : DEFAULT_TRANSLATE_BODY_COLOR
+
+  textInput?.addEventListener('input', () => {
+    const normalized = normalizeTranslateTextColor(textInput.value, '')
+    if (!normalized) return
+    state.translate[stateKey] = normalized
+    if (pickerInput) pickerInput.value = normalized
+    pruneTranslateResults()
+    savePrefs()
+    renderTranslateColorSwatches()
+  })
+
+  textInput?.addEventListener('change', () => {
+    const normalized = normalizeTranslateTextColor(textInput.value, state.translate[stateKey] || fallback)
+    state.translate[stateKey] = normalized
+    textInput.value = normalized
+    if (pickerInput) pickerInput.value = normalized
+    pruneTranslateResults()
+    savePrefs()
+    renderTranslate()
+  })
+
+  pickerInput?.addEventListener('input', () => {
+    state.translate[stateKey] = normalizeTranslateTextColor(pickerInput.value, fallback)
+    if (textInput) textInput.value = state.translate[stateKey]
+    pruneTranslateResults()
+    savePrefs()
+    renderTranslateColorSwatches()
+  })
+}
+
+function renderTranslateColorSwatches() {
+  renderTranslateColorSwatchGroup(dom.tHeadlineSwatches, 'headline')
+  renderTranslateColorSwatchGroup(dom.tBodySwatches, 'body')
+}
+
+function renderTranslateColorSwatchGroup(container, role) {
+  if (!container) return
+  const stateKey = role === 'headline' ? 'headlineColor' : 'bodyColor'
+  const activeColor = normalizeTranslateTextColor(
+    state.translate[stateKey],
+    role === 'headline' ? DEFAULT_TRANSLATE_HEADLINE_COLOR : DEFAULT_TRANSLATE_BODY_COLOR,
+  )
+  container.replaceChildren(...TRANSLATE_TEXT_COLOR_SWATCHES.map((color) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = `color-swatch${color === activeColor ? ' active' : ''}`
+    button.style.setProperty('--swatch-color', color)
+    button.title = color
+    button.setAttribute('aria-label', `${role === 'headline' ? '主标题' : '正文'}颜色 ${color}`)
+    button.addEventListener('click', () => {
+      if (isTranslateBusy()) return
+      state.translate.textColorMode = 'custom'
+      state.translate[stateKey] = color
+      pruneTranslateResults()
+      savePrefs()
+      renderTranslate()
+    })
+    return button
+  }))
+}
+
 function renderTranslate() {
   const busy = isTranslateBusy()
   const showLoadedWorkspace = shouldShowLoadedJobWorkspace('translate')
   const effectiveFontMode = getEffectiveTranslateFontMode()
+  const textColorMode = normalizeTranslateTextColorMode(state.translate.textColorMode)
+  state.translate.headlineColor = normalizeTranslateTextColor(state.translate.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR)
+  state.translate.bodyColor = normalizeTranslateTextColor(state.translate.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR)
   dom.tModel.value = state.translate.model
   dom.tConcurrency.value = String(state.translate.concurrency)
   dom.tPreserve.checked = state.translate.preserveBrand
@@ -6079,6 +6264,14 @@ function renderTranslate() {
   if (dom.tFontPromptWrap) dom.tFontPromptWrap.classList.toggle('hidden', state.translate.fontMode === 'match_original')
   if (dom.tFontReferenceWrap) dom.tFontReferenceWrap.classList.toggle('hidden', state.translate.fontMode !== 'reference')
   if (dom.tFontReferenceName) dom.tFontReferenceName.textContent = state.translate.fontReference?.name || '未选择'
+  if (dom.tTextColorMode) dom.tTextColorMode.value = textColorMode
+  if (dom.tHeadlineColorWrap) dom.tHeadlineColorWrap.classList.toggle('hidden', textColorMode !== 'custom')
+  if (dom.tBodyColorWrap) dom.tBodyColorWrap.classList.toggle('hidden', textColorMode !== 'custom')
+  if (dom.tHeadlineColor) dom.tHeadlineColor.value = state.translate.headlineColor
+  if (dom.tBodyColor) dom.tBodyColor.value = state.translate.bodyColor
+  if (dom.tHeadlineColorPicker) dom.tHeadlineColorPicker.value = state.translate.headlineColor
+  if (dom.tBodyColorPicker) dom.tBodyColorPicker.value = state.translate.bodyColor
+  renderTranslateColorSwatches()
   dom.tProgress.textContent = state.translate.progress
 
   const hasItems = showLoadedWorkspace && state.translate.items.length > 0
@@ -6091,6 +6284,11 @@ function renderTranslate() {
   if (dom.tFontPrompt) dom.tFontPrompt.disabled = busy
   if (dom.tFontBrowseBtn) dom.tFontBrowseBtn.disabled = busy
   if (dom.tFontClearBtn) dom.tFontClearBtn.disabled = busy || !state.translate.fontReference
+  if (dom.tTextColorMode) dom.tTextColorMode.disabled = busy
+  if (dom.tHeadlineColor) dom.tHeadlineColor.disabled = busy
+  if (dom.tBodyColor) dom.tBodyColor.disabled = busy
+  if (dom.tHeadlineColorPicker) dom.tHeadlineColorPicker.disabled = busy
+  if (dom.tBodyColorPicker) dom.tBodyColorPicker.disabled = busy
   dom.tDropzone.classList.toggle('disabled', busy)
   dom.tEmpty.classList.toggle('hidden', hasItems)
   renderJobList('translate')
@@ -6110,6 +6308,9 @@ function renderTranslate() {
       ? state.translate.fontReference?.assetId || ''
       : '',
     fontPrompt: state.translate.fontPrompt,
+    textColorMode,
+    headlineColor: state.translate.headlineColor,
+    bodyColor: state.translate.bodyColor,
   })
 
   const thead = document.createElement('thead')
@@ -6972,6 +7173,9 @@ async function runTranslateBatch() {
       fontFamily: runConfig.fontFamily,
       fontReferenceAssetId: runConfig.fontReferenceAssetId,
       fontPrompt: runConfig.fontPrompt,
+      textColorMode: runConfig.textColorMode,
+      headlineColor: runConfig.headlineColor,
+      bodyColor: runConfig.bodyColor,
       concurrency: state.translate.concurrency,
       clientKeys: runConfig.clientKeys,
     })
@@ -7090,6 +7294,9 @@ function getTranslateRunConfig() {
     fontReferenceAssetId,
     fontReferenceImage,
     fontPrompt: fontMode === 'match_original' ? '' : normalizeTranslateFontPrompt(state.translate.fontPrompt),
+    textColorMode: normalizeTranslateTextColorMode(state.translate.textColorMode),
+    headlineColor: normalizeTranslateTextColor(state.translate.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR),
+    bodyColor: normalizeTranslateTextColor(state.translate.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR),
     clientKeys: { ...state.keys },
   }
 }
@@ -8715,6 +8922,9 @@ function getTranslateSignatureFromJob(job) {
     fontFamily: normalizeTranslateFontFamily(job?.configJson?.fontFamily),
     fontReferenceAssetId: String(job?.configJson?.fontReferenceAssetId || ''),
     fontPrompt: normalizeTranslateFontPrompt(job?.configJson?.fontPrompt),
+    textColorMode: normalizeTranslateTextColorMode(job?.configJson?.textColorMode),
+    headlineColor: normalizeTranslateTextColor(job?.configJson?.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR),
+    bodyColor: normalizeTranslateTextColor(job?.configJson?.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR),
   })
 }
 
@@ -8814,6 +9024,9 @@ async function hydrateTranslateWorkspaceFromJob(job, items) {
   state.translate.fontMode = normalizeTranslateFontMode(job?.configJson?.fontMode)
   state.translate.fontFamily = normalizeTranslateFontFamily(job?.configJson?.fontFamily)
   state.translate.fontPrompt = normalizeTranslateFontPrompt(job?.configJson?.fontPrompt)
+  state.translate.textColorMode = normalizeTranslateTextColorMode(job?.configJson?.textColorMode)
+  state.translate.headlineColor = normalizeTranslateTextColor(job?.configJson?.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR)
+  state.translate.bodyColor = normalizeTranslateTextColor(job?.configJson?.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR)
   const fontReferenceAssetId = String(job?.configJson?.fontReferenceAssetId || '')
   if (fontReferenceAssetId && state.translate.fontReference?.assetId !== fontReferenceAssetId) {
     const [fontReference] = await hydrateAssetItems([{
@@ -9599,6 +9812,9 @@ function getTranslateSignature(config) {
     fontFamily: '',
     fontReferenceAssetId: String(config.fontReferenceAssetId || ''),
     fontPrompt: normalizeTranslateFontPrompt(config.fontPrompt),
+    textColorMode: normalizeTranslateTextColorMode(config.textColorMode),
+    headlineColor: normalizeTranslateTextColor(config.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR),
+    bodyColor: normalizeTranslateTextColor(config.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR),
   })
 }
 
