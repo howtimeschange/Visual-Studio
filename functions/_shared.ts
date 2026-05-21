@@ -46,7 +46,9 @@ const GPT_IMAGE_2_MAX_PIXELS = 8_294_400
 const GPT_IMAGE_2_MAX_EDGE = 3840
 const GPT_IMAGE_2_SIZE_STEP = 16
 const GPT_IMAGE_2_MAX_RATIO = 3
-const TRANSIENT_IMAGE_STATUSES = new Set([502, 503, 504, 524])
+const TRANSIENT_IMAGE_STATUSES = new Set([500, 502, 503, 504, 524])
+const GPT_IMAGE_2_POLL_INTERVAL_MS = 5_000
+const GPT_IMAGE_2_MAX_POLL_INTERVAL_MS = 30_000
 
 export const MODEL_MAP: Record<string, string> = {
   'nano-banana-2': 'gemini-3.1-flash-image-preview',
@@ -219,29 +221,28 @@ async function callGptImage2Model(
   prompt: string,
   opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
-  const hasImages = images.length > 0
-  const endpoint = hasImages ? 'images/edits' : 'images/generations'
-  const request = hasImages
-    ? buildGptImage2EditRequest(modelName, images, prompt, opts)
-    : buildGptImage2GenerationRequest(modelName, prompt, opts)
+  const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
+  const deadline = Date.now() + timeoutMs
+  const request = buildGptImage2TaskRequest(modelName, images, prompt, opts)
 
   try {
-    const res = await fetchImageModelWithRetry(`${baseUrl}/${endpoint}`, {
+    const createRes = await fetchImageModelWithRetry(`${baseUrl}/images/tasks`, {
       method: 'POST',
       headers: {
-        ...request.headers,
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
       body: request.body,
     }, opts)
 
-    if (!res.ok) {
-      const errBody = await res.text()
-      return { ok: false, error: `Upstream ${res.status}: ${errBody.slice(0, 500)}`, status: res.status }
+    if (!createRes.ok) {
+      const errBody = await createRes.text()
+      return { ok: false, error: `Upstream ${createRes.status}: ${errBody.slice(0, 500)}`, status: createRes.status }
     }
 
-    const data = await res.json<any>()
-    const imageSource = extractImageFromResponse(data)
+    const task = await createRes.json<any>()
+    const finalTask = await waitForGptImage2Task(baseUrl, apiKey, task, opts, deadline)
+    const imageSource = extractImageFromResponse(finalTask)
     const dataUrl = imageSource
       ? await coerceImageSourceToDataUrl(
         imageSource,
@@ -260,44 +261,111 @@ async function callGptImage2Model(
   }
 }
 
-function buildGptImage2GenerationRequest(modelName: string, prompt: string, opts: ImageModelOptions = {}): {
+async function waitForGptImage2Task(
+  baseUrl: string,
+  apiKey: string,
+  initialTask: any,
+  opts: ImageModelOptions,
+  deadline: number,
+): Promise<any> {
+  let task = initialTask
+  for (let attempt = 0; ; attempt += 1) {
+    const status = normalizeTaskStatus(task?.status)
+    if (status === 'succeeded') return task
+    if (status === 'failed') {
+      throw new Error(extractTaskErrorMessage(task) || 'Image task failed.')
+    }
+    if (!status && extractImageFromResponse(task)) return task
+
+    const pollUrl = resolveGptImage2PollUrl(baseUrl, task)
+    if (!pollUrl) throw new Error('Image task response did not include a poll URL or task ID.')
+
+    const waitMs = resolveGptImage2PollDelayMs(task, attempt)
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0 || waitMs >= remainingMs) {
+      throw createTimeoutError(Math.max(1, normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)))
+    }
+    await sleep(waitMs)
+
+    const requestTimeoutMs = Math.max(MIN_TIMEOUT_MS, Math.min(remainingMs - waitMs, normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)))
+    const res = await fetchWithTimeout(pollUrl, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    }, requestTimeoutMs)
+    if (!res.ok) {
+      const errBody = await res.text()
+      throw new Error(`Upstream ${res.status}: ${errBody.slice(0, 500)}`)
+    }
+    task = await res.json<any>()
+  }
+}
+
+function buildGptImage2TaskRequest(modelName: string, images: ImagePart[], prompt: string, opts: ImageModelOptions = {}): {
   headers: Record<string, string>
   body: string
 } {
   const settings = resolveGptImage2Settings(opts)
+  const payload: Record<string, unknown> = {
+    model: modelName,
+    prompt,
+    n: 1,
+    size: settings.size,
+    quality: settings.quality,
+    output_format: 'png',
+  }
+  if (images.length > 0) {
+    payload.image = images.map((image) => {
+      const mime = normalizeImageMime(image.mime) || 'image/png'
+      return `data:${mime};base64,${image.base64}`
+    })
+  }
   return {
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: modelName,
-      prompt,
-      n: 1,
-      size: settings.size,
-      quality: settings.quality,
-      output_format: 'png',
-    }),
+    body: JSON.stringify(payload),
   }
 }
 
-function buildGptImage2EditRequest(modelName: string, images: ImagePart[], prompt: string, opts: ImageModelOptions = {}): {
-  headers: Record<string, string>
-  body: FormData
-} {
-  const settings = resolveGptImage2Settings(opts)
-  const form = new FormData()
-  form.set('model', modelName)
-  form.set('prompt', prompt)
-  form.set('n', '1')
-  form.set('size', settings.size)
-  form.set('quality', settings.quality)
-  form.set('output_format', 'png')
+function normalizeTaskStatus(value: unknown): string {
+  const status = String(value || '').trim().toLowerCase()
+  if (['succeeded', 'success', 'completed', 'done'].includes(status)) return 'succeeded'
+  if (['failed', 'failure', 'error', 'cancelled', 'canceled', 'expired'].includes(status)) return 'failed'
+  if (['queued', 'pending', 'running', 'in_progress', 'processing', 'created'].includes(status)) return status
+  return ''
+}
 
-  images.forEach((image, index) => {
-    const mime = normalizeImageMime(image.mime) || 'image/png'
-    const extension = extensionForImageMime(mime)
-    form.append('image[]', base64ToBlob(image.base64, mime), `reference-${index + 1}.${extension}`)
-  })
+function extractTaskErrorMessage(task: any): string {
+  const error = task?.error
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object') {
+    return String(error.message || error.code || error.type || '').trim()
+  }
+  return String(task?.message || '').trim()
+}
 
-  return { headers: {}, body: form }
+function resolveGptImage2PollUrl(baseUrl: string, task: any): string {
+  const pollUrl = String(task?.poll_url || task?.pollUrl || '').trim()
+  if (/^https?:\/\//i.test(pollUrl)) return pollUrl
+  if (pollUrl.startsWith('/')) {
+    const base = new URL(baseUrl)
+    return `${base.origin}${pollUrl}`
+  }
+
+  const taskId = String(task?.id || task?.task_id || task?.taskId || '').trim()
+  return taskId ? `${baseUrl}/images/tasks/${encodeURIComponent(taskId)}` : ''
+}
+
+function resolveGptImage2PollDelayMs(task: any, attempt: number): number {
+  const pollAfterMs = Number(task?.poll_after_ms || task?.pollAfterMs)
+  if (Number.isFinite(pollAfterMs) && pollAfterMs >= 0) {
+    return Math.min(GPT_IMAGE_2_MAX_POLL_INTERVAL_MS, Math.floor(pollAfterMs))
+  }
+  const pollAfterSeconds = Number(task?.poll_after ?? task?.pollAfter)
+  if (Number.isFinite(pollAfterSeconds) && pollAfterSeconds >= 0) {
+    return Math.min(GPT_IMAGE_2_MAX_POLL_INTERVAL_MS, Math.floor(pollAfterSeconds * 1_000))
+  }
+  return Math.min(GPT_IMAGE_2_MAX_POLL_INTERVAL_MS, GPT_IMAGE_2_POLL_INTERVAL_MS * (attempt + 1))
 }
 
 function resolveGptImage2Settings(opts: ImageModelOptions = {}) {
@@ -605,22 +673,6 @@ function guessMimeFromUrl(url: string): string | null {
   if (clean.endsWith('.webp')) return 'image/webp'
   if (clean.endsWith('.gif')) return 'image/gif'
   return null
-}
-
-function extensionForImageMime(mime: string): string {
-  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg'
-  if (mime === 'image/webp') return 'webp'
-  if (mime === 'image/gif') return 'gif'
-  return 'png'
-}
-
-function base64ToBlob(base64: string, mime: string): Blob {
-  const binary = atob(String(base64 || ''))
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index)
-  }
-  return new Blob([bytes], { type: mime })
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

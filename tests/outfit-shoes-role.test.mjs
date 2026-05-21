@@ -34,11 +34,34 @@ async function importOutfitSwap() {
   return { mod, cleanup: () => rm(outdir, { recursive: true, force: true }) }
 }
 
-function okImageResponse(base64) {
-  return new Response(JSON.stringify({ data: [{ b64_json: base64 }] }), {
-    status: 200,
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
     headers: { 'Content-Type': 'application/json' },
   })
+}
+
+function okTaskCreateResponse(taskId = 'task_outfit') {
+  return jsonResponse({
+    id: taskId,
+    object: 'image.task',
+    status: 'queued',
+    poll_url: `https://api.1xm.ai/v1/images/tasks/${taskId}`,
+    poll_after: 0,
+  }, 202)
+}
+
+function okTaskResultResponse(base64) {
+  return jsonResponse({
+    id: 'task_outfit',
+    object: 'image.task',
+    status: 'succeeded',
+    data: [{ b64_json: base64 }],
+  })
+}
+
+function parseImageTaskPayload(call) {
+  return JSON.parse(String(call?.init?.body || '{}'))
 }
 
 test('buildOutfitLooks layers shoes onto base garment looks', async () => {
@@ -87,7 +110,8 @@ test('executeOutfitSwap describes shoes in the prompt sent to the image model', 
 
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('c2hvZXMtcmVzdWx0')
+    if (calls.length === 1) return okTaskCreateResponse()
+    return okTaskResultResponse('c2hvZXMtcmVzdWx0')
   }
 
   try {
@@ -99,13 +123,18 @@ test('executeOutfitSwap describes shoes in the prompt sent to the image model', 
     }, {})
 
     assert.equal(result.resultDataUrl, 'data:image/png;base64,c2hvZXMtcmVzdWx0')
-    assert.equal(calls.length, 1)
-    const form = calls[0].init.body
-    const prompt = form.get('prompt')
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].input, 'https://api.1xm.ai/v1/images/tasks')
+    const payload = parseImageTaskPayload(calls[0])
+    const prompt = payload.prompt
 
     assert.match(prompt, /Image #2: GARMENT role: shoes/i)
     assert.match(prompt, /shoes should be placed on the feet/i)
     assert.match(prompt, /soles/i)
+    assert.deepEqual(payload.image, [
+      'data:image/png;base64,bW9kZWw=',
+      'data:image/png;base64,c2hvZXM=',
+    ])
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -119,7 +148,8 @@ test('executeOutfitSwap includes per-garment instructions beside the matching re
 
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('c3R5bGVkLXJlc3VsdA==')
+    if (calls.length === 1) return okTaskCreateResponse()
+    return okTaskResultResponse('c3R5bGVkLXJlc3VsdA==')
   }
 
   try {
@@ -139,12 +169,18 @@ test('executeOutfitSwap includes per-garment instructions beside the matching re
       clientKeys: { gptImageApiKey: 'test-key' },
     }, {})
 
-    const prompt = calls[0].init.body.get('prompt')
+    const payload = parseImageTaskPayload(calls[0])
+    const prompt = payload.prompt
     const instructionSection = prompt.match(/## PER-GARMENT ADDITIONAL INSTRUCTIONS\n([\s\S]*?)(?:\n\n##|\nReturn|$)/i)?.[1] || ''
 
     assert.match(prompt, /## PER-GARMENT ADDITIONAL INSTRUCTIONS/i)
     assert.match(instructionSection, /Image #3[\s\S]*Make these shoes bright red and keep the chunky sole visible\./i)
     assert.doesNotMatch(instructionSection, /Image #2[^\n]*Make these shoes bright red and keep the chunky sole visible\./i)
+    assert.deepEqual(payload.image, [
+      'data:image/png;base64,bW9kZWw=',
+      'data:image/png;base64,dG9w',
+      'data:image/png;base64,c2hvZXM=',
+    ])
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -158,7 +194,8 @@ test('executeOutfitSwap keeps queued look item instructions aligned with their i
 
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('bG9vay1yZXN1bHQ=')
+    if (calls.length === 1) return okTaskCreateResponse()
+    return okTaskResultResponse('bG9vay1yZXN1bHQ=')
   }
 
   try {
@@ -184,11 +221,17 @@ test('executeOutfitSwap keeps queued look item instructions aligned with their i
       clientKeys: { gptImageApiKey: 'test-key' },
     }, {})
 
-    const prompt = calls[0].init.body.get('prompt')
+    const payload = parseImageTaskPayload(calls[0])
+    const prompt = payload.prompt
     const instructionSection = prompt.match(/## PER-GARMENT ADDITIONAL INSTRUCTIONS\n([\s\S]*?)(?:\n\n##|\nReturn|$)/i)?.[1] || ''
 
     assert.match(instructionSection, /Image #2[\s\S]*Keep the skirt knee-length\./i)
     assert.match(instructionSection, /Image #3[\s\S]*Make the collar more structured\./i)
+    assert.deepEqual(payload.image, [
+      'data:image/png;base64,bW9kZWw=',
+      'data:image/png;base64,Ym90dG9t',
+      'data:image/png;base64,dG9w',
+    ])
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
