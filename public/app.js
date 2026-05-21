@@ -524,6 +524,7 @@ const dom = {
   pShared: $('#p-shared'),
   tJobList: $('#t-job-list'),
   tJobEmpty: $('#t-job-empty'),
+  tUploadQueue: $('#t-upload-queue'),
   tJobTabs: $$('#t-job-tabs [data-job-tab]'),
   accountSummary: $('#account-summary'),
   accountName: $('#account-name'),
@@ -565,7 +566,9 @@ const dom = {
   oModelAdd: $('#o-model-add'),
   oModelLibraryOpen: $('#o-model-library-open'),
   oModelList: $('#o-model-list'),
+  oModelUpload: $('#o-model-upload'),
   oModelCount: $('#o-model-count'),
+  oClearModels: $('#o-clear-models'),
   oModelLibraryDialog: $('#o-model-library-dialog'),
   oModelLibraryForm: $('#o-model-library-form'),
   oModelLibraryGrid: $('#o-model-library-grid'),
@@ -577,8 +580,10 @@ const dom = {
   oGarmentInput: $('#o-garment-input'),
   oGarmentAdd: $('#o-garment-add'),
   oGarmentList: $('#o-garment-list'),
+  oGarmentUpload: $('#o-garment-upload'),
   oGarmentCount: $('#o-garment-count'),
   oLookCount: $('#o-look-count'),
+  oClearGarments: $('#o-clear-garments'),
   oRun: $('#o-run'),
   oProgress: $('#o-progress'),
   oJobList: $('#o-job-list'),
@@ -591,6 +596,7 @@ const dom = {
   sFileInput: $('#s-file-input'),
   sDzInner: $('#s-dz-inner'),
   sSourcePreview: $('#s-source-preview'),
+  sSourceUpload: $('#s-source-upload'),
   sSourceImg: $('#s-source-img'),
   sClearSource: $('#s-clear-source'),
   sAnalyzeProgress: $('#s-analyze-progress'),
@@ -603,6 +609,7 @@ const dom = {
   sGenerateSection: $('#s-generate-section'),
   sRefInput: $('#s-ref-input'),
   sRefAdd: $('#s-ref-add'),
+  sRefUpload: $('#s-ref-upload'),
   sRefList: $('#s-ref-list'),
   sSubject: $('#s-subject'),
   sGenerate: $('#s-generate'),
@@ -1662,6 +1669,135 @@ function resetLoadedWorkspaceForDraft(kind) {
   }
 }
 
+function clampUploadPercent(value = 0) {
+  return clamp(Math.round(Number(value) || 0), 0, 100)
+}
+
+function createUploadProgressState({
+  title = '正在上传',
+  detail = '',
+  percent = 0,
+  label = '',
+  active = false,
+  done = false,
+} = {}) {
+  return {
+    title,
+    detail,
+    percent: clampUploadPercent(percent),
+    label,
+    active,
+    done,
+  }
+}
+
+function setUploadProgress(upload, { current = 0, total = 0, filename = '', percent = null, active = true, done = false } = {}) {
+  if (!upload) return
+  const safeCurrent = Math.max(0, Number(current) || 0)
+  const safeTotal = Math.max(0, Number(total) || 0)
+  upload.detail = filename
+    ? `${safeCurrent}/${safeTotal} · ${filename}`
+    : safeTotal
+      ? `${safeCurrent}/${safeTotal}`
+      : ''
+  const nextPercent = Number(percent)
+  upload.percent = Number.isFinite(nextPercent)
+    ? clampUploadPercent(nextPercent)
+    : safeTotal
+      ? clampUploadPercent((safeCurrent / safeTotal) * 100)
+      : upload.percent
+  upload.label = `${upload.percent}%`
+  upload.active = active
+  upload.done = done || upload.percent >= 100
+}
+
+function createUploadSkeletonCard(upload, { compact = false } = {}) {
+  const card = document.createElement('div')
+  card.className = `upload-item${compact ? ' compact' : ''}`
+
+  const frame = document.createElement('div')
+  frame.className = 'upload-skeleton'
+
+  const ring = document.createElement('div')
+  ring.className = 'upload-skeleton-ring'
+  const radius = 22
+  const circumference = 2 * Math.PI * radius
+  const offset = circumference * (1 - clampUploadPercent(upload?.percent || 0) / 100)
+  ring.innerHTML = `
+    <svg viewBox="0 0 56 56" aria-hidden="true" focusable="false">
+      <circle class="track" cx="28" cy="28" r="22"></circle>
+      <circle class="progress" cx="28" cy="28" r="22" style="stroke-dasharray:${circumference};stroke-dashoffset:${offset}"></circle>
+    </svg>
+  `
+
+  const pct = document.createElement('div')
+  pct.className = 'upload-skeleton-percentage'
+  pct.textContent = upload?.label || `${clampUploadPercent(upload?.percent || 0)}%`
+
+  const hint = document.createElement('div')
+  hint.className = 'upload-skeleton-label'
+  hint.textContent = upload?.done ? '已上传' : upload?.active ? '上传中' : '待上传'
+
+  frame.append(ring, pct, hint)
+
+  const body = document.createElement('div')
+  body.className = 'upload-item-body'
+  const title = document.createElement('div')
+  title.className = 'upload-item-title'
+  title.textContent = upload?.title || '正在上传'
+  const detail = document.createElement('div')
+  detail.className = 'upload-item-meta'
+  detail.textContent = upload?.detail || ''
+  body.append(title, detail)
+
+  if (compact) card.append(frame, body)
+  else card.append(body, frame)
+  return card
+}
+
+function renderUploadQueue(container, uploads = [], options = {}) {
+  if (!container) return
+  if (!uploads.length) {
+    container.replaceChildren()
+    container.classList.add('hidden')
+    return
+  }
+  container.classList.remove('hidden')
+  container.replaceChildren(...uploads.map((upload) => createUploadSkeletonCard(upload, options)))
+}
+
+function clearOutfitModels() {
+  if (isOutfitBusy()) return
+  state.outfit.models = []
+  pruneOutfitResults()
+  saveRuntimeState()
+  renderOutfit()
+}
+
+function clearOutfitGarments() {
+  if (isOutfitBusy()) return
+  state.outfit.garments = []
+  pruneOutfitResults()
+  saveRuntimeState()
+  renderOutfit()
+}
+
+function appendOutfitModels(images = []) {
+  if (!Array.isArray(images) || images.length === 0) return
+  state.outfit.models.push(...images)
+  pruneOutfitResults()
+}
+
+function appendOutfitGarments(images = [], garmentType = state.outfit.garmentType) {
+  if (!Array.isArray(images) || images.length === 0) return
+  state.outfit.garments.push(...images.map((item) => ({
+    ...item,
+    role: garmentType,
+    instructions: '',
+  })))
+  pruneOutfitResults()
+}
+
 function addJobTaskThumb(thumbs, seen, assetId, label) {
   const id = String(assetId || '').trim()
   if (!id || seen.has(id) || thumbs.length >= 3) return
@@ -2683,12 +2819,23 @@ function bindTranslate() {
 
   dom.tFontFileInput?.addEventListener('change', async () => {
     if (!dom.tFontFileInput.files?.length || isTranslateBusy()) return
+    const file = dom.tFontFileInput.files[0]
+    const upload = createUploadProgressState({
+      title: '字体参考图',
+      detail: file?.name || '',
+      percent: 0,
+    })
     state.translate.progress = '正在上传字体参考图…'
     renderTranslate()
+    renderUploadQueue(dom.tUploadQueue, [upload])
     try {
       const [reference] = await prepareAssetItems(dom.tFontFileInput.files, {
         kind: 'reference',
         source: 'translate_font_reference',
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(upload, { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.tUploadQueue, [upload])
+        },
       })
       if (reference) {
         state.translate.fontReference = reference
@@ -2701,6 +2848,7 @@ function bindTranslate() {
       state.translate.progress = trimError(error)
     } finally {
       dom.tFontFileInput.value = ''
+      renderUploadQueue(dom.tUploadQueue, [])
       renderTranslate()
     }
   })
@@ -2717,19 +2865,33 @@ function bindTranslate() {
     input: dom.tFileInput,
     onFiles: async (files) => {
       if (isTranslateBusy()) return
-      resetLoadedWorkspaceForDraft('translate')
       setJobTab('translate', 'current')
+      const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      const uploads = imageFiles.map((file, index) => createUploadProgressState({
+        title: '图片批量翻译',
+        detail: file.name,
+        percent: imageFiles.length ? ((index + 1) / imageFiles.length) * 100 : 0,
+        active: index === 0,
+      }))
       state.translate.progress = '正在读取图片…'
       renderTranslate()
+      renderUploadQueue(dom.tUploadQueue, uploads)
       const images = await prepareAssetItems(files, {
         onProgress: ({ current, total, filename }) => {
           state.translate.progress = `正在上传图片 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.tUploadQueue, uploads)
           renderTranslate()
+        },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.tUploadQueue, uploads)
         },
       })
       state.translate.items.push(...images.map((item) => ({ ...item, results: {} })))
       state.translate.progress = ''
       saveRuntimeState()
+      renderUploadQueue(dom.tUploadQueue, [])
       renderTranslate()
     },
     onClick: () => !isTranslateBusy(),
@@ -5559,25 +5721,41 @@ function bindOutfit() {
     dom.oGarmentInput.click()
   })
 
+  dom.oClearModels?.addEventListener('click', clearOutfitModels)
+  dom.oClearGarments?.addEventListener('click', clearOutfitGarments)
+
   bindDropSurface({
     surface: dom.oModelList.closest('.lane'),
     input: dom.oModelInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
-      resetLoadedWorkspaceForDraft('outfit')
       setJobTab('outfit', 'current')
+      const fileList = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      const uploads = fileList.map((file, index) => createUploadProgressState({
+        title: '模特图',
+        detail: file.name,
+        percent: 0,
+        active: index === 0,
+      }))
+      renderUploadQueue(dom.oModelUpload, uploads, { compact: true })
       state.outfit.progress = '正在读取模特图…'
       renderOutfit()
       const images = await prepareAssetItems(files, {
         onProgress: ({ current, total, filename }) => {
           state.outfit.progress = `正在上传模特图 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.oModelUpload, uploads, { compact: true })
           renderOutfit()
         },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.oModelUpload, uploads, { compact: true })
+        },
       })
-      state.outfit.models.push(...images)
-      pruneOutfitResults()
+      appendOutfitModels(images)
       state.outfit.progress = ''
       saveRuntimeState()
+      renderUploadQueue(dom.oModelUpload, [])
       renderOutfit()
     },
     clickable: false,
@@ -5588,24 +5766,33 @@ function bindOutfit() {
     input: dom.oGarmentInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
-      resetLoadedWorkspaceForDraft('outfit')
       setJobTab('outfit', 'current')
+      const fileList = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      const uploads = fileList.map((file, index) => createUploadProgressState({
+        title: '服装图',
+        detail: file.name,
+        percent: 0,
+        active: index === 0,
+      }))
+      renderUploadQueue(dom.oGarmentUpload, uploads, { compact: true })
       state.outfit.progress = '正在读取服装图…'
       renderOutfit()
       const images = await prepareAssetItems(files, {
         onProgress: ({ current, total, filename }) => {
           state.outfit.progress = `正在上传服装图 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.oGarmentUpload, uploads, { compact: true })
           renderOutfit()
         },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.oGarmentUpload, uploads, { compact: true })
+        },
       })
-      state.outfit.garments.push(...images.map((item) => ({
-        ...item,
-        role: state.outfit.garmentType,
-        instructions: '',
-      })))
-      pruneOutfitResults()
+      appendOutfitGarments(images, state.outfit.garmentType)
       state.outfit.progress = ''
       saveRuntimeState()
+      renderUploadQueue(dom.oGarmentUpload, [])
       renderOutfit()
     },
     clickable: false,
@@ -5635,6 +5822,13 @@ function bindStyle() {
       const images = await readImageFiles(files)
       if (images.length === 0) return
       const image = images[0]
+      const upload = createUploadProgressState({
+        title: '风格源图',
+        detail: image.name,
+        percent: 0,
+        active: true,
+      })
+      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
       const uploaded = await postJson('/api/assets/upload', {
         sessionId: state.runtime.sessionId || undefined,
         kind: 'upload',
@@ -5644,6 +5838,8 @@ function bindStyle() {
         dataUrl: image.dataUrl,
       })
       state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
+      setUploadProgress(upload, { current: 1, total: 1, filename: image.name, percent: 100, active: true, done: true })
+      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
       state.style.sourceImage = {
         id: uploaded.asset.id,
         assetId: uploaded.asset.id,
@@ -5659,6 +5855,7 @@ function bindStyle() {
       state.style.resultDataUrl = ''
       state.style.error = ''
       saveRuntimeState()
+      renderUploadQueue(dom.sSourceUpload, [])
       renderStyle()
       analyzeStyle()
     },
@@ -5686,17 +5883,32 @@ function bindStyle() {
 
   dom.sRefInput.addEventListener('change', async () => {
     if (!dom.sRefInput.files?.length || state.style.generating) return
+    const imageFiles = Array.from(dom.sRefInput.files).filter((file) => file.type.startsWith('image/'))
+    const uploads = imageFiles.map((file, index) => createUploadProgressState({
+      title: '主体参考图',
+      detail: file.name,
+      percent: 0,
+      active: index === 0,
+    }))
     state.style.styleSummary = '正在上传主体参考图…'
     renderStyle()
+    renderUploadQueue(dom.sRefUpload, uploads)
     const images = await prepareAssetItems(dom.sRefInput.files, {
       onProgress: ({ current, total, filename }) => {
         state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
+        setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+        renderUploadQueue(dom.sRefUpload, uploads)
         renderStyle()
+      },
+      onUploadProgress: ({ current, total, filename, percent }) => {
+        setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+        renderUploadQueue(dom.sRefUpload, uploads)
       },
     })
     state.style.subjectRefs.push(...images)
     if (!state.style.visualStyle) state.style.styleSummary = ''
     saveRuntimeState()
+    renderUploadQueue(dom.sRefUpload, [])
     renderStyle()
     dom.sRefInput.value = ''
   })
@@ -5771,12 +5983,16 @@ function renderStyle() {
   dom.sModel.disabled = busy
 
   const hasSource = Boolean(s.sourceImage)
+  const hasSourceUpload = Boolean(dom.sSourceUpload?.childElementCount)
   const hasStyle = Boolean(s.visualStyle)
   const hasResult = Boolean(s.resultDataUrl)
   const hasHistory = visibleHistory.length > 0
 
-  dom.sDropzone.classList.toggle('hidden', hasSource)
-  dom.sSourcePreview.classList.toggle('hidden', !hasSource)
+  dom.sDropzone.classList.toggle('hidden', hasSource || hasSourceUpload)
+  dom.sSourcePreview.classList.toggle('hidden', !hasSource && !hasSourceUpload)
+  if (dom.sSourceImg) dom.sSourceImg.classList.toggle('hidden', !hasSource)
+  if (dom.sClearSource) dom.sClearSource.classList.toggle('hidden', !hasSource)
+  dom.sSourceUpload?.classList.toggle('hidden', !hasSourceUpload)
   dom.sAnalyzeProgress.classList.toggle('hidden', !s.analyzing)
   dom.sStyleResult.classList.toggle('hidden', !hasStyle)
   dom.sGenerateSection.classList.toggle('hidden', !hasStyle)
@@ -5825,6 +6041,7 @@ function renderStyle() {
   }
 
   dom.sRefAdd.disabled = !hasStyle || busy
+  dom.sRefUpload?.classList.toggle('hidden', !dom.sRefUpload?.childElementCount)
   dom.sRefList.replaceChildren(...s.subjectRefs.map((ref) => {
     const thumb = document.createElement('div')
     thumb.className = 'style-ref-thumb'
@@ -6214,6 +6431,7 @@ function renderTranslate() {
   if (dom.tBodyColorPicker) dom.tBodyColorPicker.value = state.translate.bodyColor
   renderTranslateColorSwatches()
   dom.tProgress.textContent = state.translate.progress
+  dom.tUploadQueue?.classList.toggle('hidden', !dom.tUploadQueue?.childElementCount)
 
   const hasItems = showLoadedWorkspace && state.translate.items.length > 0
 
@@ -6783,6 +7001,8 @@ function renderOutfit() {
   dom.oModelAdd.disabled = busy
   if (dom.oModelLibraryOpen) dom.oModelLibraryOpen.disabled = busy
   dom.oGarmentAdd.disabled = busy
+  if (dom.oClearModels) dom.oClearModels.disabled = busy || state.outfit.models.length === 0
+  if (dom.oClearGarments) dom.oClearGarments.disabled = busy || state.outfit.garments.length === 0
   renderJobList('outfit')
 
   renderLaneList(dom.oModelList, state.outfit.models, 'model')
@@ -6965,7 +7185,6 @@ async function addSelectedModelLibraryItems() {
   const selectedItems = MODEL_LIBRARY_ITEMS.filter((item) => modelLibrarySelectedIds.has(item.id))
   if (selectedItems.length === 0) return
 
-  resetLoadedWorkspaceForDraft('outfit')
   setJobTab('outfit', 'current')
   if (dom.oModelLibraryConfirm) dom.oModelLibraryConfirm.disabled = true
   state.outfit.progress = '正在加入模特库图片…'
@@ -6979,8 +7198,7 @@ async function addSelectedModelLibraryItems() {
         total: selectedItems.length,
       }))
     }
-    state.outfit.models.push(...uploaded)
-    pruneOutfitResults()
+    appendOutfitModels(uploaded)
     state.outfit.progress = ''
     modelLibrarySelectedIds = new Set()
     saveRuntimeState()
@@ -7977,7 +8195,8 @@ async function readImageFiles(fileList) {
   return images
 }
 
-async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_upload', onProgress = null } = {}) {
+async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_upload', onProgress = null, onUploadProgress = null } = {}) {
+  const uploadJson = typeof postJsonWithProgress === 'function' ? postJsonWithProgress : postJson
   const images = await readImageFiles(fileList)
   const uploaded = []
 
@@ -7987,7 +8206,7 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       total: images.length,
       filename: image.name,
     })
-    const data = await postJson('/api/assets/upload', {
+    const data = await uploadJson('/api/assets/upload', {
       sessionId: state.runtime.sessionId || undefined,
       kind,
       source,
@@ -7996,6 +8215,17 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       dataUrl: image.dataUrl,
       width: image.width || undefined,
       height: image.height || undefined,
+    }, {
+      onProgress: (event) => {
+        onUploadProgress?.({
+          current: index + 1,
+          total: images.length,
+          filename: image.name,
+          loaded: event.loaded || 0,
+          totalBytes: event.total || 0,
+          percent: event.percent || 0,
+        })
+      },
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
@@ -9368,6 +9598,53 @@ async function postJson(url, body) {
     throw createHttpError(response, data)
   }
   return data
+}
+
+async function postJsonWithProgress(url, body, { onProgress = null } = {}) {
+  if (typeof XMLHttpRequest !== 'function') {
+    return postJson(url, body)
+  }
+
+  return await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url, true)
+    xhr.setRequestHeader('Content-Type', 'application/json')
+    xhr.responseType = 'text'
+
+    xhr.upload.onprogress = (event) => {
+      onProgress?.({
+        loaded: event.loaded || 0,
+        total: event.total || 0,
+        percent: event.lengthComputable && event.total
+          ? Math.round((event.loaded / event.total) * 100)
+          : 0,
+      })
+    }
+
+    xhr.onload = () => {
+      let data = {}
+      try {
+        data = JSON.parse(xhr.responseText || '{}')
+      } catch {
+        data = {}
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(createHttpError({ status: xhr.status }, data))
+        return
+      }
+      resolve(data)
+    }
+
+    xhr.onerror = () => {
+      reject(new Error('Network error'))
+    }
+
+    xhr.onabort = () => {
+      reject(new Error('Request aborted'))
+    }
+
+    xhr.send(JSON.stringify(body))
+  })
 }
 
 async function putJson(url, body) {
