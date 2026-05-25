@@ -20,20 +20,20 @@ async function importShared() {
   return { mod, cleanup: () => rm(outdir, { recursive: true, force: true }) }
 }
 
-function okImageResponse(base64) {
-  return new Response(JSON.stringify({ data: [{ b64_json: base64 }] }), {
+function okTaskResponse(base64, overrides = {}) {
+  return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: base64 }], ...overrides }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   })
 }
 
-test('gpt-image-2 text generation uses /images/generations', async () => {
+test('gpt-image-2 text generation creates an async image task', async () => {
   const { mod, cleanup } = await importShared()
   const originalFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('ZmFrZS1pbWFnZQ==')
+    return okTaskResponse('ZmFrZS1pbWFnZQ==')
   }
 
   try {
@@ -49,7 +49,7 @@ test('gpt-image-2 text generation uses /images/generations', async () => {
     assert.equal(result.ok, true)
     assert.equal(result.dataUrl, 'data:image/png;base64,ZmFrZS1pbWFnZQ==')
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].input, 'https://relay.example/v1/images/generations')
+    assert.equal(calls[0].input, 'https://relay.example/v1/images/tasks')
     assert.equal(calls[0].init.method, 'POST')
     assert.equal(calls[0].init.headers.Authorization, 'Bearer test-key')
     assert.equal(calls[0].init.headers['Content-Type'], 'application/json')
@@ -78,7 +78,7 @@ test('gpt-image-2 retries transient upstream errors before succeeding', async ()
     if (calls.length === 1) {
       return new Response('gateway timeout', { status: 524 })
     }
-    return okImageResponse('cmV0cmllZC1pbWFnZQ==')
+    return okTaskResponse('cmV0cmllZC1pbWFnZQ==')
   }
 
   try {
@@ -94,8 +94,8 @@ test('gpt-image-2 retries transient upstream errors before succeeding', async ()
     assert.equal(result.ok, true)
     assert.equal(result.dataUrl, 'data:image/png;base64,cmV0cmllZC1pbWFnZQ==')
     assert.equal(calls.length, 2)
-    assert.equal(calls[0].input, 'https://relay.example/v1/images/generations')
-    assert.equal(calls[1].input, 'https://relay.example/v1/images/generations')
+    assert.equal(calls[0].input, 'https://relay.example/v1/images/tasks')
+    assert.equal(calls[1].input, 'https://relay.example/v1/images/tasks')
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -131,13 +131,13 @@ test('gpt-image-2 does not retry non-transient upstream errors', async () => {
   }
 })
 
-test('gpt-image-2 image editing sends reference images as multipart form data', async () => {
+test('gpt-image-2 image editing sends reference images as async task data URLs', async () => {
   const { mod, cleanup } = await importShared()
   const originalFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('ZWRpdGVkLWltYWdl')
+    return okTaskResponse('ZWRpdGVkLWltYWdl')
   }
 
   try {
@@ -153,23 +153,19 @@ test('gpt-image-2 image editing sends reference images as multipart form data', 
     assert.equal(result.ok, true)
     assert.equal(result.dataUrl, 'data:image/png;base64,ZWRpdGVkLWltYWdl')
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].input, 'https://relay.example/v1/images/edits')
+    assert.equal(calls[0].input, 'https://relay.example/v1/images/tasks')
     assert.equal(calls[0].init.method, 'POST')
     assert.equal(calls[0].init.headers.Authorization, 'Bearer test-key')
-    assert.equal(calls[0].init.headers['Content-Type'], undefined)
+    assert.equal(calls[0].init.headers['Content-Type'], 'application/json')
 
-    const form = calls[0].init.body
-    assert.equal(form.get('model'), 'gpt-image-2')
-    assert.equal(form.get('prompt'), 'keep the product shape and change the background')
-    assert.equal(form.get('n'), '1')
-    assert.equal(form.get('size'), 'auto')
-    assert.equal(form.get('quality'), 'high')
-    assert.equal(form.get('output_format'), 'png')
-
-    const uploaded = form.getAll('image[]')
-    assert.equal(uploaded.length, 1)
-    assert.equal(uploaded[0].type, 'image/png')
-    assert.equal(uploaded[0].name, 'reference-1.png')
+    const payload = JSON.parse(calls[0].init.body)
+    assert.equal(payload.model, 'gpt-image-2')
+    assert.equal(payload.prompt, 'keep the product shape and change the background')
+    assert.equal(payload.n, 1)
+    assert.equal(payload.size, 'auto')
+    assert.equal(payload.quality, 'high')
+    assert.equal(payload.output_format, 'png')
+    assert.deepEqual(payload.image, ['data:image/png;base64,cmVmLWltYWdl'])
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -182,7 +178,7 @@ test('gpt-image-2 maps existing 4k landscape config to a supported size', async 
   const calls = []
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('ZmFrZS00aw==')
+    return okTaskResponse('ZmFrZS00aw==')
   }
 
   try {
@@ -211,7 +207,7 @@ test('gpt-image-2 maps existing 4k portrait config to a supported edit size', as
   const calls = []
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('ZWRpdC00aw==')
+    return okTaskResponse('ZWRpdC00aw==')
   }
 
   try {
@@ -225,9 +221,9 @@ test('gpt-image-2 maps existing 4k portrait config to a supported edit size', as
     )
 
     assert.equal(result.ok, true)
-    const form = calls[0].init.body
-    assert.equal(form.get('size'), '2160x3840')
-    assert.equal(form.get('quality'), 'high')
+    const payload = JSON.parse(calls[0].init.body)
+    assert.equal(payload.size, '2160x3840')
+    assert.equal(payload.quality, 'high')
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -240,7 +236,7 @@ test('gpt-image-2 keeps square 4k under the documented pixel limit', async () =>
   const calls = []
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return okImageResponse('c3F1YXJlLTRr')
+    return okTaskResponse('c3F1YXJlLTRr')
   }
 
   try {
@@ -256,6 +252,138 @@ test('gpt-image-2 keeps square 4k under the documented pixel limit', async () =>
     assert.equal(result.ok, true)
     const payload = JSON.parse(calls[0].init.body)
     assert.equal(payload.size, '2880x2880')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('nano banana models also use async image tasks with data URL references', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return okTaskResponse('bmFuby1pbWFnZQ==')
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gemini-3.1-flash-image-preview',
+      [{ base64: 'cmVm', mime: 'image/jpeg' }],
+      'place the garment on the model',
+      { timeoutMs: 1000, aspectRatio: '3:4', resolution: '2k' },
+    )
+
+    assert.equal(result.ok, true)
+    assert.equal(result.dataUrl, 'data:image/png;base64,bmFuby1pbWFnZQ==')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].input, 'https://relay.example/v1/images/tasks')
+    const payload = JSON.parse(calls[0].init.body)
+    assert.deepEqual(payload, {
+      model: 'gemini-3.1-flash-image-preview',
+      prompt: 'place the garment on the model',
+      n: 1,
+      output_format: 'png',
+      size: '3:4',
+      quality: '2K',
+      image: ['data:image/jpeg;base64,cmVm'],
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('async image tasks poll until a stable result URL is available', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input) === 'https://img.example/result.png') {
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      })
+    }
+    if (String(input).endsWith('/images/tasks')) {
+      return new Response(JSON.stringify({
+        id: 'task_123',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_123',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      status: 'succeeded',
+      data: [{ url: 'https://img.example/result.png' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 3000, imageFetchTimeoutMs: 1000 },
+    )
+
+    assert.equal(result.ok, true)
+    assert.equal(result.dataUrl, 'data:image/png;base64,AQID')
+    assert.equal(calls.length, 3)
+    assert.equal(calls[1].input, 'https://relay.example/v1/images/tasks/task_123')
+    assert.equal(calls[1].init.method, 'GET')
+    assert.equal(calls[1].init.headers.Authorization, 'Bearer test-key')
+    assert.equal(calls[2].input, 'https://img.example/result.png')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('async image task rejects empty fetched image results', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    if (String(input) === 'https://img.example/empty.png') {
+      return new Response(new Uint8Array([]), {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      })
+    }
+    return new Response(JSON.stringify({
+      status: 'succeeded',
+      data: [{ url: 'https://img.example/empty.png' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 3000, imageFetchTimeoutMs: 1000 },
+    )
+
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 502)
+    assert.equal(result.error, 'Model returned no image.')
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()

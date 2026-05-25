@@ -27,9 +27,8 @@ test('executeTranslate tells the image model to translate visible source text om
 
   globalThis.fetch = async (input, init = {}) => {
     const payload = JSON.parse(String(init.body || '{}'))
-    const textPart = payload.messages?.[0]?.content?.find((part) => part.type === 'text')
-    prompt = textPart?.text || ''
-    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZA==' }] }), {
+    prompt = payload.prompt || ''
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'dHJhbnNsYXRlZA==' }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -78,10 +77,9 @@ test('executeTranslate preserves the source image canvas when a font reference h
 
   globalThis.fetch = async (input, init = {}) => {
     const payload = JSON.parse(String(init.body || '{}'))
-    const content = payload.messages?.[0]?.content || []
-    prompt = content.find((part) => part.type === 'text')?.text || ''
-    images = content.filter((part) => part.type === 'image_url')
-    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZA==' }] }), {
+    prompt = payload.prompt || ''
+    images = Array.isArray(payload.image) ? payload.image : []
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'dHJhbnNsYXRlZA==' }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -106,6 +104,8 @@ test('executeTranslate preserves the source image canvas when a font reference h
     }, {})
 
     assert.equal(images.length, 2)
+    assert.equal(images[0], 'data:image/jpeg;base64,dmVydGljYWwtc291cmNl')
+    assert.equal(images[1], 'data:image/png;base64,aG9yaXpvbnRhbC1mb250LXJlZg==')
     assert.match(prompt, /output canvas must match Image #1/i)
     assert.match(prompt, /790\s*x\s*1914/i)
     assert.match(prompt, /portrait/i)
@@ -124,9 +124,8 @@ test('executeTranslate adds headline and body color rules to the image prompt', 
 
   globalThis.fetch = async (input, init = {}) => {
     const payload = JSON.parse(String(init.body || '{}'))
-    const content = payload.messages?.[0]?.content || []
-    prompt = content.find((part) => part.type === 'text')?.text || ''
-    return new Response(JSON.stringify({ data: [{ b64_json: 'Y29sb3JlZA==' }] }), {
+    prompt = payload.prompt || ''
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'Y29sb3JlZA==' }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })

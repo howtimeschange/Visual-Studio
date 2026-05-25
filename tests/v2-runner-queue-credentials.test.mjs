@@ -204,7 +204,7 @@ test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped 
   globalThis.fetch = async (input, init = {}) => {
     const payload = JSON.parse(String(init.body || '{}'))
     calls.push({ input: String(input), payload })
-    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZC1pbWFnZQ==' }] }), {
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'dHJhbnNsYXRlZC1pbWFnZQ==' }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -245,14 +245,13 @@ test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped 
 
     const job = await mod.getJob(env, submitted.jobId)
     const [call] = calls
-    const content = call.payload.messages[0].content
-    const images = content.filter((part) => part.type === 'image_url')
-    const prompt = content.find((part) => part.type === 'text')?.text || ''
+    const images = Array.isArray(call.payload.image) ? call.payload.image : []
+    const prompt = call.payload.prompt || ''
 
     assert.equal(job.status, 'completed')
     assert.equal(images.length, 2)
-    assert.equal(images[0].image_url.url, 'data:image/png;base64,c291cmNlLWltYWdl')
-    assert.equal(images[1].image_url.url, 'data:image/png;base64,Zm9udC1yZWZlcmVuY2U=')
+    assert.equal(images[0], 'data:image/png;base64,c291cmNlLWltYWdl')
+    assert.equal(images[1], 'data:image/png;base64,Zm9udC1yZWZlcmVuY2U=')
     assert.match(prompt, /Image #1 is the source image/i)
     assert.match(prompt, /Image #2 is a font reference/i)
     assert.match(prompt, /only for typography/i)
@@ -275,9 +274,9 @@ test('runTranslateBatchJob passes source asset dimensions so font references can
 
   globalThis.fetch = async (input, init = {}) => {
     const payload = JSON.parse(String(init.body || '{}'))
-    const prompt = payload.messages?.[0]?.content?.find((part) => part.type === 'text')?.text || ''
+    const prompt = payload.prompt || ''
     prompts.push(prompt)
-    return new Response(JSON.stringify({ data: [{ b64_json: 'dHJhbnNsYXRlZC1pbWFnZQ==' }] }), {
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'dHJhbnNsYXRlZC1pbWFnZQ==' }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -379,7 +378,7 @@ test('runTranslateBatchJob reuses one OCR plan and one asset read per source ima
 
     imageCalls += 1
     const image = Buffer.from(`translated-${imageCalls}`).toString('base64')
-    return new Response(JSON.stringify({ data: [{ b64_json: image }] }), {
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: image }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -438,7 +437,7 @@ test('submitGenerateDirectJob queues 4k canvas generation and runner stores the 
 
   globalThis.fetch = async (input, init = {}) => {
     calls.push({ input: String(input), init })
-    return new Response(JSON.stringify({ data: [{ b64_json: 'YXN5bmMtNGstaW1hZ2U=' }] }), {
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'YXN5bmMtNGstaW1hZ2U=' }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -527,7 +526,7 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
 
     imageCalls += 1
     const image = Buffer.from(`outfit-${imageCalls}`).toString('base64')
-    return new Response(JSON.stringify({ data: [{ b64_json: image }] }), {
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: image }] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -577,6 +576,95 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
     assert.equal(visionCalls, 1)
     assert.equal(imageCalls, 2)
     assert.equal(inputStats.get, 2)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runOutfitBatchJob fails item when image task result is empty', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const env = {
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    if (payload.model === 'gemini-3-flash-preview') {
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              model: { framing: 'full-body', pose: 'standing' },
+              garments: [{ index: 2, role: 'top', category: 'shirt' }],
+            }),
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input) === 'https://img.example/empty.png') {
+      return new Response(new Uint8Array([]), {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      })
+    }
+    return new Response(JSON.stringify({
+      status: 'succeeded',
+      data: [{ url: 'https://img.example/empty.png' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_empty_result', null)
+    const model = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,bW9kZWw=',
+      filename: 'model.png',
+    })
+    const top = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,dG9w',
+      filename: 'top.png',
+    })
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: session.id,
+      modelAssetIds: [model.id],
+      modelId: 'nano-banana-2',
+      garments: [{ assetId: top.id, role: 'top', label: 'top.png' }],
+      concurrency: 1,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+        visionApiKey: 'vision-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+
+    assert.equal(job.status, 'failed')
+    assert.equal(item.status, 'failed')
+    assert.equal(item.errorCode, 'outfit_failed')
+    assert.match(item.errorMessage, /Model returned no image/)
+    assert.equal(Boolean(item.outputJson?.resultAssetId), false)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -975,14 +1063,7 @@ test('runQueuedJob can decrypt job credentials that were sealed with the account
 
     const originalFetch = globalThis.fetch
     globalThis.fetch = () => Promise.resolve(new Response(JSON.stringify({
-      choices: [{
-        message: {
-          content: [{
-            type: 'output_text',
-            text: 'mocked image relay response',
-          }],
-        },
-      }],
+      status: 'succeeded',
       data: [{ b64_json: 'ZmFrZQ==' }],
     }), {
       status: 200,
@@ -1060,14 +1141,7 @@ test('runQueuedJob prefers queue message client keys over an unreadable sealed c
 
     const originalFetch = globalThis.fetch
     globalThis.fetch = () => Promise.resolve(new Response(JSON.stringify({
-      choices: [{
-        message: {
-          content: [{
-            type: 'output_text',
-            text: 'mocked image relay response',
-          }],
-        },
-      }],
+      status: 'succeeded',
       data: [{ b64_json: 'ZmFrZQ==' }],
     }), {
       status: 200,

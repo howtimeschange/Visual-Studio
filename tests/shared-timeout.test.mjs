@@ -34,7 +34,7 @@ test('callImageModel aborts a hung upstream request instead of waiting forever',
         'gemini-3.1-flash-image-preview',
         [],
         'make an image',
-        { timeoutMs: 1000 },
+        { timeoutMs: 1000, retryCount: 0 },
       ),
       new Promise((resolve) => setTimeout(() => resolve('hung'), 1500)),
     ])

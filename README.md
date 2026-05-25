@@ -47,7 +47,7 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 | `nano-banana-pro` | `gemini-3-pro-image-preview` |
 | `gpt-image-2` | `gpt-image-2` |
 
-`gpt-image-2` 使用 1xm.ai 的 OpenAI-compatible Images API：纯文本生图走 `/v1/images/generations`，带参考图或编辑走 `/v1/images/edits` multipart；不要走 chat completions。
+图片模型统一使用 1xm.ai 的异步任务接口：`POST /v1/images/tasks` 创建任务，`GET /v1/images/tasks/{task_id}` 或 `poll_url` 轮询，成功后读取 `data[].url`/`data[].b64_json`。参考图通过 JSON `image` 字段传 data URL 数组；不要在批量任务里走长连接同步接口。
 
 ## 架构
 

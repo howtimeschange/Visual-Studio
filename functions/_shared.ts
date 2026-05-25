@@ -35,6 +35,8 @@ export const VISION_MODEL = 'gemini-3-flash-preview'
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 600_000
 const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = 90_000
 const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 60_000
+const DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS = 5_000
+const DEFAULT_IMAGE_TASK_HTTP_TIMEOUT_MS = 30_000
 const DEFAULT_IMAGE_RETRY_COUNT = 2
 const DEFAULT_IMAGE_RETRY_DELAY_MS = 1_000
 const MIN_TIMEOUT_MS = 1_000
@@ -47,6 +49,8 @@ const GPT_IMAGE_2_MAX_EDGE = 3840
 const GPT_IMAGE_2_SIZE_STEP = 16
 const GPT_IMAGE_2_MAX_RATIO = 3
 const TRANSIENT_IMAGE_STATUSES = new Set([502, 503, 504, 524])
+const SUCCEEDED_IMAGE_TASK_STATUSES = new Set(['succeeded', 'completed', 'success', 'done'])
+const FAILED_IMAGE_TASK_STATUSES = new Set(['failed', 'error', 'canceled', 'cancelled'])
 
 export const MODEL_MAP: Record<string, string> = {
   'nano-banana-2': 'gemini-3.1-flash-image-preview',
@@ -158,60 +162,10 @@ export async function callImageModel(
   prompt: string,
   opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
-  if (modelName === 'gpt-image-2') {
-    return callGptImage2Model(baseUrl, apiKey, modelName, images, prompt, opts)
-  }
-
-  const content: any[] = images.map((img) => ({
-    type: 'image_url',
-    image_url: { url: `data:${img.mime};base64,${img.base64}` },
-  }))
-  content.push({
-    type: 'text',
-    text: prompt,
-  })
-
-  const payload = {
-    model: modelName,
-    messages: [{ role: 'user', content }],
-    temperature: 0.2,
-  }
-
-  try {
-    const res = await fetchImageModelWithRetry(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(payload),
-    }, opts)
-
-    if (!res.ok) {
-      const errBody = await res.text()
-      return { ok: false, error: `Upstream ${res.status}: ${errBody.slice(0, 500)}`, status: res.status }
-    }
-    const data = await res.json<any>()
-    const imageSource = extractImageFromResponse(data)
-    const dataUrl = imageSource
-      ? await coerceImageSourceToDataUrl(
-        imageSource,
-        normalizeTimeoutMs(opts.imageFetchTimeoutMs, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
-      )
-      : null
-    if (!dataUrl) {
-      return { ok: false, error: 'Model returned no image.', status: 502 }
-    }
-    return { ok: true, dataUrl }
-  } catch (e: any) {
-    if (isTimeoutError(e)) {
-      return { ok: false, error: `Upstream image request timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
-    }
-    return { ok: false, error: e?.message ?? 'fetch failed', status: 502 }
-  }
+  return callAsyncImageTaskModel(baseUrl, apiKey, modelName, images, prompt, opts)
 }
 
-async function callGptImage2Model(
+async function callAsyncImageTaskModel(
   baseUrl: string,
   apiKey: string,
   modelName: string,
@@ -219,29 +173,23 @@ async function callGptImage2Model(
   prompt: string,
   opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
-  const hasImages = images.length > 0
-  const endpoint = hasImages ? 'images/edits' : 'images/generations'
-  const request = hasImages
-    ? buildGptImage2EditRequest(modelName, images, prompt, opts)
-    : buildGptImage2GenerationRequest(modelName, prompt, opts)
+  const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
+  const startedAt = Date.now()
+  const taskHttpTimeoutMs = Math.min(timeoutMs, DEFAULT_IMAGE_TASK_HTTP_TIMEOUT_MS)
+  const payload = buildAsyncImageTaskPayload(modelName, images, prompt, opts)
 
   try {
-    const res = await fetchImageModelWithRetry(`${baseUrl}/${endpoint}`, {
-      method: 'POST',
-      headers: {
-        ...request.headers,
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: request.body,
-    }, opts)
+    const task = await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs)
+    if (!task.ok) return task
 
-    if (!res.ok) {
-      const errBody = await res.text()
-      return { ok: false, error: `Upstream ${res.status}: ${errBody.slice(0, 500)}`, status: res.status }
-    }
+    const finalTask = await waitForAsyncImageTask(baseUrl, apiKey, task.data, opts, {
+      timeoutMs,
+      taskHttpTimeoutMs,
+      startedAt,
+    })
+    if (!finalTask.ok) return finalTask
 
-    const data = await res.json<any>()
-    const imageSource = extractImageFromResponse(data)
+    const imageSource = extractImageFromResponse(finalTask.data)
     const dataUrl = imageSource
       ? await coerceImageSourceToDataUrl(
         imageSource,
@@ -254,50 +202,158 @@ async function callGptImage2Model(
     return { ok: true, dataUrl }
   } catch (e: any) {
     if (isTimeoutError(e)) {
-      return { ok: false, error: `Upstream image request timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
+      return { ok: false, error: `Upstream image task timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
     }
     return { ok: false, error: e?.message ?? 'fetch failed', status: 502 }
   }
 }
 
-function buildGptImage2GenerationRequest(modelName: string, prompt: string, opts: ImageModelOptions = {}): {
-  headers: Record<string, string>
-  body: string
-} {
-  const settings = resolveGptImage2Settings(opts)
-  return {
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: modelName,
-      prompt,
-      n: 1,
-      size: settings.size,
-      quality: settings.quality,
-      output_format: 'png',
-    }),
+function buildAsyncImageTaskPayload(
+  modelName: string,
+  images: ImagePart[],
+  prompt: string,
+  opts: ImageModelOptions = {},
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    model: modelName,
+    prompt,
+    n: 1,
+    output_format: 'png',
+  }
+
+  if (modelName === 'gpt-image-2') {
+    const settings = resolveGptImage2Settings(opts)
+    payload.size = settings.size
+    payload.quality = settings.quality
+    if (opts.group) payload.group = opts.group
+  } else {
+    const size = normalizeGeminiImageTaskSize(opts.aspectRatio)
+    const quality = normalizeGeminiImageTaskQuality(opts.resolution)
+    if (size) payload.size = size
+    if (quality) payload.quality = quality
+  }
+
+  if (images.length > 0) {
+    payload.image = images.map((img) => `data:${normalizeImageMime(img.mime) || 'image/png'};base64,${img.base64}`)
+  }
+
+  return payload
+}
+
+async function createAsyncImageTask(
+  baseUrl: string,
+  apiKey: string,
+  payload: Record<string, unknown>,
+  opts: ImageModelOptions,
+  timeoutMs: number,
+): Promise<{ ok: true; data: any } | { ok: false; error: string; status: number }> {
+  const res = await fetchImageModelWithRetry(`${baseUrl}/images/tasks`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  }, { ...opts, timeoutMs })
+
+  const data = await readJsonResponse(res)
+  if (!res.ok && res.status !== 202) {
+    return { ok: false, error: `Upstream ${res.status}: ${formatUpstreamError(data)}`, status: res.status }
+  }
+  return { ok: true, data }
+}
+
+async function waitForAsyncImageTask(
+  baseUrl: string,
+  apiKey: string,
+  initialTask: any,
+  requestOpts: ImageModelOptions,
+  opts: { timeoutMs: number; taskHttpTimeoutMs: number; startedAt: number },
+): Promise<{ ok: true; data: any } | { ok: false; error: string; status: number }> {
+  let task = initialTask
+
+  for (;;) {
+    const status = normalizeTaskStatus(task?.status)
+    if (SUCCEEDED_IMAGE_TASK_STATUSES.has(status)) return { ok: true, data: task }
+    if (FAILED_IMAGE_TASK_STATUSES.has(status)) {
+      return { ok: false, error: `Image task ${status}: ${formatUpstreamError(task)}`, status: 502 }
+    }
+
+    if (extractImageFromResponse(task)) return { ok: true, data: task }
+
+    const pollTarget = String(task?.poll_url || task?.pollUrl || task?.id || task?.task_id || task?.taskId || '').trim()
+    if (!pollTarget) {
+      return { ok: false, error: 'Image task response did not include poll_url or task_id.', status: 502 }
+    }
+
+    const elapsedMs = Date.now() - opts.startedAt
+    const remainingMs = opts.timeoutMs - elapsedMs
+    if (remainingMs <= 0) throw createTimeoutError(opts.timeoutMs)
+
+    await sleep(Math.min(normalizePollAfterMs(task?.poll_after ?? task?.pollAfter), remainingMs))
+    if (Date.now() - opts.startedAt >= opts.timeoutMs) throw createTimeoutError(opts.timeoutMs)
+
+    const pollUrl = buildImageTaskPollUrl(baseUrl, pollTarget)
+    const pollRes = await fetchImageModelWithRetry(pollUrl, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }, {
+      ...requestOpts,
+      timeoutMs: Math.min(opts.taskHttpTimeoutMs, Math.max(MIN_TIMEOUT_MS, opts.timeoutMs - (Date.now() - opts.startedAt))),
+    })
+    const pollData = await readJsonResponse(pollRes)
+    if (!pollRes.ok) {
+      return { ok: false, error: `Upstream ${pollRes.status}: ${formatUpstreamError(pollData)}`, status: pollRes.status }
+    }
+    task = pollData
   }
 }
 
-function buildGptImage2EditRequest(modelName: string, images: ImagePart[], prompt: string, opts: ImageModelOptions = {}): {
-  headers: Record<string, string>
-  body: FormData
-} {
-  const settings = resolveGptImage2Settings(opts)
-  const form = new FormData()
-  form.set('model', modelName)
-  form.set('prompt', prompt)
-  form.set('n', '1')
-  form.set('size', settings.size)
-  form.set('quality', settings.quality)
-  form.set('output_format', 'png')
+function buildImageTaskPollUrl(baseUrl: string, pollTarget: string): string {
+  if (/^https?:\/\//i.test(pollTarget)) return pollTarget
+  return `${baseUrl.replace(/\/+$/, '')}/images/tasks/${encodeURIComponent(pollTarget)}`
+}
 
-  images.forEach((image, index) => {
-    const mime = normalizeImageMime(image.mime) || 'image/png'
-    const extension = extensionForImageMime(mime)
-    form.append('image[]', base64ToBlob(image.base64, mime), `reference-${index + 1}.${extension}`)
-  })
+function normalizeTaskStatus(value: unknown): string {
+  return String(value || '').trim().toLowerCase()
+}
 
-  return { headers: {}, body: form }
+function normalizePollAfterMs(value: unknown): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) return DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS
+  if (numeric === 0) return 0
+  return Math.max(1_000, Math.min(60_000, numeric * 1_000))
+}
+
+async function readJsonResponse(res: Response): Promise<any> {
+  const text = await res.text()
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { raw: text }
+  }
+}
+
+function formatUpstreamError(data: any): string {
+  const message =
+    data?.error?.message
+    || data?.error
+    || data?.message
+    || data?._timeout
+    || data?.raw
+    || JSON.stringify(data || {})
+  return String(message || 'unknown error').slice(0, 500)
+}
+
+function normalizeGeminiImageTaskSize(value: unknown): string {
+  const ratio = String(value || '').trim()
+  return ['1:1', '4:3', '3:4', '16:9', '9:16'].includes(ratio) ? ratio : ''
+}
+
+function normalizeGeminiImageTaskQuality(value: unknown): string {
+  const resolution = String(value || '').trim().toUpperCase()
+  return ['1K', '2K', '4K'].includes(resolution) ? resolution : ''
 }
 
 function resolveGptImage2Settings(opts: ImageModelOptions = {}) {
@@ -501,17 +557,31 @@ function collectImageSources(content: any): string[] {
 
 async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IMAGE_FETCH_TIMEOUT_MS): Promise<string | null> {
   if (!source) return null
-  if (source.startsWith('data:')) return source
+  if (source.startsWith('data:')) return isUsableImageDataUrl(source) ? source : null
   if (!/^https?:\/\//i.test(source)) return source
 
   try {
     const res = await fetchWithTimeout(source, {}, timeoutMs)
-    if (!res.ok) return source
-    const mime = normalizeImageMime(res.headers.get('content-type')) || guessMimeFromUrl(source) || 'image/png'
+    if (!res.ok) return null
+    const contentType = res.headers.get('content-type')
+    const mime = normalizeImageMime(contentType) || guessMimeFromUrl(source) || 'image/png'
+    if (contentType && !normalizeImageMime(contentType)) return null
     const buffer = await res.arrayBuffer()
-    return `data:${mime};base64,${arrayBufferToBase64(buffer)}`
+    if (buffer.byteLength <= 0) return null
+    const dataUrl = `data:${mime};base64,${arrayBufferToBase64(buffer)}`
+    return isUsableImageDataUrl(dataUrl) ? dataUrl : null
   } catch {
-    return source
+    return null
+  }
+}
+
+function isUsableImageDataUrl(value: string): boolean {
+  const match = String(value || '').match(/^data:(image\/[^;]+);base64,([A-Za-z0-9+/=]+)$/i)
+  if (!match) return false
+  try {
+    return atob(match[2]).length > 0
+  } catch {
+    return false
   }
 }
 
@@ -534,7 +604,14 @@ async function fetchImageModelWithRetry(input: RequestInfo | URL, init: RequestI
   const retryDelayMs = normalizeRetryDelayMs(opts.retryDelayMs, DEFAULT_IMAGE_RETRY_DELAY_MS)
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-    const res = await fetchWithTimeout(input, init, timeoutMs)
+    let res: Response
+    try {
+      res = await fetchWithTimeout(input, init, timeoutMs)
+    } catch (error) {
+      if (!shouldRetryImageError(error, attempt, retryCount)) throw error
+      await sleep(retryDelayMs * (2 ** attempt))
+      continue
+    }
     if (!shouldRetryImageResponse(res, attempt, retryCount)) return res
     await sleep(retryDelayMs * (2 ** attempt))
   }
@@ -544,6 +621,13 @@ async function fetchImageModelWithRetry(input: RequestInfo | URL, init: RequestI
 
 function shouldRetryImageResponse(res: Response, attempt: number, retryCount: number): boolean {
   return attempt < retryCount && TRANSIENT_IMAGE_STATUSES.has(res.status)
+}
+
+function shouldRetryImageError(error: unknown, attempt: number, retryCount: number): boolean {
+  if (attempt >= retryCount) return false
+  if (isTimeoutError(error)) return true
+  const message = String((error as { message?: string })?.message || '').toLowerCase()
+  return /network|connection|fetch|socket|econnreset|etimedout/.test(message)
 }
 
 function normalizeRetryCount(value: unknown, fallback: number): number {
@@ -605,22 +689,6 @@ function guessMimeFromUrl(url: string): string | null {
   if (clean.endsWith('.webp')) return 'image/webp'
   if (clean.endsWith('.gif')) return 'image/gif'
   return null
-}
-
-function extensionForImageMime(mime: string): string {
-  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg'
-  if (mime === 'image/webp') return 'webp'
-  if (mime === 'image/gif') return 'gif'
-  return 'png'
-}
-
-function base64ToBlob(base64: string, mime: string): Blob {
-  const binary = atob(String(base64 || ''))
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index)
-  }
-  return new Blob([bytes], { type: mime })
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

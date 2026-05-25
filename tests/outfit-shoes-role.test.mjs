@@ -35,7 +35,7 @@ async function importOutfitSwap() {
 }
 
 function okImageResponse(base64) {
-  return new Response(JSON.stringify({ data: [{ b64_json: base64 }] }), {
+  return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: base64 }] }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   })
@@ -100,8 +100,8 @@ test('executeOutfitSwap describes shoes in the prompt sent to the image model', 
 
     assert.equal(result.resultDataUrl, 'data:image/png;base64,c2hvZXMtcmVzdWx0')
     assert.equal(calls.length, 1)
-    const form = calls[0].init.body
-    const prompt = form.get('prompt')
+    const payload = JSON.parse(calls[0].init.body)
+    const prompt = payload.prompt
 
     assert.match(prompt, /Image #2: GARMENT role: shoes/i)
     assert.match(prompt, /shoes should be placed on the feet/i)
@@ -139,7 +139,7 @@ test('executeOutfitSwap includes per-garment instructions beside the matching re
       clientKeys: { gptImageApiKey: 'test-key' },
     }, {})
 
-    const prompt = calls[0].init.body.get('prompt')
+    const prompt = JSON.parse(calls[0].init.body).prompt
     const instructionSection = prompt.match(/## PER-GARMENT ADDITIONAL INSTRUCTIONS\n([\s\S]*?)(?:\n\n##|\nReturn|$)/i)?.[1] || ''
 
     assert.match(prompt, /## PER-GARMENT ADDITIONAL INSTRUCTIONS/i)
@@ -184,7 +184,7 @@ test('executeOutfitSwap keeps queued look item instructions aligned with their i
       clientKeys: { gptImageApiKey: 'test-key' },
     }, {})
 
-    const prompt = calls[0].init.body.get('prompt')
+    const prompt = JSON.parse(calls[0].init.body).prompt
     const instructionSection = prompt.match(/## PER-GARMENT ADDITIONAL INSTRUCTIONS\n([\s\S]*?)(?:\n\n##|\nReturn|$)/i)?.[1] || ''
 
     assert.match(instructionSection, /Image #2[\s\S]*Keep the skirt knee-length\./i)
