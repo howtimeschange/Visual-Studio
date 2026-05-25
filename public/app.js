@@ -209,6 +209,8 @@ const RUNTIME_MIGRATION_NOTICE_MS = 5200
 const CANVAS_SAVE_DEBOUNCE_MS = 2200
 const CANVAS_GENERATE_POLL_INTERVAL_MS = 1600
 const CANVAS_GENERATE_POLL_TIMEOUT_MS = 25 * 60 * 1000
+const CANVAS_RESULT_FETCH_RETRIES = 3
+const CANVAS_RESULT_FETCH_RETRY_DELAY_MS = 1200
 
 const KEY_STORAGE = 'img-translator:keys:v1'
 const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
@@ -277,10 +279,12 @@ const state = {
     textColorMode: 'match_original',
     headlineColor: DEFAULT_TRANSLATE_HEADLINE_COLOR,
     bodyColor: DEFAULT_TRANSLATE_BODY_COLOR,
-    items: [],
-    running: false,
-    progress: '',
-    jobId: '',
+	    items: [],
+	    running: false,
+	    submittingJobId: '',
+	    pendingSignature: '',
+	    progress: '',
+	    jobId: '',
     jobTab: 'current',
     jobPage: 1,
     jobs: [],
@@ -384,9 +388,11 @@ const state = {
     concurrency: 3,
     models: [],
     garments: [],
-    results: {},
-    running: false,
-    progress: '',
+	    results: {},
+	    running: false,
+	    submittingJobId: '',
+	    pendingSignature: '',
+	    progress: '',
     jobId: '',
     jobTab: 'current',
     jobPage: 1,
@@ -5008,8 +5014,8 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
     if (status === 'completed') {
       const resultAssetId = String(item?.outputJson?.resultAssetId || job.summaryJson?.resultAssetId || '').trim()
       if (!resultAssetId) throw new Error('生成完成但缺少结果资源')
-      const assetData = await getJson(`/api/assets/${encodeURIComponent(resultAssetId)}?includeData=1${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`)
-      if (!assetData?.dataUrl) throw new Error('生成结果读取失败')
+	      const assetData = await fetchCanvasGenerateResultAsset(resultAssetId, projectId)
+	      if (!assetData?.dataUrl) throw new Error('生成结果读取失败')
       return {
         sessionId: state.runtime.sessionId,
         jobId,
@@ -5026,7 +5032,25 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
     await wait(CANVAS_GENERATE_POLL_INTERVAL_MS)
   }
 
-  throw new Error('生成任务等待超时，请稍后在项目中查看结果')
+	  throw new Error('生成任务等待超时，请稍后在项目中查看结果')
+	}
+
+async function fetchCanvasGenerateResultAsset(resultAssetId, projectId = '') {
+  const url = `/api/assets/${encodeURIComponent(resultAssetId)}?includeData=1${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`
+  let lastError = null
+  for (let attempt = 0; attempt <= CANVAS_RESULT_FETCH_RETRIES; attempt += 1) {
+    try {
+      const assetData = await getJson(url)
+      if (assetData?.dataUrl) return assetData
+      lastError = new Error('生成结果读取失败')
+    } catch (error) {
+      lastError = error
+    }
+    if (attempt < CANVAS_RESULT_FETCH_RETRIES) {
+      await wait(CANVAS_RESULT_FETCH_RETRY_DELAY_MS * (attempt + 1))
+    }
+  }
+  throw lastError || new Error('生成结果读取失败')
 }
 
 function formatCanvasGenerateJobStatus(status) {
@@ -7304,6 +7328,11 @@ async function runTranslateBatch() {
 
     const runConfig = await prepareTranslateRunConfig()
     const signature = getTranslateSignature(runConfig)
+    if (state.translate.submittingJobId && state.translate.pendingSignature === signature) {
+      state.translate.progress = '任务已提交，正在同步进度…'
+      renderTranslate()
+      return
+    }
     const needsWork = state.translate.items.some((item) =>
       state.translate.targets.some((language) => {
         const existing = item.results[language]
@@ -7340,6 +7369,8 @@ async function runTranslateBatch() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.translate.submittingJobId = data.jobId
+    state.translate.pendingSignature = signature
     upsertJobTask('translate', data.jobId, {
       type: 'translate_batch',
       status: 'queued',
@@ -7349,6 +7380,7 @@ async function runTranslateBatch() {
       thumbs: getJobTaskThumbsFromWorkspace('translate'),
       itemCount: Number(data.itemCount || 0),
       progressTotal: Number(data.itemCount || 0),
+      signature,
     })
     markJobTaskLoaded('translate', data.jobId)
     setJobTab('translate', 'current')
@@ -7359,6 +7391,7 @@ async function runTranslateBatch() {
     void syncTranslateJob(data.jobId, { applyToWorkspace: true })
   } catch (error) {
     state.translate.running = false
+    clearTranslateSubmitLock()
     state.translate.progress = trimError(error)
     renderTranslate()
   }
@@ -7371,6 +7404,11 @@ async function runOutfitBatch() {
 
   const runConfig = getOutfitRunConfig()
   const signature = getOutfitSignature(runConfig)
+  if (state.outfit.submittingJobId && state.outfit.pendingSignature === signature) {
+    state.outfit.progress = '任务已提交，正在同步进度…'
+    renderOutfit()
+    return
+  }
   const needsWork = state.outfit.models.some((model) =>
     looks.some((look) => {
       const existing = state.outfit.results[pairKey(model.id, look.id)]
@@ -7408,6 +7446,8 @@ async function runOutfitBatch() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.outfit.submittingJobId = data.jobId
+    state.outfit.pendingSignature = signature
     upsertJobTask('outfit', data.jobId, {
       type: 'outfit_batch',
       status: 'queued',
@@ -7417,6 +7457,7 @@ async function runOutfitBatch() {
       thumbs: getJobTaskThumbsFromWorkspace('outfit'),
       itemCount: Number(data.itemCount || 0),
       progressTotal: Number(data.itemCount || 0),
+      signature,
     })
     markJobTaskLoaded('outfit', data.jobId)
     setJobTab('outfit', 'current')
@@ -7427,6 +7468,7 @@ async function runOutfitBatch() {
     void syncOutfitJob(data.jobId, { applyToWorkspace: true })
   } catch (error) {
     state.outfit.running = false
+    clearOutfitSubmitLock()
     state.outfit.progress = trimError(error)
     renderOutfit()
   }
@@ -7694,11 +7736,23 @@ function hasOutfitActiveItems() {
 }
 
 function isTranslateBusy() {
-  return state.translate.running
+  return state.translate.running || Boolean(state.translate.submittingJobId)
 }
 
 function isOutfitBusy() {
-  return state.outfit.running
+  return state.outfit.running || Boolean(state.outfit.submittingJobId)
+}
+
+function clearTranslateSubmitLock(jobId = '') {
+  if (jobId && state.translate.submittingJobId !== jobId) return
+  state.translate.submittingJobId = ''
+  state.translate.pendingSignature = ''
+}
+
+function clearOutfitSubmitLock(jobId = '') {
+  if (jobId && state.outfit.submittingJobId !== jobId) return
+  state.outfit.submittingJobId = ''
+  state.outfit.pendingSignature = ''
 }
 
 function canRetryTranslateItem() {
@@ -9275,6 +9329,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
   while (translateJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      clearTranslateSubmitLock(jobId)
       if (job?.type && job.type !== 'translate_batch') {
         removeJobTask('translate', jobId)
         saveRuntimeState()
@@ -9317,6 +9372,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
       if (status === 404 || status === 403) {
         const wasLoaded = getLoadedJobId('translate') === jobId
         removeJobTask('translate', jobId)
+        clearTranslateSubmitLock(jobId)
         if (!passive404 && wasLoaded) {
           state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
         }
@@ -9481,6 +9537,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
   while (outfitJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      clearOutfitSubmitLock(jobId)
       if (job?.type && job.type !== 'outfit_batch') {
         removeJobTask('outfit', jobId)
         saveRuntimeState()
@@ -9523,6 +9580,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
       if (status === 404 || status === 403) {
         const wasLoaded = getLoadedJobId('outfit') === jobId
         removeJobTask('outfit', jobId)
+        clearOutfitSubmitLock(jobId)
         if (!passive404 && wasLoaded) {
           state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
         }

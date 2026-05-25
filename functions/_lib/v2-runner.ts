@@ -16,6 +16,7 @@ import {
   createJob,
   createJobItems,
   createSealedCredential,
+  claimQueuedJobItem,
   createUsageEvent,
   deleteJobRecord,
   deleteSealedCredential,
@@ -299,6 +300,12 @@ async function finalizeCredential(env: Env, credentialId?: string | null): Promi
   if (credentialId) await deleteSealedCredential(env, credentialId)
 }
 
+async function finalizeCredentialForStatus(env: Env, credentialId: string | null | undefined, status: string): Promise<void> {
+  if (status === 'completed' || status === 'cancelled') {
+    await finalizeCredential(env, credentialId)
+  }
+}
+
 async function publishJobProgress(env: Env, job: JobRecord) {
   await publishEvent(env, 'job', job.id, 'job_progress', {
     status: job.status,
@@ -463,17 +470,17 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   const getCachedAssetDataUrl = createAssetDataUrlCache(env)
   const getCachedTranslatePlan = createTranslationPlanCache(env, initialJob, clientKeys, getCachedAssetDataUrl)
 
-  await runPool(items, concurrency, async (item) => {
+  await runPool(items, concurrency, async (queuedItem) => {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
-    await updateJobItem(env, jobId, item.id, {
-      status: 'running',
-      attemptCount: item.attemptCount + 1,
+    const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
+      attemptCount: queuedItem.attemptCount + 1,
       startedAt: nowIso(),
       errorCode: null,
       errorMessage: null,
     })
+    if (!item) return
     await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
 
     try {
@@ -576,6 +583,8 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
   const finalJob = await updateJob(env, jobId, {
     status,
+    progressDone: completed,
+    progressFailed: failed,
     summaryJson: createJobSummary(finalItems),
   })
   if (finalJob) {
@@ -585,7 +594,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
     })
   }
 
-  await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+  await finalizeCredentialForStatus(env, String(initialJob.configJson?.sealedCredentialId || ''), status)
 }
 
 export async function submitOutfitBatch(
@@ -694,17 +703,17 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   const getCachedAssetDataUrl = createAssetDataUrlCache(env)
   const getCachedOutfitAnalysis = createOutfitAnalysisCache(env, initialJob, clientKeys)
 
-  await runPool(items, concurrency, async (item) => {
+  await runPool(items, concurrency, async (queuedItem) => {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
-    await updateJobItem(env, jobId, item.id, {
-      status: 'running',
-      attemptCount: item.attemptCount + 1,
+    const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
+      attemptCount: queuedItem.attemptCount + 1,
       startedAt: nowIso(),
       errorCode: null,
       errorMessage: null,
     })
+    if (!item) return
     await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
 
     try {
@@ -815,6 +824,8 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
   const finalJob = await updateJob(env, jobId, {
     status,
+    progressDone: completed,
+    progressFailed: failed,
     summaryJson: {
       ...createJobSummary(finalItems),
       lookCount: initialJob.summaryJson.lookCount || 0,
@@ -827,7 +838,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     })
   }
 
-  await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+  await finalizeCredentialForStatus(env, String(initialJob.configJson?.sealedCredentialId || ''), status)
 }
 
 export async function submitGenerateTurn(
@@ -1025,6 +1036,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       provider: '1xm.ai',
       modelId: turn.modelId,
     })
+    await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
   } catch (error: any) {
     await updateConversationTurn(env, turn.id, { status: 'failed' })
     await updateJob(env, jobId, {
@@ -1050,8 +1062,6 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       status: 'failed',
       error: String(error?.message || 'Generate failed'),
     })
-  } finally {
-    await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
   }
 }
 
@@ -1126,14 +1136,14 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
   const item = items[0]
   if (!item) return
 
-  await updateJobItem(env, jobId, item.id, {
-    status: 'running',
+  const claimedItem = await claimQueuedJobItem(env, jobId, item.id, {
     attemptCount: item.attemptCount + 1,
     startedAt: nowIso(),
     errorCode: null,
     errorMessage: null,
   })
-  await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
+  if (!claimedItem) return
+  await publishEvent(env, 'item', claimedItem.id, 'item_started', { jobId, itemType: claimedItem.itemType })
 
   try {
     const request = normalizeDirectGenerateRequest({
@@ -1153,7 +1163,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       bucketKind: 'result',
     })
 
-    await updateJobItem(env, jobId, item.id, {
+    await updateJobItem(env, jobId, claimedItem.id, {
       status: 'completed',
       attemptCount: attempts,
       outputJson: {
@@ -1167,7 +1177,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       progressDone: 1,
       summaryJson: { resultAssetId: resultAsset.id },
     })
-    await publishEvent(env, 'item', item.id, 'item_completed', {
+    await publishEvent(env, 'item', claimedItem.id, 'item_completed', {
       jobId,
       resultAssetId: resultAsset.id,
     })
@@ -1184,10 +1194,11 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       provider: '1xm.ai',
       modelId: String(initialJob.configJson.modelId || ''),
     })
+    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
   } catch (error: any) {
-    await updateJobItem(env, jobId, item.id, {
+    await updateJobItem(env, jobId, claimedItem.id, {
       status: 'failed',
-      attemptCount: Number(error?.attempts || item.attemptCount || 1),
+      attemptCount: Number(error?.attempts || claimedItem.attemptCount || 1),
       errorCode: 'generate_direct_failed',
       errorMessage: String(error?.message || 'Generate failed'),
       finishedAt: nowIso(),
@@ -1197,7 +1208,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       progressFailed: 1,
       summaryJson: { error: String(error?.message || 'Generate failed') },
     })
-    await publishEvent(env, 'item', item.id, 'item_failed', {
+    await publishEvent(env, 'item', claimedItem.id, 'item_failed', {
       jobId,
       error: String(error?.message || 'Generate failed'),
     })
@@ -1205,8 +1216,6 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       status: 'failed',
       error: String(error?.message || 'Generate failed'),
     })
-  } finally {
-    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
   }
 }
 
@@ -1263,7 +1272,7 @@ async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
 export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: ClientKeys) {
   const job = await getJob(env, jobId)
   if (!job) return { jobId, status: 'missing' }
-  if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+  if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused' || job.status === 'running') {
     return { jobId: job.id, status: job.status, skipped: true }
   }
 
@@ -1426,6 +1435,24 @@ export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
         status: 'queued',
         errorCode: null,
         errorMessage: null,
+        startedAt: null,
+        finishedAt: null,
+      })
+    }
+    await scheduleJobExecution(env, job, waitUntil, 'retry')
+    return { jobId: job.id, type: job.type }
+  }
+
+  if (job.type === 'generate_batch') {
+    await updateJob(env, job.id, { status: 'queued', progressDone: 0, progressFailed: 0 })
+    const items = await listJobItems(env, job.id)
+    const item = items[0]
+    if (item) {
+      await updateJobItem(env, job.id, item.id, {
+        status: 'queued',
+        errorCode: null,
+        errorMessage: null,
+        startedAt: null,
         finishedAt: null,
       })
     }

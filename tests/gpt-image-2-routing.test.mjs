@@ -383,7 +383,124 @@ test('async image task rejects empty fetched image results', async () => {
 
     assert.equal(result.ok, false)
     assert.equal(result.status, 502)
-    assert.equal(result.error, 'Model returned no image.')
+    assert.equal(result.error, 'Image result fetch returned an empty body.')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('async image task extracts image URLs from result and output payloads', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input) => {
+    calls.push(String(input))
+    if (String(input) === 'https://img.example/result-from-task.png') {
+      return new Response(new Uint8Array([4, 5, 6]), {
+        status: 200,
+        headers: { 'Content-Type': 'image/png' },
+      })
+    }
+    return new Response(JSON.stringify({
+      status: 'succeeded',
+      result: {
+        output: [{
+          image_url: 'https://img.example/result-from-task.png',
+        }],
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 3000, imageFetchTimeoutMs: 1000 },
+    )
+
+    assert.equal(result.ok, true)
+    assert.equal(result.dataUrl, 'data:image/png;base64,BAUG')
+    assert.deepEqual(calls, [
+      'https://relay.example/v1/images/tasks',
+      'https://img.example/result-from-task.png',
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('async image task rejects unsupported image result sources', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status: 'succeeded',
+    data: [{ url: '/relative-result.png' }],
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 3000, imageFetchTimeoutMs: 1000 },
+    )
+
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 502)
+    assert.match(result.error, /unsupported image source/i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('async image task reports result fetch failures with upstream status', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    if (String(input) === 'https://img.example/forbidden.png') {
+      return new Response(JSON.stringify({ error: { message: 'signed URL expired' } }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      status: 'succeeded',
+      data: [{ url: 'https://img.example/forbidden.png' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const result = await mod.callImageModel(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 3000, imageFetchTimeoutMs: 1000 },
+    )
+
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 502)
+    assert.match(result.error, /result fetch failed/i)
+    assert.match(result.error, /403/)
+    assert.match(result.error, /signed URL expired/)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()

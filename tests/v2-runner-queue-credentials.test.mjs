@@ -479,6 +479,123 @@ test('submitGenerateDirectJob queues 4k canvas generation and runner stores the 
   }
 })
 
+test('runQueuedJob claims a generate batch item once under duplicate delivery', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  let imageCalls = 0
+  let releaseFetch
+  let markFetchStarted
+  const fetchGate = new Promise((resolve) => {
+    releaseFetch = resolve
+  })
+  const fetchStarted = new Promise((resolve) => {
+    markFetchStarted = resolve
+  })
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async () => {
+    imageCalls += 1
+    markFetchStarted()
+    await fetchGate
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'ZHVwLWNsYWlt' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const submitted = await mod.submitGenerateDirectJob(env, {
+      sessionId: 'session_generate_claim_once',
+      modelId: 'gpt-image-2',
+      prompt: 'make a campaign poster',
+      aspectRatio: '1:1',
+      resolution: '2k',
+      clientKeys: { gptImageApiKey: 'job-gpt-image-key' },
+    })
+
+    const first = mod.runQueuedJob(env, submitted.jobId)
+    await fetchStarted
+    const second = await mod.runQueuedJob(env, submitted.jobId)
+    releaseFetch()
+    const firstResult = await first
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+
+    assert.equal(firstResult.status, 'completed')
+    assert.equal(second.skipped, true)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(imageCalls, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('retryJob supports failed generate batch jobs', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+  let shouldFail = true
+
+  globalThis.fetch = async () => {
+    if (shouldFail) {
+      return new Response(JSON.stringify({ error: { message: 'temporary upstream outage' } }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'cmV0cnktZ2VuZXJhdGU=' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const submitted = await mod.submitGenerateDirectJob(env, {
+      sessionId: 'session_generate_retry',
+      modelId: 'gpt-image-2',
+      prompt: 'make a retryable campaign poster',
+      aspectRatio: '1:1',
+      resolution: '2k',
+      clientKeys: { gptImageApiKey: 'job-gpt-image-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'failed')
+    assert.equal(item.status, 'failed')
+    assert.ok(await mod.getSealedCredential(env, String(job.configJson.sealedCredentialId)))
+
+    shouldFail = false
+    await mod.retryJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(await mod.getSealedCredential(env, String(job.configJson.sealedCredentialId)), null)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,cmV0cnktZ2VuZXJhdGU=',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate model look items', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
@@ -663,7 +780,7 @@ test('runOutfitBatchJob fails item when image task result is empty', async () =>
     assert.equal(job.status, 'failed')
     assert.equal(item.status, 'failed')
     assert.equal(item.errorCode, 'outfit_failed')
-    assert.match(item.errorMessage, /Model returned no image/)
+    assert.match(item.errorMessage, /Image result fetch returned an empty body/)
     assert.equal(Boolean(item.outputJson?.resultAssetId), false)
   } finally {
     globalThis.fetch = originalFetch

@@ -168,3 +168,30 @@ test('dispatchQueuedJob uses the local queue bridge before bound queue producers
     await cleanup()
   }
 })
+
+test('dispatchQueuedJob awaits inline fallback when no queue or waitUntil is available', async () => {
+  const { mod, cleanup } = await importQueue()
+  const events = []
+
+  try {
+    const mode = await mod.dispatchQueuedJob(
+      {},
+      undefined,
+      mod.createJobQueueMessage({
+        jobId: 'job_inline',
+        jobType: 'generate_batch',
+        reason: 'submit',
+      }),
+      async () => {
+        events.push('started')
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        events.push('finished')
+      },
+    )
+
+    assert.equal(mode, 'inline')
+    assert.deepEqual(events, ['started', 'finished'])
+  } finally {
+    await cleanup()
+  }
+})

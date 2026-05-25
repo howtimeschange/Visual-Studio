@@ -968,6 +968,53 @@ export async function updateJobItem(
   return next
 }
 
+export async function claimQueuedJobItem(
+  env: any,
+  jobId: string,
+  itemId: string,
+  patch: Partial<JobItemRecord>,
+): Promise<JobItemRecord | null> {
+  const current = (await listJobItems(env, jobId)).find((item) => item.id === itemId)
+  if (!current || current.status !== 'queued') return null
+  const next = {
+    ...current,
+    ...patch,
+    id: current.id,
+    jobId: current.jobId,
+    status: 'running',
+  } as JobItemRecord
+
+  const db = dbFor(env)
+  if (db) {
+    const result = await db.prepare(`
+      UPDATE job_items
+      SET item_type = ?, status = ?, input_json = ?, output_json = ?, attempt_count = ?,
+          error_code = ?, error_message = ?, started_at = ?, finished_at = ?
+      WHERE id = ? AND job_id = ? AND status = 'queued'
+    `).bind(
+      next.itemType,
+      next.status,
+      stringifyJson(next.inputJson),
+      stringifyJson(next.outputJson),
+      next.attemptCount,
+      next.errorCode || null,
+      next.errorMessage || null,
+      next.startedAt || null,
+      next.finishedAt || null,
+      next.id,
+      next.jobId,
+    ).run()
+    if (Number(result?.meta?.changes || 0) === 0) return null
+    return next
+  }
+
+  const map = memoryState.jobItems.get(jobId)
+  const latest = map?.get(itemId)
+  if (!map || latest?.status !== 'queued') return null
+  map.set(itemId, next)
+  return next
+}
+
 export async function appendEvent(envOrEvent: any, maybeEvent?: RuntimeEvent): Promise<RuntimeEvent> {
   const legacy = maybeEvent === undefined
   const env = legacy ? null : envOrEvent

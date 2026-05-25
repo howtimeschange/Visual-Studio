@@ -154,6 +154,10 @@ type ImageModelOptions = {
   retryDelayMs?: number
 }
 
+type ImageSourceResult =
+  | { ok: true; dataUrl: string }
+  | { ok: false; error: string }
+
 export async function callImageModel(
   baseUrl: string,
   apiKey: string,
@@ -179,7 +183,8 @@ async function callAsyncImageTaskModel(
   const payload = buildAsyncImageTaskPayload(modelName, images, prompt, opts)
 
   try {
-    const task = await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs)
+    const deadlineAt = startedAt + timeoutMs
+    const task = await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs, deadlineAt)
     if (!task.ok) return task
 
     const finalTask = await waitForAsyncImageTask(baseUrl, apiKey, task.data, opts, {
@@ -190,16 +195,18 @@ async function callAsyncImageTaskModel(
     if (!finalTask.ok) return finalTask
 
     const imageSource = extractImageFromResponse(finalTask.data)
-    const dataUrl = imageSource
-      ? await coerceImageSourceToDataUrl(
-        imageSource,
-        normalizeTimeoutMs(opts.imageFetchTimeoutMs, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
-      )
-      : null
-    if (!dataUrl) {
+    if (!imageSource) {
       return { ok: false, error: 'Model returned no image.', status: 502 }
     }
-    return { ok: true, dataUrl }
+
+    const dataUrl = await coerceImageSourceToDataUrl(
+      imageSource,
+      normalizeTimeoutMs(opts.imageFetchTimeoutMs, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
+    )
+    if (!dataUrl.ok) {
+      return { ok: false, error: dataUrl.error, status: 502 }
+    }
+    return { ok: true, dataUrl: dataUrl.dataUrl }
   } catch (e: any) {
     if (isTimeoutError(e)) {
       return { ok: false, error: `Upstream image task timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
@@ -246,6 +253,7 @@ async function createAsyncImageTask(
   payload: Record<string, unknown>,
   opts: ImageModelOptions,
   timeoutMs: number,
+  deadlineAt?: number,
 ): Promise<{ ok: true; data: any } | { ok: false; error: string; status: number }> {
   const res = await fetchImageModelWithRetry(`${baseUrl}/images/tasks`, {
     method: 'POST',
@@ -254,7 +262,7 @@ async function createAsyncImageTask(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(payload),
-  }, { ...opts, timeoutMs })
+  }, { ...opts, timeoutMs }, deadlineAt)
 
   const data = await readJsonResponse(res)
   if (!res.ok && res.status !== 202) {
@@ -300,7 +308,7 @@ async function waitForAsyncImageTask(
     }, {
       ...requestOpts,
       timeoutMs: Math.min(opts.taskHttpTimeoutMs, Math.max(MIN_TIMEOUT_MS, opts.timeoutMs - (Date.now() - opts.startedAt))),
-    })
+    }, opts.startedAt + opts.timeoutMs)
     const pollData = await readJsonResponse(pollRes)
     if (!pollRes.ok) {
       return { ok: false, error: `Upstream ${pollRes.status}: ${formatUpstreamError(pollData)}`, status: pollRes.status }
@@ -479,6 +487,9 @@ export function extractImageFromResponse(data: any): string | null {
   const dataSources = collectImageSources(data.data || [])
   if (dataSources[0]) return dataSources[0]
 
+  const resultSources = collectImageSources(data.result || data.output || data.outputs || [])
+  if (resultSources[0]) return resultSources[0]
+
   const candidateSources = collectImageSources(data.candidates?.[0]?.content?.parts || [])
   if (candidateSources[0]) return candidateSources[0]
 
@@ -539,8 +550,12 @@ function collectImageSources(content: any): string[] {
 
     if (typeof node.image_url === 'string') addSource(node.image_url)
     if (typeof node.imageUrl === 'string') addSource(node.imageUrl)
+    if (typeof node.output_url === 'string') addSource(node.output_url)
+    if (typeof node.outputUrl === 'string') addSource(node.outputUrl)
     if (node.image_url?.url) addSource(node.image_url.url)
     if (node.imageUrl?.url) addSource(node.imageUrl.url)
+    if (node.output_url?.url) addSource(node.output_url.url)
+    if (node.outputUrl?.url) addSource(node.outputUrl.url)
     if (node.url) addSource(node.url)
     if (node.b64_json || node.b64Json) addBase64(node.b64_json || node.b64Json)
     if (node.inlineData?.data) addBase64(node.inlineData.data, node.inlineData.mimeType || 'image/png')
@@ -549,29 +564,67 @@ function collectImageSources(content: any): string[] {
     if (typeof node.text === 'string') walk(node.text)
     if (node.content) walk(node.content)
     if (node.parts) walk(node.parts)
+    if (node.result) walk(node.result)
+    if (node.output) walk(node.output)
+    if (node.outputs) walk(node.outputs)
   }
 
   walk(content)
   return sources
 }
 
-async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IMAGE_FETCH_TIMEOUT_MS): Promise<string | null> {
-  if (!source) return null
-  if (source.startsWith('data:')) return isUsableImageDataUrl(source) ? source : null
-  if (!/^https?:\/\//i.test(source)) return source
+async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IMAGE_FETCH_TIMEOUT_MS): Promise<ImageSourceResult> {
+  if (!source) return { ok: false, error: 'Model returned no image.' }
+  if (source.startsWith('data:')) {
+    return isUsableImageDataUrl(source)
+      ? { ok: true, dataUrl: source }
+      : { ok: false, error: 'Model returned an invalid image data URL.' }
+  }
+  if (!/^https?:\/\//i.test(source)) {
+    return { ok: false, error: `Unsupported image source returned by model: ${source.slice(0, 120)}` }
+  }
 
   try {
     const res = await fetchWithTimeout(source, {}, timeoutMs)
-    if (!res.ok) return null
+    if (!res.ok) {
+      const detail = await readResponseText(res)
+      return { ok: false, error: `Image result fetch failed (${res.status}) from ${formatUrlForError(source)}${detail ? `: ${detail}` : ''}` }
+    }
     const contentType = res.headers.get('content-type')
     const mime = normalizeImageMime(contentType) || guessMimeFromUrl(source) || 'image/png'
-    if (contentType && !normalizeImageMime(contentType)) return null
+    if (contentType && !normalizeImageMime(contentType)) {
+      return { ok: false, error: `Image result fetch returned non-image content-type: ${contentType}` }
+    }
     const buffer = await res.arrayBuffer()
-    if (buffer.byteLength <= 0) return null
+    if (buffer.byteLength <= 0) {
+      return { ok: false, error: 'Image result fetch returned an empty body.' }
+    }
     const dataUrl = `data:${mime};base64,${arrayBufferToBase64(buffer)}`
-    return isUsableImageDataUrl(dataUrl) ? dataUrl : null
+    return isUsableImageDataUrl(dataUrl)
+      ? { ok: true, dataUrl }
+      : { ok: false, error: 'Image result fetch returned invalid image data.' }
+  } catch (error: any) {
+    const message = isTimeoutError(error)
+      ? `timed out after ${formatDuration(error.timeoutMs)}`
+      : String(error?.message || 'fetch failed')
+    return { ok: false, error: `Image result fetch failed from ${formatUrlForError(source)}: ${message}` }
+  }
+}
+
+async function readResponseText(res: Response): Promise<string> {
+  try {
+    return (await res.text()).slice(0, 300)
   } catch {
-    return null
+    return ''
+  }
+}
+
+function formatUrlForError(value: string): string {
+  try {
+    const url = new URL(value)
+    return url.host || value.slice(0, 120)
+  } catch {
+    return value.slice(0, 120)
   }
 }
 
@@ -598,25 +651,46 @@ function createTimeoutError(timeoutMs: number) {
   return error
 }
 
-async function fetchImageModelWithRetry(input: RequestInfo | URL, init: RequestInit, opts: ImageModelOptions): Promise<Response> {
+async function fetchImageModelWithRetry(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  opts: ImageModelOptions,
+  deadlineAt?: number,
+): Promise<Response> {
   const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
   const retryCount = normalizeRetryCount(opts.retryCount, DEFAULT_IMAGE_RETRY_COUNT)
   const retryDelayMs = normalizeRetryDelayMs(opts.retryDelayMs, DEFAULT_IMAGE_RETRY_DELAY_MS)
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    const attemptTimeoutMs = remainingTimeoutMs(deadlineAt, timeoutMs)
     let res: Response
     try {
-      res = await fetchWithTimeout(input, init, timeoutMs)
+      res = await fetchWithTimeout(input, init, attemptTimeoutMs)
     } catch (error) {
       if (!shouldRetryImageError(error, attempt, retryCount)) throw error
-      await sleep(retryDelayMs * (2 ** attempt))
+      await sleepWithinDeadline(retryDelayMs * (2 ** attempt), deadlineAt)
       continue
     }
     if (!shouldRetryImageResponse(res, attempt, retryCount)) return res
-    await sleep(retryDelayMs * (2 ** attempt))
+    await sleepWithinDeadline(retryDelayMs * (2 ** attempt), deadlineAt)
   }
 
-  return fetchWithTimeout(input, init, timeoutMs)
+  return fetchWithTimeout(input, init, remainingTimeoutMs(deadlineAt, timeoutMs))
+}
+
+function remainingTimeoutMs(deadlineAt: number | undefined, fallback: number): number {
+  if (!deadlineAt) return fallback
+  const remaining = deadlineAt - Date.now()
+  if (remaining <= 0) throw createTimeoutError(fallback)
+  return Math.min(fallback, Math.max(1, remaining))
+}
+
+async function sleepWithinDeadline(ms: number, deadlineAt?: number): Promise<void> {
+  if (!deadlineAt) return sleep(ms)
+  const remaining = deadlineAt - Date.now()
+  if (remaining <= 0) throw createTimeoutError(ms)
+  await sleep(Math.min(ms, remaining))
+  if (Date.now() >= deadlineAt) throw createTimeoutError(ms)
 }
 
 function shouldRetryImageResponse(res: Response, attempt: number, retryCount: number): boolean {
