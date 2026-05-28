@@ -502,7 +502,7 @@ Cloudflare Pages Functions
 
 固定视觉模型：
 
-- `gemini-3-flash-preview`
+- `gemini-3.5-flash`
 
 用途：
 

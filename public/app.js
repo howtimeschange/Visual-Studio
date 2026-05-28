@@ -2273,6 +2273,36 @@ function serializeAiMessage(msg = {}) {
     imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
     imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
     aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+    images: Array.isArray(msg.images) ? msg.images.map(serializeAiMessageImage).filter(Boolean).slice(0, 12) : [],
+    workflow: Array.isArray(msg.workflow) ? msg.workflow.map(serializeAiWorkflowItem).filter(Boolean).slice(0, 12) : [],
+  }
+}
+
+function serializeAiMessageImage(image = {}) {
+  const assetId = typeof image.assetId === 'string' ? image.assetId : ''
+  const dataUrl = shouldInlineHistoryDataUrl(image.dataUrl) ? image.dataUrl : ''
+  if (!assetId && !dataUrl) return null
+  return {
+    assetId,
+    dataUrl,
+    name: typeof image.name === 'string' ? image.name : '',
+    mime: typeof image.mime === 'string' ? image.mime : '',
+    prompt: typeof image.prompt === 'string' ? image.prompt : '',
+    actionId: typeof image.actionId === 'string' ? image.actionId : '',
+    aspectRatio: normalizeAspectRatio(image.aspectRatio || ''),
+  }
+}
+
+function serializeAiWorkflowItem(item = {}) {
+  const title = typeof item.title === 'string' ? item.title : ''
+  const prompt = typeof item.prompt === 'string' ? item.prompt : ''
+  if (!title && !prompt) return null
+  return {
+    id: typeof item.id === 'string' ? item.id : '',
+    title,
+    prompt,
+    status: ['queued', 'running', 'completed', 'failed'].includes(item.status) ? item.status : 'queued',
+    error: typeof item.error === 'string' ? item.error : '',
   }
 }
 
@@ -2294,6 +2324,17 @@ function sanitizeAiMessages(value) {
     .map((msg) => {
       const role = msg?.role === 'user' || msg?.role === 'assistant' ? msg.role : ''
       if (!role) return null
+      const images = sanitizeAiMessageImages(msg.images)
+      if (!images.length && (msg.imageAssetId || msg.imageDataUrl)) {
+        const legacy = serializeAiMessageImage({
+          assetId: msg.imageAssetId,
+          dataUrl: msg.imageDataUrl,
+          name: msg.imageName,
+          mime: msg.imageMime,
+          aspectRatio: msg.aspectRatio,
+        })
+        if (legacy) images.push(legacy)
+      }
       return {
         id: typeof msg.id === 'string' ? msg.id : crypto.randomUUID(),
         role,
@@ -2305,6 +2346,8 @@ function sanitizeAiMessages(value) {
         imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
         imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
         aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+        images,
+        workflow: sanitizeAiWorkflowItems(msg.workflow),
         loading: false,
         loadingText: '',
         streaming: false,
@@ -2312,6 +2355,22 @@ function sanitizeAiMessages(value) {
     })
     .filter(Boolean)
     .slice(-AI_HISTORY_LIMIT)
+}
+
+function sanitizeAiMessageImages(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((image) => serializeAiMessageImage(image || {}))
+    .filter(Boolean)
+    .slice(0, 12)
+}
+
+function sanitizeAiWorkflowItems(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => serializeAiWorkflowItem(item || {}))
+    .filter(Boolean)
+    .slice(0, 12)
 }
 
 function sanitizeAiMessageRefs(value) {
@@ -3779,11 +3838,11 @@ function addGeneratorToCanvas(x, y, refImageId) {
   return el
 }
 
-function addGeneratingPlaceholderToCanvas({ prompt = '', aspectRatio = state.generate.genRatio, resolution = state.generate.genResolution } = {}) {
+function addGeneratingPlaceholderToCanvas({ prompt = '', aspectRatio = state.generate.genRatio, resolution = state.generate.genResolution, x = null, y = null } = {}) {
   markCanvasGuideSeen()
   const size = getCanvasImageSize(aspectRatio)
-  const cx = (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - size.width / 2
-  const cy = (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - size.height / 2
+  const cx = typeof x === 'number' ? x : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - size.width / 2
+  const cy = typeof y === 'number' ? y : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - size.height / 2
   const el = {
     id: crypto.randomUUID(),
     type: 'image-generator',
@@ -5228,6 +5287,7 @@ function bindAiSidebar() {
     savePrefs()
   })
 
+
   // 上传参考图
   dom.gAiUpload.addEventListener('click', () => dom.gAiFileInput.click())
   dom.gAiFileInput.addEventListener('change', async () => {
@@ -5303,7 +5363,6 @@ function renderAiMessages() {
   dom.gAiMessages.replaceChildren(...state.generate.aiMessages.map((msg) => {
     const node = document.createElement('div')
     node.className = `msg ${msg.role}`
-
     // 显示用户消息中附带的参考图
     if (msg.role === 'user' && msg.refs?.length) {
       const refsWrap = document.createElement('div')
@@ -5354,18 +5413,44 @@ function renderAiMessages() {
       }
       node.append(steps)
     }
-    if (msg.imageDataUrl) {
+    if (Array.isArray(msg.workflow) && msg.workflow.length) {
+      const workflow = document.createElement('ul')
+      workflow.className = 'msg-steps'
+      for (const item of msg.workflow.slice(0, 8)) {
+        const row = document.createElement('li')
+        const status = ({
+          queued: '排队',
+          running: '生成中',
+          completed: '完成',
+          failed: '失败',
+        })[item.status] || '待处理'
+        row.textContent = `${status} · ${item.title || item.prompt || item.id || '图片任务'}`
+        workflow.append(row)
+      }
+      node.append(workflow)
+    }
+    const messageImages = Array.isArray(msg.images) && msg.images.length
+      ? msg.images
+      : (msg.imageDataUrl ? [{
+          dataUrl: msg.imageDataUrl,
+          name: msg.imageName || '生成结果',
+          prompt: msg.generatingPrompt || '',
+        }] : [])
+    if (messageImages.length) {
       const imgWrap = document.createElement('div')
       imgWrap.className = 'msg-images'
-      const img = document.createElement('img')
-      img.className = 'msg-img'
-      img.src = msg.imageDataUrl
-      img.alt = '生成结果'
-      img.style.maxWidth = '200px'
-      img.style.borderRadius = '8px'
-      img.style.cursor = 'pointer'
-      img.addEventListener('click', () => openLightbox({ src: msg.imageDataUrl, caption: '生成结果' }))
-      imgWrap.append(img)
+      for (const image of messageImages) {
+        if (!image?.dataUrl) continue
+        const img = document.createElement('img')
+        img.className = 'msg-img'
+        img.src = image.dataUrl
+        img.alt = image.name || '生成结果'
+        img.style.maxWidth = '200px'
+        img.style.borderRadius = '8px'
+        img.style.cursor = 'pointer'
+        img.addEventListener('click', () => openLightbox({ src: image.dataUrl, caption: image.name || '生成结果' }))
+        imgWrap.append(img)
+      }
       node.append(imgWrap)
     }
     return node
@@ -5495,6 +5580,73 @@ function getCanvasAgentContext() {
   }
 }
 
+function normalizeCanvasAgentActions(agentData, requestText, aspectRatio, resolution) {
+  const rawActions = Array.isArray(agentData?.actions)
+    ? agentData.actions
+    : Array.isArray(agentData?.tasks)
+      ? agentData.tasks
+      : []
+  const actions = rawActions
+    .map((action, index) => normalizeCanvasAgentAction(action, index, aspectRatio, resolution))
+    .filter(Boolean)
+    .slice(0, 8)
+  if (actions.length) return actions
+  const prompt = String(agentData?.prompt || requestText || '').trim()
+  return prompt
+    ? [normalizeCanvasAgentAction({ type: 'generate_image', title: '生成图片', prompt, aspectRatio, resolution }, 0, aspectRatio, resolution)]
+    : []
+}
+
+function normalizeCanvasAgentAction(action, index, fallbackAspectRatio, fallbackResolution) {
+  const type = action?.type === 'generate_image' || action?.tool === 'generate_image' ? 'generate_image' : ''
+  const prompt = String(action?.prompt || action?.input || '').trim()
+  if (!type || !prompt) return null
+  const aspectRatio = normalizeAspectRatio(action?.aspectRatio || action?.ratio || fallbackAspectRatio)
+  const resolution = normalizeCanvasResolution(action?.resolution || fallbackResolution)
+  const id = String(action?.id || `image_${index + 1}`).replace(/[^\w-]/g, '_').slice(0, 48) || `image_${index + 1}`
+  const title = String(action?.title || action?.name || `图片 ${index + 1}`).replace(/\s+/g, ' ').trim().slice(0, 80) || `图片 ${index + 1}`
+  return {
+    id,
+    type,
+    title,
+    prompt,
+    aspectRatio,
+    resolution,
+  }
+}
+
+function getCanvasWorkflowPlacement(index, total, aspectRatio) {
+  const size = getCanvasImageSize(aspectRatio)
+  const maxColumns = 3
+  const columns = Math.max(1, Math.min(maxColumns, Number(total) || 1))
+  const gap = 36
+  const col = index % columns
+  const row = Math.floor(index / columns)
+  const centerX = (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale
+  const centerY = (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale
+  const totalWidth = columns * size.width + (columns - 1) * gap
+  return {
+    x: centerX - totalWidth / 2 + col * (size.width + gap),
+    y: centerY - size.height / 2 + row * (size.height + gap),
+  }
+}
+
+async function storeCanvasGeneratedResult(data, fallbackName, source) {
+  const storedResult = data.resultAsset
+    ? {
+        assetId: data.resultAsset.id,
+        mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
+        width: data.resultAsset.width || data.width || 0,
+        height: data.resultAsset.height || data.height || 0,
+      }
+    : await uploadCanvasImageAsset(data.resultDataUrl, fallbackName, {
+        kind: 'result',
+        source,
+      })
+  const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
+  return { storedResult, imageSize }
+}
+
 async function sendCanvasAiMessage() {
   if (state.generate.aiRunning) return
   const text = dom.gInput.value.trim()
@@ -5508,7 +5660,7 @@ async function sendCanvasAiMessage() {
   const aiModelId = dom.gAiModel.value || state.generate.genModel
   const aiAspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
   const aiResolution = normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution)
-  let canvasPendingEl = null
+  const canvasPendingEls = []
 
   const userMsg = {
     id: crypto.randomUUID(),
@@ -5584,73 +5736,108 @@ async function sendCanvasAiMessage() {
       return
     }
 
-    const generationPrompt = agentData.prompt || requestText
-    setAiMessageLoading(assistantMsg, '正在生成图片并放到画布')
-    canvasPendingEl = addGeneratingPlaceholderToCanvas({
-      prompt: generationPrompt,
-      aspectRatio: aiAspectRatio,
-      resolution: aiResolution,
-    })
-    renderCanvas()
-
-    const data = await requestCanvasGenerate({
-      sessionId: state.runtime.sessionId || undefined,
-      modelId: aiModelId,
-      prompt: generationPrompt,
-      referenceImages: refImages,
-      aspectRatio: aiAspectRatio,
-      resolution: aiResolution,
-      useDesignAgent: false,
-      clientKeys: { ...state.keys },
-    }, {
-      onStatus: (message) => setAiMessageLoading(assistantMsg, message),
-    })
-
-    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-    const storedResult = data.resultAsset
-      ? {
-          assetId: data.resultAsset.id,
-          mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
-          width: data.resultAsset.width || data.width || 0,
-          height: data.resultAsset.height || data.height || 0,
-        }
-      : await uploadCanvasImageAsset(data.resultDataUrl, `ai-${Date.now()}.png`, {
-        kind: 'result',
-        source: 'canvas_ai_sidebar',
-      })
-    const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
-
-    assistantMsg.imageDataUrl = data.resultDataUrl
-    assistantMsg.imageAssetId = storedResult.assetId
-    assistantMsg.imageMime = storedResult.mime
-    assistantMsg.imageName = `ai-${Date.now()}`
-    assistantMsg.aspectRatio = aiAspectRatio
-
-    if (canvasPendingEl && state.generate.elements.includes(canvasPendingEl) && canvasPendingEl.type === 'image-generator') {
-      replaceCanvasElementWithImage(canvasPendingEl, data.resultDataUrl, assistantMsg.imageName, {
-        assetId: storedResult.assetId,
-        mime: storedResult.mime,
-        aspectRatio: aiAspectRatio,
-        resolution: aiResolution,
-        prompt: generationPrompt,
-        width: imageSize?.width || storedResult.width,
-        height: imageSize?.height || storedResult.height,
-      })
-    } else {
-      addImageToCanvas(data.resultDataUrl, assistantMsg.imageName, undefined, undefined, {
-        assetId: storedResult.assetId,
-        mime: storedResult.mime,
-        aspectRatio: aiAspectRatio,
-        resolution: aiResolution,
-        prompt: generationPrompt,
-        width: imageSize?.width || storedResult.width,
-        height: imageSize?.height || storedResult.height,
-      })
+    const actions = normalizeCanvasAgentActions(agentData, requestText, aiAspectRatio, aiResolution)
+    if (!actions.length) {
+      saveRuntimeState()
+      return
     }
+    assistantMsg.workflow = actions.map((action) => ({
+      id: action.id,
+      title: action.title,
+      prompt: action.prompt,
+      status: 'queued',
+      error: '',
+    }))
+    assistantMsg.images = []
+    renderAiMessages()
+
+    let completedCount = 0
+    for (const [index, action] of actions.entries()) {
+      const workflowItem = assistantMsg.workflow[index]
+      if (workflowItem) workflowItem.status = 'running'
+      setAiMessageLoading(assistantMsg, `正在生成 ${index + 1}/${actions.length}：${action.title}`)
+      const placement = getCanvasWorkflowPlacement(index, actions.length, action.aspectRatio)
+      const pendingEl = addGeneratingPlaceholderToCanvas({
+        prompt: action.prompt,
+        aspectRatio: action.aspectRatio,
+        resolution: action.resolution,
+        x: placement.x,
+        y: placement.y,
+      })
+      canvasPendingEls.push(pendingEl)
+      renderCanvas()
+
+      try {
+        const data = await requestCanvasGenerate({
+          sessionId: state.runtime.sessionId || undefined,
+          modelId: aiModelId,
+          prompt: action.prompt,
+          referenceImages: refImages,
+          aspectRatio: action.aspectRatio,
+          resolution: action.resolution,
+          useDesignAgent: false,
+          clientKeys: { ...state.keys },
+        }, {
+          onStatus: (message) => setAiMessageLoading(assistantMsg, `${index + 1}/${actions.length} ${message}`),
+        })
+
+        state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+        const resultDataUrl = data.resultDataUrl
+        const imageName = action.title || `ai-${Date.now()}-${index + 1}`
+        const { storedResult, imageSize } = await storeCanvasGeneratedResult(
+          data,
+          `ai-${Date.now()}-${index + 1}.png`,
+          'canvas_ai_sidebar',
+        )
+        assistantMsg.images.push({
+          dataUrl: resultDataUrl,
+          assetId: storedResult.assetId,
+          mime: storedResult.mime,
+          name: imageName,
+          prompt: action.prompt,
+          actionId: action.id,
+          aspectRatio: action.aspectRatio,
+        })
+        if (!assistantMsg.imageDataUrl) {
+          assistantMsg.imageDataUrl = resultDataUrl
+          assistantMsg.imageAssetId = storedResult.assetId
+          assistantMsg.imageMime = storedResult.mime
+          assistantMsg.imageName = imageName
+          assistantMsg.aspectRatio = action.aspectRatio
+        }
+        replaceCanvasElementWithImage(pendingEl, resultDataUrl, imageName, {
+          assetId: storedResult.assetId,
+          mime: storedResult.mime,
+          aspectRatio: action.aspectRatio,
+          resolution: action.resolution,
+          prompt: action.prompt,
+          width: imageSize?.width || storedResult.width,
+          height: imageSize?.height || storedResult.height,
+        })
+        if (workflowItem) workflowItem.status = 'completed'
+        completedCount += 1
+      } catch (error) {
+        const itemError = trimError(error)
+        pendingEl.generatingStatus = ''
+        pendingEl.generatingError = `处理失败：${itemError}`
+        if (workflowItem) {
+          workflowItem.status = 'failed'
+          workflowItem.error = itemError
+        }
+      }
+      renderCanvas()
+      renderAiMessages()
+      saveRuntimeState()
+    }
+
     state.generate.aiRefs = []
     renderAiRefList()
     renderCanvas()
-    await streamAiMessageContent(assistantMsg, `${replyText}\n\n图片已添加到画布。`, { fromCurrent: true })
+    const failedCount = actions.length - completedCount
+    const finalSummary = failedCount
+      ? `${replyText}\n\n已完成 ${completedCount}/${actions.length} 张图片，${failedCount} 张生成失败。`
+      : `${replyText}\n\n已完成 ${completedCount}/${actions.length} 张图片，并已添加到画布。`
+    await streamAiMessageContent(assistantMsg, finalSummary, { fromCurrent: true })
     saveRuntimeState()
   } catch (error) {
     const message = trimError(error)
@@ -5658,11 +5845,13 @@ async function sendCanvasAiMessage() {
     assistantMsg.streaming = false
     assistantMsg.loadingText = ''
     assistantMsg.content = `处理失败：${message}`
-    if (canvasPendingEl && state.generate.elements.includes(canvasPendingEl) && canvasPendingEl.type === 'image-generator') {
-      canvasPendingEl.generatingStatus = ''
-      canvasPendingEl.generatingError = `处理失败：${message}`
-      renderCanvas()
-      saveRuntimeState()
+    for (const pendingEl of canvasPendingEls) {
+      if (pendingEl && state.generate.elements.includes(pendingEl) && pendingEl.type === 'image-generator') {
+        pendingEl.generatingStatus = ''
+        pendingEl.generatingError = `处理失败：${message}`
+        renderCanvas()
+        saveRuntimeState()
+      }
     }
     saveRuntimeState()
   } finally {
@@ -8359,6 +8548,16 @@ async function hydrateAiMessages(messages) {
         mime: msg.imageMime || 'image/png',
       })
     }
+    for (const image of msg.images || []) {
+      if (image.assetId && !image.dataUrl) {
+        assetRefs.push({
+          id: image.assetId,
+          assetId: image.assetId,
+          name: image.name || image.assetId,
+          mime: image.mime || 'image/png',
+        })
+      }
+    }
     for (const ref of msg.refs || []) {
       if (ref.assetId && !ref.dataUrl) {
         assetRefs.push({
@@ -8385,6 +8584,13 @@ async function hydrateAiMessages(messages) {
         next.imageName = next.imageName || image.name
       }
     }
+    next.images = (next.images || []).map((image) => {
+      if (!image.assetId || image.dataUrl) return image
+      const hydratedImage = byAssetId.get(image.assetId)
+      return hydratedImage?.dataUrl
+        ? { ...image, dataUrl: hydratedImage.dataUrl, mime: hydratedImage.mime || image.mime, name: image.name || hydratedImage.name }
+        : image
+    })
     next.refs = (next.refs || []).map((ref) => {
       if (!ref.assetId || ref.dataUrl) return ref
       const image = byAssetId.get(ref.assetId)

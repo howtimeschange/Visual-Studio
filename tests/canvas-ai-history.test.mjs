@@ -112,8 +112,12 @@ async function createHistoryHarness() {
     'clearCurrentAiSession',
     'renderAiSessionControls',
     'serializeAiMessage',
+    'serializeAiMessageImage',
+    'serializeAiWorkflowItem',
     'serializeAiMessageRef',
     'sanitizeAiMessages',
+    'sanitizeAiMessageImages',
+    'sanitizeAiWorkflowItems',
     'sanitizeAiMessageRefs',
     'shouldInlineHistoryDataUrl',
   ]
@@ -221,4 +225,46 @@ test('rendering AI session controls does not discard newly queued messages', asy
     harness.state.generate.aiMessages.map((msg) => msg.content),
     ['刚发送的需求', ''],
   )
+})
+
+test('assistant messages preserve multiple generated images', async () => {
+  const harness = await createHistoryHarness()
+
+  const saved = harness.serializeAiMessage({
+    id: 'assistant-1',
+    role: 'assistant',
+    content: '完成 2 张',
+    images: [
+      { assetId: 'asset-1', name: '图 1', mime: 'image/png', prompt: 'p1', actionId: 'image_1', aspectRatio: '1:1' },
+      { dataUrl: 'data:image/png;base64,abc', name: '图 2', mime: 'image/png', prompt: 'p2', actionId: 'image_2', aspectRatio: '1:1' },
+    ],
+    workflow: [
+      { id: 'image_1', title: '图 1', prompt: 'p1', status: 'completed' },
+      { id: 'image_2', title: '图 2', prompt: 'p2', status: 'completed' },
+    ],
+  })
+
+  assert.equal(saved.images.length, 2)
+  assert.equal(saved.workflow.length, 2)
+  const sanitized = harness.sanitizeAiMessages([saved])
+  assert.equal(sanitized[0].images.length, 2)
+  assert.equal(sanitized[0].images[0].prompt, 'p1')
+  assert.equal(sanitized[0].workflow[1].status, 'completed')
+})
+
+test('legacy assistant image fields migrate into images array', async () => {
+  const harness = await createHistoryHarness()
+
+  const sanitized = harness.sanitizeAiMessages([{
+    id: 'assistant-legacy',
+    role: 'assistant',
+    content: '旧图',
+    imageAssetId: 'asset-legacy',
+    imageName: 'legacy.png',
+    imageMime: 'image/png',
+    aspectRatio: '1:1',
+  }])
+
+  assert.equal(sanitized[0].images.length, 1)
+  assert.equal(sanitized[0].images[0].assetId, 'asset-legacy')
 })

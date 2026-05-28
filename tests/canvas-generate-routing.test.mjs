@@ -49,12 +49,24 @@ async function createCanvasGenerateHarness() {
       return { jobId: 'job_canvas_generate', sessionId: 'session_after_submit' }
     },
     waitForCanvasGenerateJob: async (jobId, options) => ({ jobId, options }),
-    normalizeCanvasResolution: (value) => String(value || '').trim().toLowerCase(),
+    normalizeAspectRatio: (value, fallback = '1:1') => (
+      ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(String(value || '').trim())
+        ? String(value).trim()
+        : fallback
+    ),
+    normalizeCanvasResolution: (value, fallback = '1k') => (
+      ['1k', '2k', '4k'].includes(String(value || '').trim().toLowerCase())
+        ? String(value).trim().toLowerCase()
+        : fallback
+    ),
+    clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
     console,
   }
   const functionNames = [
     'shouldUseAsyncCanvasGenerate',
     'requestCanvasGenerate',
+    'normalizeCanvasAgentActions',
+    'normalizeCanvasAgentAction',
   ]
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
   vm.createContext(context)
@@ -84,4 +96,27 @@ test('canvas generation submits all image models through the job endpoint', asyn
       '/api/jobs/generate-direct',
     ],
   )
+})
+
+test('canvas agent action normalizer keeps multiple image prompts separate', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  const actions = harness.normalizeCanvasAgentActions({
+    actions: [
+      { type: 'generate_image', title: '家具城', prompt: '成龙在家具城打架' },
+      { type: 'generate_image', title: '印度街舞', prompt: '成龙在印度跳街舞' },
+    ],
+  }, 'fallback', '1:1', '1k')
+
+  assert.deepEqual(actions.map((action) => action.prompt), ['成龙在家具城打架', '成龙在印度跳街舞'])
+  assert.deepEqual(actions.map((action) => action.title), ['家具城', '印度街舞'])
+})
+
+test('canvas agent action normalizer falls back to the raw user prompt only', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  const actions = harness.normalizeCanvasAgentActions({}, '黄仁勋在北京街头吃炸酱面', '1:1', '1k')
+
+  assert.equal(actions.length, 1)
+  assert.equal(actions[0].prompt, '黄仁勋在北京街头吃炸酱面')
 })
