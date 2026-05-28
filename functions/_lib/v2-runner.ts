@@ -40,7 +40,7 @@ import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
 import { executeTranslate, prepareTranslatePlan } from '../api/translate'
 import { executeOutfitSwap, prepareOutfitAnalysis } from '../api/outfit-swap'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
-import { executeDirectGenerate, normalizeDirectGenerateRequest } from '../api/generate-direct'
+import { executeDirectGenerate, executeDirectGenerateTaskStep, normalizeDirectGenerateRequest } from '../api/generate-direct'
 
 type WaitUntil = (promise: Promise<unknown>) => void
 
@@ -51,6 +51,7 @@ const DEFAULT_TRANSLATE_MODEL_ID = 'gpt-image-2'
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
+const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -79,6 +80,12 @@ function clampMs(value: unknown, fallback: number): number {
   const numeric = Math.floor(Number(value))
   if (!Number.isFinite(numeric) || numeric <= 0) return fallback
   return Math.min(24 * 60 * 60_000, Math.max(60_000, numeric))
+}
+
+function clampNonNegativeInt(value: unknown, fallback: number, max = 100): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback
+  return Math.min(max, numeric)
 }
 
 function cleanInstruction(value: unknown): string {
@@ -1150,7 +1157,50 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       ...initialJob.configJson,
       referenceImages: initialJob.configJson.referenceEntries,
     })
-    const { result, attempts } = await runWithAutoRetry(() => executeDirectGenerate(env, request, clientKeys))
+    const maxPollAttempts = clampNonNegativeInt(
+      env.VS_GENERATE_TASK_MAX_POLLS_PER_RUN,
+      DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN,
+      20,
+    )
+    const existingTask = claimedItem.outputJson?.imageTask
+    const result = await executeDirectGenerateTaskStep(env, request, clientKeys, {
+      existingTask,
+      finalPrompt: String(claimedItem.outputJson?.finalPrompt || ''),
+      maxPollAttempts,
+    })
+    if (result.pending) {
+      await updateJobItem(env, jobId, claimedItem.id, {
+        status: 'queued',
+        outputJson: {
+          ...claimedItem.outputJson,
+          imageTask: result.task,
+          imageTaskPollTarget: result.pollTarget,
+          imageTaskPollUrl: result.pollUrl,
+          imageTaskStatus: result.taskStatus,
+          nextPollAfterMs: result.nextPollAfterMs,
+          finalPrompt: result.finalPrompt,
+        },
+        errorCode: null,
+        errorMessage: null,
+        startedAt: null,
+        finishedAt: null,
+      })
+      await updateJob(env, jobId, {
+        status: 'queued',
+        summaryJson: {
+          ...initialJob.summaryJson,
+          imageTaskStatus: result.taskStatus,
+          nextPollAfterMs: result.nextPollAfterMs,
+        },
+      })
+      await publishEvent(env, 'job', jobId, 'status', {
+        status: 'queued',
+        type: initialJob.type,
+        imageTaskStatus: result.taskStatus,
+      })
+      await scheduleJobExecution(env, { ...initialJob, status: 'queued' }, undefined, 'recover')
+      return
+    }
     const resultAsset = await createAsset(env, {
       sessionId: initialJob.sessionId,
       userId: initialJob.userId || null,
@@ -1165,10 +1215,11 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
 
     await updateJobItem(env, jobId, claimedItem.id, {
       status: 'completed',
-      attemptCount: attempts,
       outputJson: {
+        ...claimedItem.outputJson,
         resultAssetId: resultAsset.id,
         finalPrompt: result.finalPrompt,
+        imageTaskStatus: 'succeeded',
       },
       finishedAt: nowIso(),
     })

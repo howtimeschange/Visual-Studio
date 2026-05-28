@@ -479,6 +479,91 @@ test('submitGenerateDirectJob queues 4k canvas generation and runner stores the 
   }
 })
 
+test('runGenerateBatchJob resumes a pending image task across queue invocations', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_GENERATE_TASK_MAX_POLLS_PER_RUN: '1',
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_resume_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_resume_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (calls.filter((call) => String(call.input).includes('task_resume_1')).length === 1) {
+      return new Response(JSON.stringify({
+        id: 'task_resume_1',
+        status: 'running',
+        poll_url: 'https://relay.example/v1/images/tasks/task_resume_1',
+        poll_after: 0,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_resume_1',
+      status: 'succeeded',
+      data: [{ b64_json: 'cmVzdW1lZC1pbWFnZQ==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const submitted = await mod.submitGenerateDirectJob(env, {
+      sessionId: 'session_canvas_direct_resume',
+      modelId: 'gpt-image-2',
+      prompt: 'make a long running campaign poster',
+      aspectRatio: '16:9',
+      resolution: '4k',
+      clientKeys: { gptImageApiKey: 'job-gpt-image-key' },
+    })
+
+    assert.equal(sent.length, 1)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(sent.length, 2)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,cmVzdW1lZC1pbWFnZQ==',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runQueuedJob claims a generate batch item once under duplicate delivery', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch

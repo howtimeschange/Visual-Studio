@@ -19,8 +19,10 @@ export interface Env {
   VS_IMAGE_REQUEST_TIMEOUT_MS?: string
   VS_TEXT_REQUEST_TIMEOUT_MS?: string
   VS_IMAGE_FETCH_TIMEOUT_MS?: string
+  VS_IMAGE_TASK_POLL_INTERVAL_MS?: string
   VS_IMAGE_RETRY_COUNT?: string
   VS_IMAGE_RETRY_DELAY_MS?: string
+  VS_GENERATE_TASK_MAX_POLLS_PER_RUN?: string
   VS_DB?: D1Database
   VS_INPUTS_BUCKET?: R2Bucket
   VS_RESULTS_BUCKET?: R2Bucket
@@ -35,7 +37,7 @@ export const VISION_MODEL = 'gemini-3-flash-preview'
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 600_000
 const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = 90_000
 const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 60_000
-const DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS = 5_000
+const DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS = 15_000
 const DEFAULT_IMAGE_TASK_HTTP_TIMEOUT_MS = 30_000
 const DEFAULT_IMAGE_RETRY_COUNT = 2
 const DEFAULT_IMAGE_RETRY_DELAY_MS = 1_000
@@ -132,6 +134,7 @@ export function resolveImageModelOptions(modelId: string, env: Env, clientKeys: 
       : '',
     timeoutMs: normalizeTimeoutMs(env.VS_IMAGE_REQUEST_TIMEOUT_MS, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS),
     imageFetchTimeoutMs: normalizeTimeoutMs(env.VS_IMAGE_FETCH_TIMEOUT_MS, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
+    pollIntervalMs: normalizePollIntervalMs(env.VS_IMAGE_TASK_POLL_INTERVAL_MS, DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS),
     retryCount: normalizeRetryCount(env.VS_IMAGE_RETRY_COUNT, DEFAULT_IMAGE_RETRY_COUNT),
     retryDelayMs: normalizeRetryDelayMs(env.VS_IMAGE_RETRY_DELAY_MS, DEFAULT_IMAGE_RETRY_DELAY_MS),
   }
@@ -152,11 +155,19 @@ type ImageModelOptions = {
   quality?: string
   retryCount?: number
   retryDelayMs?: number
+  pollIntervalMs?: number
+  maxPollAttempts?: number
+  existingTask?: any
 }
 
 type ImageSourceResult =
   | { ok: true; dataUrl: string }
   | { ok: false; error: string }
+
+export type ImageTaskStepResult =
+  | { ok: true; pending?: false; dataUrl: string; task: any }
+  | { ok: false; pending: true; task: any; pollTarget: string; pollUrl: string; taskStatus: string; nextPollAfterMs: number }
+  | { ok: false; pending?: false; error: string; status: number }
 
 export async function callImageModel(
   baseUrl: string,
@@ -177,6 +188,20 @@ async function callAsyncImageTaskModel(
   prompt: string,
   opts: ImageModelOptions = {},
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string; status: number }> {
+  const result = await callImageModelTaskStep(baseUrl, apiKey, modelName, images, prompt, opts)
+  if (result.ok) return { ok: true, dataUrl: result.dataUrl }
+  if (result.pending) return { ok: false, error: 'Image task is still running.', status: 202 }
+  return result
+}
+
+export async function callImageModelTaskStep(
+  baseUrl: string,
+  apiKey: string,
+  modelName: string,
+  images: ImagePart[],
+  prompt: string,
+  opts: ImageModelOptions = {},
+): Promise<ImageTaskStepResult> {
   const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
   const startedAt = Date.now()
   const taskHttpTimeoutMs = Math.min(timeoutMs, DEFAULT_IMAGE_TASK_HTTP_TIMEOUT_MS)
@@ -184,13 +209,16 @@ async function callAsyncImageTaskModel(
 
   try {
     const deadlineAt = startedAt + timeoutMs
-    const task = await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs, deadlineAt)
+    const task = opts.existingTask
+      ? { ok: true as const, data: opts.existingTask }
+      : await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs, deadlineAt)
     if (!task.ok) return task
 
     const finalTask = await waitForAsyncImageTask(baseUrl, apiKey, task.data, opts, {
       timeoutMs,
       taskHttpTimeoutMs,
       startedAt,
+      maxPollAttempts: normalizeMaxPollAttempts(opts.maxPollAttempts),
     })
     if (!finalTask.ok) return finalTask
 
@@ -206,7 +234,7 @@ async function callAsyncImageTaskModel(
     if (!dataUrl.ok) {
       return { ok: false, error: dataUrl.error, status: 502 }
     }
-    return { ok: true, dataUrl: dataUrl.dataUrl }
+    return { ok: true, dataUrl: dataUrl.dataUrl, task: finalTask.data }
   } catch (e: any) {
     if (isTimeoutError(e)) {
       return { ok: false, error: `Upstream image task timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
@@ -276,9 +304,10 @@ async function waitForAsyncImageTask(
   apiKey: string,
   initialTask: any,
   requestOpts: ImageModelOptions,
-  opts: { timeoutMs: number; taskHttpTimeoutMs: number; startedAt: number },
-): Promise<{ ok: true; data: any } | { ok: false; error: string; status: number }> {
+  opts: { timeoutMs: number; taskHttpTimeoutMs: number; startedAt: number; maxPollAttempts: number },
+): Promise<{ ok: true; data: any } | { ok: false; error: string; status: number } | Extract<ImageTaskStepResult, { pending: true }>> {
   let task = initialTask
+  let pollAttempts = 0
 
   for (;;) {
     const status = normalizeTaskStatus(task?.status)
@@ -294,14 +323,30 @@ async function waitForAsyncImageTask(
       return { ok: false, error: 'Image task response did not include poll_url or task_id.', status: 502 }
     }
 
+    const pollUrl = buildImageTaskPollUrl(baseUrl, pollTarget)
+    const nextPollAfterMs = normalizePollAfterMs(
+      task?.poll_after ?? task?.pollAfter,
+      requestOpts.pollIntervalMs,
+    )
+    if (pollAttempts >= opts.maxPollAttempts) {
+      return {
+        ok: false,
+        pending: true,
+        task,
+        pollTarget,
+        pollUrl,
+        taskStatus: status || 'queued',
+        nextPollAfterMs,
+      }
+    }
+
     const elapsedMs = Date.now() - opts.startedAt
     const remainingMs = opts.timeoutMs - elapsedMs
     if (remainingMs <= 0) throw createTimeoutError(opts.timeoutMs)
 
-    await sleep(Math.min(normalizePollAfterMs(task?.poll_after ?? task?.pollAfter), remainingMs))
+    await sleep(Math.min(nextPollAfterMs, remainingMs))
     if (Date.now() - opts.startedAt >= opts.timeoutMs) throw createTimeoutError(opts.timeoutMs)
 
-    const pollUrl = buildImageTaskPollUrl(baseUrl, pollTarget)
     const pollRes = await fetchImageModelWithRetry(pollUrl, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -314,6 +359,7 @@ async function waitForAsyncImageTask(
       return { ok: false, error: `Upstream ${pollRes.status}: ${formatUpstreamError(pollData)}`, status: pollRes.status }
     }
     task = pollData
+    pollAttempts += 1
   }
 }
 
@@ -326,9 +372,9 @@ function normalizeTaskStatus(value: unknown): string {
   return String(value || '').trim().toLowerCase()
 }
 
-function normalizePollAfterMs(value: unknown): number {
+function normalizePollAfterMs(value: unknown, fallback = DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS): number {
   const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric < 0) return DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS
+  if (!Number.isFinite(numeric) || numeric < 0) return normalizePollIntervalMs(fallback, DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS)
   if (numeric === 0) return 0
   return Math.max(1_000, Math.min(60_000, numeric * 1_000))
 }
@@ -642,6 +688,19 @@ function normalizeTimeoutMs(value: unknown, fallback: number): number {
   const numeric = Math.floor(Number(value))
   if (!Number.isFinite(numeric) || numeric <= 0) return fallback
   return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, numeric))
+}
+
+function normalizePollIntervalMs(value: unknown, fallback: number): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback
+  return Math.min(60_000, Math.max(0, numeric))
+}
+
+function normalizeMaxPollAttempts(value: unknown): number {
+  if (value === undefined || value === null) return Number.POSITIVE_INFINITY
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric)) return Number.POSITIVE_INFINITY
+  return Math.max(0, numeric)
 }
 
 function createTimeoutError(timeoutMs: number) {

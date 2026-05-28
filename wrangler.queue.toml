@@ -20,20 +20,32 @@ bucket_name = "visual-studio-results"
 binding = "VS_TEMP_BUCKET"
 bucket_name = "visual-studio-temp"
 
+[[queues.producers]]
+binding = "VS_TRANSLATE_JOBS_QUEUE"
+queue = "visual-studio-translate-jobs"
+
+[[queues.producers]]
+binding = "VS_OUTFIT_JOBS_QUEUE"
+queue = "visual-studio-outfit-jobs"
+
+[[queues.producers]]
+binding = "VS_JOBS_QUEUE"
+queue = "visual-studio-jobs"
+
 [[queues.consumers]]
 queue = "visual-studio-translate-jobs"
-max_batch_size = 4
+max_batch_size = 1
 max_batch_timeout = 10
 max_retries = 3
 
 [[queues.consumers]]
 queue = "visual-studio-outfit-jobs"
-max_batch_size = 4
+max_batch_size = 1
 max_batch_timeout = 10
 max_retries = 3
 
 [[queues.consumers]]
 queue = "visual-studio-jobs"
-max_batch_size = 2
+max_batch_size = 1
 max_batch_timeout = 10
 max_retries = 3

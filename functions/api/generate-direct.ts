@@ -3,9 +3,10 @@
 
 import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
-  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
+  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
   readPngDimensions,
 } from '../_shared'
+import type { ImageTaskStepResult } from '../_shared'
 import {
   createAsset,
   createJob,
@@ -177,15 +178,54 @@ export async function executeDirectGenerate(
   request: ReturnType<typeof normalizeDirectGenerateRequest>,
   clientKeys: any = {},
 ): Promise<{ dataUrl: string; finalPrompt: string; width: number | null; height: number | null }> {
+  const result = await executeDirectGenerateTaskStep(env, request, clientKeys)
+  if (result.pending) throw createError('Image task is still running.', 202)
+  return {
+    dataUrl: result.dataUrl,
+    finalPrompt: result.finalPrompt,
+    width: result.width,
+    height: result.height,
+  }
+}
+
+export async function executeDirectGenerateTaskStep(
+  env: Env,
+  request: ReturnType<typeof normalizeDirectGenerateRequest>,
+  clientKeys: any = {},
+  stepOptions: { existingTask?: any; maxPollAttempts?: number; finalPrompt?: string } = {},
+): Promise<
+  | { pending: false; dataUrl: string; finalPrompt: string; width: number | null; height: number | null }
+  | (Extract<ImageTaskStepResult, { pending: true }> & { finalPrompt: string })
+> {
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const { visionKey, genKey } = resolveKeys(request.modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(request.modelId, env, clientKeys)
   imageModelOptions.aspectRatio = request.aspectRatio
   imageModelOptions.resolution = request.resolution
+  imageModelOptions.existingTask = stepOptions.existingTask
+  imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
 
   if (!request.prompt) throw createError('prompt required', 400)
   if (!MODEL_MAP[request.modelId]) throw createError(`Unknown modelId: ${request.modelId}`, 400)
   if (!genKey) throw createError(`Missing API key for ${request.modelId}`, 400)
+
+  if (stepOptions.existingTask) {
+    const finalPrompt = String(stepOptions.finalPrompt || request.prompt || '').trim()
+    const result = await callImageModelTaskStep(
+      baseUrl,
+      genKey,
+      MODEL_MAP[request.modelId],
+      [],
+      finalPrompt,
+      imageModelOptions,
+    )
+    if (!result.ok) {
+      if (result.pending) return { ...result, finalPrompt }
+      throw createError(result.error, result.status)
+    }
+    const size = getImageDataUrlDimensions(result.dataUrl)
+    return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height }
+  }
 
   const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
   for (const entry of request.referenceEntries) {
@@ -218,7 +258,7 @@ export async function executeDirectGenerate(
   const fullPrompt = buildDirectPrompt(finalPrompt, refImages, request.aspectRatio, request.resolution)
   const images = refImages.map((img) => ({ base64: img.base64, mime: img.mime }))
 
-  const result = await callImageModel(
+  const result = await callImageModelTaskStep(
     baseUrl,
     genKey,
     MODEL_MAP[request.modelId],
@@ -227,9 +267,10 @@ export async function executeDirectGenerate(
     imageModelOptions,
   )
 
+  if (result.pending) return { ...result, finalPrompt }
   if (!result.ok) throw createError(result.error, result.status)
   const size = getImageDataUrlDimensions(result.dataUrl)
-  return { dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height }
+  return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height }
 }
 
 function getImageDataUrlDimensions(dataUrl: string): { width: number | null; height: number | null } {
@@ -313,7 +354,7 @@ async function refineWithDesignAgent(
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    'gemini-3-flash-preview',
+    VISION_MODEL,
     [
       {
         role: 'system',
