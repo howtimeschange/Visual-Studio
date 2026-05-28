@@ -4973,8 +4973,7 @@ function setCanvasGenerateStatus(el, message) {
 }
 
 function shouldUseAsyncCanvasGenerate(modelId, resolution, refImages = []) {
-  return modelId === 'gpt-image-2'
-    && (normalizeCanvasResolution(resolution) === '4k' || refImages.length > 0)
+  return true
 }
 
 async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
@@ -4982,10 +4981,10 @@ async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
     return postJson('/api/generate-direct', payload)
   }
 
-  onStatus?.('正在提交 4K 生成任务…')
+  onStatus?.('正在提交生成任务…')
   const submitted = await postJson('/api/jobs/generate-direct', payload)
   state.runtime.sessionId = submitted.sessionId || state.runtime.sessionId
-  onStatus?.('4K 任务已提交，正在等待生成完成…')
+  onStatus?.('任务已提交，正在等待生成完成…')
   return waitForCanvasGenerateJob(submitted.jobId, {
     projectId: state.generate.projectId,
     onStatus,
@@ -5056,7 +5055,7 @@ async function fetchCanvasGenerateResultAsset(resultAssetId, projectId = '') {
 function formatCanvasGenerateJobStatus(status) {
   return ({
     queued: '任务排队中…',
-    running: '图像模型正在生成 4K 图片…',
+    running: '图像模型正在生成图片…',
     completed: '正在读取生成结果…',
     failed: '生成任务失败',
     cancelled: '生成任务已取消',
