@@ -335,6 +335,7 @@ const state = {
     aiSessions: [],
     aiMessages: [],
     aiRefs: [],
+    aiMode: 'image',
     aiRunning: false,
     // gen panel
     genTargetId: '',
@@ -523,6 +524,7 @@ const dom = {
   gZoomIn: $('#g-zoom-in'),
   gZoomValue: $('#g-zoom-value'),
   gContextMenu: $('#g-context-menu'),
+  gAiMode: $('#g-ai-mode'),
   gAiModel: $('#g-ai-model'),
   gAiRatio: $('#g-ai-ratio'),
   gAiResolution: $('#g-ai-resolution'),
@@ -879,6 +881,96 @@ function normalizeTranslateTextColor(value, fallback = '') {
   return fallback
 }
 
+function normalizeCanvasCreativeMode(value) {
+  return String(value || '') === 'poster_banner' ? 'poster_banner' : 'image'
+}
+
+function applyCanvasCreativeModeDefaults() {
+  if (state.generate.aiMode !== 'poster_banner') return
+  if (normalizeAspectRatio(state.generate.genRatio) !== '1:1') return
+  state.generate.genRatio = '16:9'
+  if (dom.gAiRatio) dom.gAiRatio.value = '16:9'
+  if (dom.gGenRatio) dom.gGenRatio.value = '16:9'
+}
+
+function inferPosterHeadline(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return '主题海报'
+  return (text.split(/[，。！？,.!?；;：:\n]/)[0] || text).trim().slice(0, 28) || '主题海报'
+}
+
+function normalizeCanvasPosterLayout(value, aspectRatio = '1:1') {
+  const text = String(value || '').trim()
+  if (['left', 'right', 'top', 'bottom', 'center'].includes(text)) return text
+  return ['9:16', '3:4', '1:4', '1:8'].includes(normalizeAspectRatio(aspectRatio)) ? 'bottom' : 'left'
+}
+
+function normalizeCanvasPosterBrief(value = {}, fallbackRequest = '') {
+  const aspectRatio = normalizeAspectRatio(value.aspectRatio || state.generate.genRatio)
+  const resolution = normalizeCanvasResolution(value.resolution || state.generate.genResolution)
+  const layout = normalizeCanvasPosterLayout(value.layout, aspectRatio)
+  const sourceRequest = String(value.sourceRequest || fallbackRequest || '').replace(/\s+/g, ' ').trim().slice(0, 200)
+  return {
+    format: ['poster', 'banner'].includes(String(value.format || '')) ? String(value.format) : (['9:16', '3:4', '1:4', '1:8'].includes(aspectRatio) ? 'poster' : 'banner'),
+    headline: String(value.headline || inferPosterHeadline(sourceRequest)).replace(/\s+/g, ' ').trim().slice(0, 36) || '主题海报',
+    subheadline: String(value.subheadline || '').replace(/\s+/g, ' ').trim().slice(0, 72),
+    cta: String(value.cta || '').replace(/\s+/g, ' ').trim().slice(0, 18),
+    badges: Array.isArray(value.badges) ? value.badges.map((item) => String(item || '').replace(/\s+/g, ' ').trim().slice(0, 16)).filter(Boolean).slice(0, 4) : [],
+    layout,
+    copySafeArea: String(value.copySafeArea || getDefaultPosterCopySafeArea(layout)).replace(/\s+/g, ' ').trim().slice(0, 32),
+    aspectRatio,
+    resolution,
+    sourceRequest,
+  }
+}
+
+function buildCanvasPosterBrief(requestText, aspectRatio, resolution) {
+  return normalizeCanvasPosterBrief({
+    format: ['9:16', '3:4', '1:4', '1:8'].includes(normalizeAspectRatio(aspectRatio)) ? 'poster' : 'banner',
+    headline: inferPosterHeadline(requestText),
+    layout: ['9:16', '3:4', '1:4', '1:8'].includes(normalizeAspectRatio(aspectRatio)) ? 'bottom' : 'left',
+    aspectRatio,
+    resolution,
+    sourceRequest: requestText,
+  }, requestText)
+}
+
+function getDefaultPosterCopySafeArea(layout) {
+  return ({
+    left: 'left 42%',
+    right: 'right 42%',
+    top: 'top 32%',
+    bottom: 'bottom 35%',
+    center: 'center 52%',
+  })[layout] || 'left 42%'
+}
+
+function getPosterAccentColor(brief = {}) {
+  const text = `${brief.headline || ''} ${brief.subheadline || ''} ${brief.sourceRequest || ''}`.toLowerCase()
+  if (/(ai|gpu|nvidia|黄仁勋|英伟达|科技|芯片|未来)/i.test(text)) return '#5ee6a8'
+  if (/(电影|影院|cinema|film|港|香港|动作|传记)/i.test(text)) return '#ffad39'
+  if (/(新品|上新|促销|夏促|sale|campaign|banner)/i.test(text)) return '#ff7a45'
+  return '#ff9f2d'
+}
+
+function getPosterCompositionTheme(brief = {}, width = 1024, height = 1024) {
+  const accent = getPosterAccentColor(brief)
+  const vertical = height > width * 1.12
+  const poster = brief.format === 'poster' || vertical
+  return {
+    accent,
+    text: '#fffdf6',
+    muted: 'rgba(255, 255, 255, 0.80)',
+    hairline: 'rgba(255, 255, 255, 0.18)',
+    panel: poster ? 'rgba(5, 5, 7, 0.66)' : 'rgba(5, 5, 7, 0.58)',
+    badgeFill: 'rgba(8, 8, 10, 0.58)',
+    ctaText: '#18110a',
+    meta: poster ? 'POSTER VISUAL' : 'CAMPAIGN VISUAL',
+    vertical,
+    poster,
+  }
+}
+
 function getEffectiveTranslateFontMode(config = state.translate) {
   const mode = normalizeTranslateFontMode(config.fontMode)
   if (mode === 'reference' && !config.fontReferenceAssetId && !config.fontReference?.assetId) {
@@ -899,6 +991,7 @@ function sanitizeGeneratePrefs(raw = {}) {
     genRatio: normalizeAspectRatio(raw.genRatio || raw.aspectRatio || state.generate.genRatio),
     genResolution: normalizeCanvasResolution(raw.genResolution || raw.resolution || state.generate.genResolution),
     genUseAgent: typeof raw.genUseAgent === 'boolean' ? raw.genUseAgent : (typeof raw.useDesignAgent === 'boolean' ? raw.useDesignAgent : state.generate.genUseAgent),
+    aiMode: normalizeCanvasCreativeMode(raw.aiMode || state.generate.aiMode),
   }
 }
 
@@ -934,6 +1027,7 @@ function savePrefs() {
       genRatio: state.generate.genRatio,
       genResolution: state.generate.genResolution,
       genUseAgent: state.generate.genUseAgent,
+      aiMode: state.generate.aiMode,
     },
     outfit: {
       model: state.outfit.model,
@@ -2375,6 +2469,7 @@ function serializeAiMessage(msg = {}) {
   return {
     id: msg.id || crypto.randomUUID(),
     role,
+    creativeMode: normalizeCanvasCreativeMode(msg.creativeMode),
     content: typeof msg.content === 'string' && msg.content
       ? msg.content
       : (msg.loading ? `${msg.loadingText || 'AI 正在处理'}…` : ''),
@@ -2402,6 +2497,10 @@ function serializeAiMessageImage(image = {}) {
     prompt: typeof image.prompt === 'string' ? image.prompt : '',
     actionId: typeof image.actionId === 'string' ? image.actionId : '',
     aspectRatio: normalizeAspectRatio(image.aspectRatio || ''),
+    creativeMode: normalizeCanvasCreativeMode(image.creativeMode),
+    promptStyle: image.promptStyle === 'visual_base' ? 'visual_base' : '',
+    posterBrief: image.creativeMode === 'poster_banner' ? normalizeCanvasPosterBrief(image.posterBrief || {}, image.prompt || '') : null,
+    baseAssetId: typeof image.baseAssetId === 'string' ? image.baseAssetId : '',
   }
 }
 
@@ -2415,6 +2514,9 @@ function serializeAiWorkflowItem(item = {}) {
     prompt,
     status: ['queued', 'running', 'completed', 'failed'].includes(item.status) ? item.status : 'queued',
     error: typeof item.error === 'string' ? item.error : '',
+    creativeMode: normalizeCanvasCreativeMode(item.creativeMode),
+    promptStyle: item.promptStyle === 'visual_base' ? 'visual_base' : '',
+    posterBrief: item.creativeMode === 'poster_banner' ? normalizeCanvasPosterBrief(item.posterBrief || {}, prompt) : null,
   }
 }
 
@@ -2450,6 +2552,7 @@ function sanitizeAiMessages(value) {
       return {
         id: typeof msg.id === 'string' ? msg.id : crypto.randomUUID(),
         role,
+        creativeMode: normalizeCanvasCreativeMode(msg.creativeMode),
         content: typeof msg.content === 'string' ? msg.content : '',
         steps: Array.isArray(msg.steps) ? msg.steps.map(String).filter(Boolean).slice(0, 8) : [],
         refs: sanitizeAiMessageRefs(msg.refs),
@@ -5300,6 +5403,10 @@ async function executeCanvasGenerate() {
     let finalPrompt = prompt
     if (state.generate.genUseAgent) {
       setCanvasGenerateStatus(el, '正在整理画面提示词…')
+      const creativeMode = normalizeCanvasCreativeMode(state.generate.aiMode)
+      const posterBrief = creativeMode === 'poster_banner'
+        ? buildCanvasPosterBrief(prompt, state.generate.genRatio, state.generate.genResolution)
+        : null
       const agentData = await postJson('/api/canvas/agent', {
         sessionId: state.runtime.sessionId || undefined,
         message: prompt,
@@ -5308,6 +5415,8 @@ async function executeCanvasGenerate() {
         modelId: state.generate.genModel,
         aspectRatio: state.generate.genRatio,
         resolution: state.generate.genResolution,
+        creativeMode,
+        posterBrief,
         hasReferenceImages: refImages.length > 0,
         clientKeys: { ...state.keys },
       })
@@ -5425,6 +5534,12 @@ function bindAiSidebar() {
     savePrefs()
   })
 
+  dom.gAiMode?.addEventListener('change', () => {
+    state.generate.aiMode = normalizeCanvasCreativeMode(dom.gAiMode.value)
+    applyCanvasCreativeModeDefaults()
+    savePrefs()
+    renderGenerate()
+  })
 
   // 上传参考图
   dom.gAiUpload.addEventListener('click', () => dom.gAiFileInput.click())
@@ -5501,6 +5616,13 @@ function renderAiMessages() {
   dom.gAiMessages.replaceChildren(...state.generate.aiMessages.map((msg) => {
     const node = document.createElement('div')
     node.className = `msg ${msg.role}`
+    if (msg.creativeMode === 'poster_banner') {
+      const modeBadge = document.createElement('div')
+      modeBadge.className = 'msg-mode-badge'
+      modeBadge.textContent = '海报/banner'
+      node.append(modeBadge)
+    }
+
     // 显示用户消息中附带的参考图
     if (msg.role === 'user' && msg.refs?.length) {
       const refsWrap = document.createElement('div')
@@ -5741,6 +5863,7 @@ function normalizeCanvasAgentAction(action, index, fallbackAspectRatio, fallback
   if (!type || !prompt) return null
   const aspectRatio = normalizeAspectRatio(action?.aspectRatio || action?.ratio || fallbackAspectRatio)
   const resolution = normalizeCanvasResolution(action?.resolution || fallbackResolution)
+  const creativeMode = normalizeCanvasCreativeMode(action?.creativeMode)
   const id = String(action?.id || `image_${index + 1}`).replace(/[^\w-]/g, '_').slice(0, 48) || `image_${index + 1}`
   const title = String(action?.title || action?.name || `图片 ${index + 1}`).replace(/\s+/g, ' ').trim().slice(0, 80) || `图片 ${index + 1}`
   return {
@@ -5750,6 +5873,15 @@ function normalizeCanvasAgentAction(action, index, fallbackAspectRatio, fallback
     prompt,
     aspectRatio,
     resolution,
+    creativeMode,
+    promptStyle: action?.promptStyle === 'visual_base' ? 'visual_base' : '',
+    posterBrief: creativeMode === 'poster_banner'
+      ? normalizeCanvasPosterBrief({
+          ...(action?.posterBrief || action?.brief || {}),
+          aspectRatio,
+          resolution,
+        }, prompt)
+      : null,
   }
 }
 
@@ -5766,6 +5898,261 @@ function getCanvasWorkflowPlacement(index, total, aspectRatio) {
   return {
     x: centerX - totalWidth / 2 + col * (size.width + gap),
     y: centerY - size.height / 2 + row * (size.height + gap),
+  }
+}
+
+function getPosterCanvasOutputSize(aspectRatio = '16:9', resolution = '1k') {
+  const ratio = normalizeAspectRatio(aspectRatio, '16:9')
+  const scale = ({ '1k': 1, '2k': 2, '4k': 4 })[normalizeCanvasResolution(resolution)] || 1
+  const base = {
+    '1:1': [1024, 1024],
+    '4:3': [1200, 900],
+    '3:4': [900, 1200],
+    '16:9': [1344, 768],
+    '9:16': [768, 1344],
+    '1:4': [512, 2048],
+    '1:8': [384, 3072],
+  }[ratio] || [1344, 768]
+  return {
+    width: Math.round(base[0] * scale),
+    height: Math.round(base[1] * scale),
+  }
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Failed to load image for poster composition'))
+    image.src = src
+  })
+}
+
+function wrapPosterText(ctx, text, maxWidth, maxLines = 2) {
+  const raw = String(text || '').trim()
+  if (!raw) return []
+  const hasSpaces = /\s/.test(raw)
+  const units = hasSpaces ? raw.split(/\s+/) : Array.from(raw)
+  const lines = []
+  let current = ''
+  for (const unit of units) {
+    const next = hasSpaces ? (current ? `${current} ${unit}` : unit) : `${current}${unit}`
+    if (ctx.measureText(next).width <= maxWidth || !current) {
+      current = next
+      continue
+    }
+    lines.push(current)
+    current = unit
+    if (lines.length >= maxLines) break
+  }
+  if (current && lines.length < maxLines) lines.push(current)
+  if (lines.length === maxLines && units.length) {
+    const last = lines[lines.length - 1]
+    let trimmed = last
+    while (trimmed.length > 1 && ctx.measureText(`${trimmed}…`).width > maxWidth) {
+      trimmed = trimmed.slice(0, -1)
+    }
+    if (trimmed !== last) lines[lines.length - 1] = `${trimmed}…`
+  }
+  return lines
+}
+
+function getPosterTextBox(brief, width, height) {
+  const margin = Math.round(Math.min(width, height) * 0.07)
+  const layout = normalizeCanvasPosterLayout(brief.layout, brief.aspectRatio)
+  if (layout === 'right') {
+    return { x: Math.round(width * 0.55), y: margin, width: Math.round(width * 0.37), height: height - margin * 2, align: 'left', scrim: 'right' }
+  }
+  if (layout === 'top') {
+    return { x: margin, y: margin, width: width - margin * 2, height: Math.round(height * 0.36), align: 'left', scrim: 'top' }
+  }
+  if (layout === 'bottom') {
+    const y = Math.round(height * 0.64)
+    return { x: margin, y, width: width - margin * 2, height: height - y - margin, align: 'left', scrim: 'bottom' }
+  }
+  if (layout === 'center') {
+    return { x: margin, y: Math.round(height * 0.32), width: width - margin * 2, height: Math.round(height * 0.42), align: 'center', scrim: 'center' }
+  }
+  return { x: margin, y: margin, width: Math.round(width * 0.43), height: height - margin * 2, align: 'left', scrim: 'left' }
+}
+
+function drawPosterScrim(ctx, box, width, height, theme = getPosterCompositionTheme({}, width, height)) {
+  ctx.save()
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
+  ctx.fillRect(0, 0, width, height)
+
+  const gradient = box.scrim === 'right'
+    ? ctx.createLinearGradient(width, 0, 0, 0)
+    : box.scrim === 'top'
+      ? ctx.createLinearGradient(0, 0, 0, height)
+      : box.scrim === 'bottom'
+        ? ctx.createLinearGradient(0, height, 0, 0)
+        : ctx.createLinearGradient(0, 0, width, 0)
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0.82)')
+  gradient.addColorStop(0.48, 'rgba(0, 0, 0, 0.56)')
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
+  if (box.scrim === 'center') {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.48)'
+  } else {
+    ctx.fillStyle = gradient
+  }
+  ctx.fillRect(0, 0, width, height)
+
+  const bottomStart = box.scrim === 'bottom' ? Math.max(0, box.y - Math.round(height * 0.12)) : Math.round(height * 0.58)
+  const bottom = ctx.createLinearGradient(0, height, 0, bottomStart)
+  bottom.addColorStop(0, 'rgba(0, 0, 0, 0.72)')
+  bottom.addColorStop(0.58, 'rgba(0, 0, 0, 0.62)')
+  bottom.addColorStop(1, 'rgba(0, 0, 0, 0)')
+  ctx.fillStyle = bottom
+  ctx.fillRect(0, 0, width, height)
+
+  ctx.globalAlpha = 0.85
+  ctx.strokeStyle = theme.hairline
+  ctx.lineWidth = Math.max(1, Math.round(Math.min(width, height) * 0.0015))
+  ctx.strokeRect(Math.round(width * 0.025), Math.round(height * 0.025), Math.round(width * 0.95), Math.round(height * 0.95))
+
+  const accentLength = box.scrim === 'bottom' || box.scrim === 'top'
+    ? Math.round(Math.min(box.width * 0.36, width * 0.42))
+    : Math.round(Math.min(box.width * 0.72, width * 0.32))
+  const accentX = box.align === 'center'
+    ? Math.round(box.x + (box.width - accentLength) / 2)
+    : box.x
+  const accentY = box.scrim === 'bottom'
+    ? Math.max(box.y + Math.round(Math.min(width, height) * 0.018), Math.round(height * 0.62))
+    : box.y + Math.round(Math.min(width, height) * 0.06)
+  const accent = ctx.createLinearGradient(accentX, accentY, accentX + accentLength, accentY)
+  accent.addColorStop(0, theme.accent)
+  accent.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.strokeStyle = accent
+  ctx.lineWidth = Math.max(3, Math.round(Math.min(width, height) * 0.006))
+  ctx.beginPath()
+  ctx.moveTo(accentX, accentY)
+  ctx.lineTo(accentX + accentLength, accentY)
+  ctx.stroke()
+  ctx.restore()
+}
+
+function drawPosterText(ctx, brief, box, canvasWidth, canvasHeight) {
+  const theme = getPosterCompositionTheme(brief, canvasWidth, canvasHeight)
+  const minSide = Math.min(canvasWidth, canvasHeight)
+  const headlineSize = Math.round(clamp(theme.vertical ? canvasWidth * 0.11 : canvasWidth * 0.062, 38, theme.vertical ? 104 : 98))
+  const subSize = Math.round(clamp(headlineSize * 0.31, 18, 38))
+  const badgeSize = Math.round(clamp(headlineSize * 0.22, 14, 24))
+  const lineGap = Math.round(headlineSize * 0.22)
+  let y = box.y + Math.round(box.height * (box.scrim === 'bottom' ? 0.085 : 0.13))
+  const x = box.align === 'center' ? box.x + box.width / 2 : box.x
+
+  ctx.save()
+  ctx.textAlign = box.align
+  ctx.textBaseline = 'top'
+  ctx.fillStyle = theme.text
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.45)'
+  ctx.shadowBlur = Math.round(minSide * 0.024)
+  ctx.font = `900 ${headlineSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+  for (const line of wrapPosterText(ctx, brief.headline, box.width, 2)) {
+    ctx.fillText(line, x, y)
+    y += headlineSize + lineGap
+  }
+  if (brief.subheadline) {
+    y += Math.round(subSize * 0.5)
+    ctx.font = `700 ${subSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+    ctx.fillStyle = theme.muted
+    for (const line of wrapPosterText(ctx, brief.subheadline, box.width, 2)) {
+      ctx.fillText(line, x, y)
+      y += subSize * 1.45
+    }
+  }
+  const badges = Array.isArray(brief.badges) ? brief.badges.slice(0, 4) : []
+  if (badges.length) {
+    y += Math.round(badgeSize * 0.9)
+    ctx.font = `800 ${badgeSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+    ctx.shadowBlur = 0
+    let bx = box.align === 'center' ? box.x + box.width / 2 : box.x
+    const startX = bx
+    for (const badge of badges) {
+      const padX = Math.round(badgeSize * 0.85)
+      const padY = Math.round(badgeSize * 0.45)
+      const bw = Math.round(ctx.measureText(badge).width + padX * 2)
+      if (box.align !== 'center' && bx + bw > box.x + box.width) {
+        bx = startX
+        y += badgeSize + padY * 2 + Math.round(badgeSize * 0.45)
+      }
+      if (box.align === 'center') bx -= bw / 2
+      ctx.fillStyle = theme.badgeFill
+      roundRect(ctx, bx, y, bw, badgeSize + padY * 2, Math.round(badgeSize * 0.45))
+      ctx.fill()
+      ctx.strokeStyle = theme.accent
+      ctx.globalAlpha = 0.72
+      ctx.stroke()
+      ctx.globalAlpha = 1
+      ctx.fillStyle = theme.text
+      ctx.fillText(badge, bx + padX, y + padY)
+      bx += bw + Math.round(badgeSize * 0.7)
+    }
+    y += badgeSize * 2.3
+  }
+  if (brief.cta) {
+    y += Math.round(badgeSize * 0.8)
+    ctx.font = `900 ${badgeSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+    const padX = Math.round(badgeSize * 1.1)
+    const padY = Math.round(badgeSize * 0.65)
+    const measuredWidth = Math.round(ctx.measureText(brief.cta).width + padX * 2)
+    const ctaWidth = Math.min(measuredWidth, Math.round(box.width * 0.92))
+    const ctaX = box.align === 'center' ? x - ctaWidth / 2 : box.x
+    ctx.fillStyle = theme.accent
+    ctx.shadowBlur = 0
+    roundRect(ctx, ctaX, y, ctaWidth, badgeSize + padY * 2, Math.round(badgeSize * 0.58))
+    ctx.fill()
+    ctx.fillStyle = theme.ctaText
+    ctx.fillText(brief.cta, ctaX + padX, y + padY)
+    y += badgeSize + padY * 2
+  }
+  if (brief.format !== 'poster' || box.scrim !== 'bottom') {
+    const meta = brief.format === 'poster' ? 'A CINEMATIC POSTER COMPOSITION' : 'CAMPAIGN BANNER COMPOSITION'
+    ctx.shadowBlur = 0
+    ctx.font = `700 ${Math.round(clamp(badgeSize * 0.78, 10, 16))}px "Geist", "Noto Sans SC", Arial, sans-serif`
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.54)'
+    ctx.textAlign = box.align
+    const metaY = Math.min(canvasHeight - Math.round(minSide * 0.075), y + Math.round(badgeSize * 0.85))
+    ctx.fillText(meta, x, metaY)
+  }
+  ctx.restore()
+}
+
+function roundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + width, y, x + width, y + height, r)
+  ctx.arcTo(x + width, y + height, x, y + height, r)
+  ctx.arcTo(x, y + height, x, y, r)
+  ctx.arcTo(x, y, x + width, y, r)
+  ctx.closePath()
+}
+
+async function composePosterBannerImage(baseDataUrl, action, fallbackRequest) {
+  const brief = normalizeCanvasPosterBrief(action.posterBrief || {}, fallbackRequest)
+  const { width, height } = getPosterCanvasOutputSize(action.aspectRatio || brief.aspectRatio, action.resolution || brief.resolution)
+  const image = await loadImageElement(baseDataUrl)
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法创建海报合成画布')
+  const scale = Math.max(width / Math.max(1, image.naturalWidth || image.width), height / Math.max(1, image.naturalHeight || image.height))
+  const drawWidth = (image.naturalWidth || image.width) * scale
+  const drawHeight = (image.naturalHeight || image.height) * scale
+  ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight)
+  const box = getPosterTextBox(brief, width, height)
+  const theme = getPosterCompositionTheme(brief, width, height)
+  drawPosterScrim(ctx, box, width, height, theme)
+  drawPosterText(ctx, brief, box, width, height)
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    width,
+    height,
+    mime: 'image/png',
+    brief,
   }
 }
 
@@ -5798,11 +6185,17 @@ async function sendCanvasAiMessage() {
   const aiModelId = dom.gAiModel.value || state.generate.genModel
   const aiAspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
   const aiResolution = normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution)
+  const aiMode = normalizeCanvasCreativeMode(dom.gAiMode?.value || state.generate.aiMode)
+  state.generate.aiMode = aiMode
+  const posterBrief = aiMode === 'poster_banner'
+    ? buildCanvasPosterBrief(requestText, aiAspectRatio, aiResolution)
+    : null
   const canvasPendingEls = []
 
   const userMsg = {
     id: crypto.randomUUID(),
     role: 'user',
+    creativeMode: aiMode,
     content: requestText,
     refs: state.generate.aiRefs.map((r) => ({ assetId: r.assetId || '', dataUrl: r.dataUrl, name: r.name, mime: r.mime || 'image/png' })),
   }
@@ -5813,6 +6206,7 @@ async function sendCanvasAiMessage() {
     loading: true,
     loadingText: '正在理解画布和需求',
     steps: [],
+    creativeMode: aiMode,
   }
   state.generate.aiMessages.push(userMsg)
   dom.gInput.value = ''
@@ -5860,6 +6254,8 @@ async function sendCanvasAiMessage() {
       modelId: aiModelId,
       aspectRatio: aiAspectRatio,
       resolution: aiResolution,
+      creativeMode: aiMode,
+      posterBrief,
       hasReferenceImages: refImages.length > 0,
       clientKeys: { ...state.keys },
     })
@@ -5885,6 +6281,9 @@ async function sendCanvasAiMessage() {
       prompt: action.prompt,
       status: 'queued',
       error: '',
+      creativeMode: action.creativeMode,
+      promptStyle: action.promptStyle,
+      posterBrief: action.posterBrief,
     }))
     assistantMsg.images = []
     renderAiMessages()
@@ -5920,12 +6319,21 @@ async function sendCanvasAiMessage() {
         })
 
         state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-        const resultDataUrl = data.resultDataUrl
+        const composed = action.creativeMode === 'poster_banner'
+          ? await composePosterBannerImage(data.resultDataUrl, action, requestText)
+          : null
+        const resultDataUrl = composed?.dataUrl || data.resultDataUrl
         const imageName = action.title || `ai-${Date.now()}-${index + 1}`
         const { storedResult, imageSize } = await storeCanvasGeneratedResult(
-          data,
+          {
+            ...data,
+            resultDataUrl,
+            resultAsset: composed ? null : data.resultAsset,
+            width: composed?.width || data.width,
+            height: composed?.height || data.height,
+          },
           `ai-${Date.now()}-${index + 1}.png`,
-          'canvas_ai_sidebar',
+          composed ? 'canvas_ai_poster_banner' : 'canvas_ai_sidebar',
         )
         assistantMsg.images.push({
           dataUrl: resultDataUrl,
@@ -5935,6 +6343,10 @@ async function sendCanvasAiMessage() {
           prompt: action.prompt,
           actionId: action.id,
           aspectRatio: action.aspectRatio,
+          creativeMode: action.creativeMode,
+          promptStyle: action.promptStyle,
+          posterBrief: composed?.brief || action.posterBrief || null,
+          baseAssetId: composed ? data.resultAsset?.id || '' : '',
         })
         if (!assistantMsg.imageDataUrl) {
           assistantMsg.imageDataUrl = resultDataUrl
@@ -6008,6 +6420,7 @@ function renderGenerate() {
     })
   }
   dom.gModel.value = state.generate.genModel
+  if (dom.gAiMode) dom.gAiMode.value = normalizeCanvasCreativeMode(state.generate.aiMode)
   dom.gAiModel.value = state.generate.genModel
   dom.gGenRatio.value = state.generate.genRatio
   dom.gAiRatio.value = state.generate.genRatio
@@ -6015,6 +6428,7 @@ function renderGenerate() {
   dom.gAiResolution.value = state.generate.genResolution
   dom.gAgent.checked = state.generate.genUseAgent
   dom.gAiSidebar.classList.toggle('hidden', !state.generate.showAiPanel)
+  dom.gAiSidebar.dataset.aiMode = normalizeCanvasCreativeMode(state.generate.aiMode)
   renderCanvasProjectMeta()
   renderAiMessages()
   renderAiRefList()
