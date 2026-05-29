@@ -98,6 +98,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         styleSummary: '',
         colorPalette: [],
         tags: [],
+        subject: '',
         subjectRefs: [],
       },
     },
@@ -399,6 +400,46 @@ test('migrateLegacyRuntimeStorage moves heavy legacy runtime fields out of runti
   const results = JSON.parse(harness.storage.get('img-translator:results:v1'))
   assert.equal(results.style.history[0].subject, '旧风格')
   assert.equal(results.style.history[0].resultDataUrl, legacyDataUrl)
+})
+
+test('runtime storage preserves style transfer draft and analyzed style', async () => {
+  const harness = await createRuntimeHarness()
+  harness.state.style = {
+    sourceImage: {
+      id: 'source-asset',
+      assetId: 'source-asset',
+      name: 'source.png',
+      mime: 'image/png',
+      dataUrl: 'data:image/png;base64,source',
+    },
+    visualStyle: {
+      overall_concept: { theme: 'Soft catalog' },
+      reproduction_prompt: { style_essence_en: 'Soft catalog style' },
+    },
+    styleSummary: '柔和商品目录风',
+    colorPalette: [{ hex: '#F7F3EC', role: 'warm white' }],
+    tags: ['catalog'],
+    subject: '新的商品主体',
+    subjectRefs: [{
+      id: 'subject-asset',
+      assetId: 'subject-asset',
+      name: 'subject.png',
+      mime: 'image/png',
+      dataUrl: 'data:image/png;base64,subject',
+    }],
+    history: [],
+  }
+
+  const snapshot = harness.createRuntimeStorageSnapshot()
+  const sanitized = harness.sanitizeRuntimeState(snapshot)
+
+  assert.equal(snapshot.style.subject, '新的商品主体')
+  assert.equal(sanitized.style.subject, '新的商品主体')
+  assert.equal(sanitized.style.sourceImage.assetId, 'source-asset')
+  assert.equal(sanitized.style.visualStyle.overall_concept.theme, 'Soft catalog')
+  assert.deepEqual(sanitized.style.colorPalette, [{ hex: '#F7F3EC', role: 'warm white' }])
+  assert.deepEqual(sanitized.style.tags, ['catalog'])
+  assert.equal(sanitized.style.subjectRefs[0].assetId, 'subject-asset')
 })
 
 test('migrateLegacyRuntimeStorage skips already compact runtime storage', async () => {

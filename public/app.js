@@ -979,6 +979,7 @@ function createRuntimeStorageSnapshot() {
       styleSummary: state.style.styleSummary,
       colorPalette: state.style.colorPalette,
       tags: state.style.tags,
+      subject: state.style.subject,
       subjectRefs: state.style.subjectRefs.map((item) => serializeAssetBackedItem(item)),
     },
   }
@@ -1029,6 +1030,7 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
       styleSummary: String(snapshot.style?.styleSummary || ''),
       colorPalette: Array.isArray(snapshot.style?.colorPalette) ? snapshot.style.colorPalette : [],
       tags: Array.isArray(snapshot.style?.tags) ? snapshot.style.tags : [],
+      subject: String(snapshot.style?.subject || ''),
       subjectRefs: Array.isArray(snapshot.style?.subjectRefs)
         ? snapshot.style.subjectRefs.slice(-RUNTIME_FALLBACK_SUBJECT_REF_LIMIT)
         : [],
@@ -1454,6 +1456,7 @@ function sanitizeRuntimeState(raw = {}) {
       styleSummary: typeof raw.style?.styleSummary === 'string' ? raw.style.styleSummary : '',
       colorPalette: Array.isArray(raw.style?.colorPalette) ? raw.style.colorPalette : [],
       tags: Array.isArray(raw.style?.tags) ? raw.style.tags : [],
+      subject: typeof raw.style?.subject === 'string' ? raw.style.subject : '',
       subjectRefs: Array.isArray(raw.style?.subjectRefs)
         ? raw.style.subjectRefs.map((item) => sanitizeStoredAssetItem(item)).filter(Boolean)
         : [],
@@ -6031,45 +6034,52 @@ function bindStyle() {
     input: dom.sFileInput,
     onFiles: async (files) => {
       if (state.style.analyzing || state.style.generating) return
-      const images = await readImageFiles(files)
-      if (images.length === 0) return
-      const image = images[0]
-      const upload = createUploadProgressState({
-        title: '风格源图',
-        detail: image.name,
-        percent: 0,
-        active: true,
-      })
-      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
-      const uploaded = await postJson('/api/assets/upload', {
-        sessionId: state.runtime.sessionId || undefined,
-        kind: 'upload',
-        source: 'browser_upload',
-        filename: image.name,
-        mime: image.mime,
-        dataUrl: image.dataUrl,
-      })
-      state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
-      setUploadProgress(upload, { current: 1, total: 1, filename: image.name, percent: 100, active: true, done: true })
-      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
-      state.style.sourceImage = {
-        id: uploaded.asset.id,
-        assetId: uploaded.asset.id,
-        name: image.name,
-        mime: image.mime,
-        dataUrl: image.dataUrl,
-        base64: image.base64,
+      try {
+        const images = await readImageFiles(files)
+        if (images.length === 0) return
+        const image = images[0]
+        const upload = createUploadProgressState({
+          title: '风格源图',
+          detail: image.name,
+          percent: 0,
+          active: true,
+        })
+        renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
+        const uploaded = await postJson('/api/assets/upload', {
+          sessionId: state.runtime.sessionId || undefined,
+          kind: 'upload',
+          source: 'browser_upload',
+          filename: image.name,
+          mime: image.mime,
+          dataUrl: image.dataUrl,
+        })
+        state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
+        setUploadProgress(upload, { current: 1, total: 1, filename: image.name, percent: 100, active: true, done: true })
+        renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
+        state.style.sourceImage = {
+          id: uploaded.asset.id,
+          assetId: uploaded.asset.id,
+          name: image.name,
+          mime: image.mime,
+          dataUrl: image.dataUrl,
+          base64: image.base64,
+        }
+        state.style.visualStyle = null
+        state.style.styleSummary = ''
+        state.style.colorPalette = []
+        state.style.tags = []
+        state.style.resultDataUrl = ''
+        state.style.error = ''
+        saveRuntimeState()
+        renderStyle()
+        await analyzeStyle()
+      } catch (error) {
+        state.style.error = trimError(error)
+        renderStyle()
+      } finally {
+        renderUploadQueue(dom.sSourceUpload, [])
+        renderStyle()
       }
-      state.style.visualStyle = null
-      state.style.styleSummary = ''
-      state.style.colorPalette = []
-      state.style.tags = []
-      state.style.resultDataUrl = ''
-      state.style.error = ''
-      saveRuntimeState()
-      renderUploadQueue(dom.sSourceUpload, [])
-      renderStyle()
-      analyzeStyle()
     },
   })
 
@@ -6095,6 +6105,7 @@ function bindStyle() {
 
   dom.sRefInput.addEventListener('change', async () => {
     if (!dom.sRefInput.files?.length || state.style.generating) return
+    const previousSummary = state.style.styleSummary
     const imageFiles = Array.from(dom.sRefInput.files).filter((file) => file.type.startsWith('image/'))
     const uploads = imageFiles.map((file, index) => createUploadProgressState({
       title: '主体参考图',
@@ -6105,28 +6116,36 @@ function bindStyle() {
     state.style.styleSummary = '正在上传主体参考图…'
     renderStyle()
     renderUploadQueue(dom.sRefUpload, uploads)
-    const images = await prepareAssetItems(dom.sRefInput.files, {
-      onProgress: ({ current, total, filename }) => {
-        state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
-        setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
-        renderUploadQueue(dom.sRefUpload, uploads)
-        renderStyle()
-      },
-      onUploadProgress: ({ current, total, filename, percent }) => {
-        setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
-        renderUploadQueue(dom.sRefUpload, uploads)
-      },
-    })
-    state.style.subjectRefs.push(...images)
-    if (!state.style.visualStyle) state.style.styleSummary = ''
-    saveRuntimeState()
-    renderUploadQueue(dom.sRefUpload, [])
-    renderStyle()
-    dom.sRefInput.value = ''
+    try {
+      const images = await prepareAssetItems(dom.sRefInput.files, {
+        onProgress: ({ current, total, filename }) => {
+          state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.sRefUpload, uploads)
+          renderStyle()
+        },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.sRefUpload, uploads)
+        },
+      })
+      state.style.subjectRefs.push(...images)
+      state.style.styleSummary = state.style.visualStyle ? previousSummary : ''
+      state.style.error = ''
+      saveRuntimeState()
+    } catch (error) {
+      state.style.styleSummary = previousSummary
+      state.style.error = trimError(error)
+    } finally {
+      renderUploadQueue(dom.sRefUpload, [])
+      renderStyle()
+      dom.sRefInput.value = ''
+    }
   })
 
   dom.sSubject.addEventListener('input', () => {
     state.style.subject = dom.sSubject.value
+    saveRuntimeState()
     dom.sGenerate.disabled = (!state.style.subject.trim() && state.style.subjectRefs.length === 0) || state.style.generating || !state.style.visualStyle
   })
 
@@ -6348,10 +6367,12 @@ async function analyzeStyle() {
     state.style.colorPalette = Array.isArray(data.colorPalette) ? data.colorPalette : []
     state.style.tags = Array.isArray(data.tags) ? data.tags : []
     state.style.analyzing = false
+    saveRuntimeState()
     renderStyle()
   } catch (error) {
     state.style.analyzing = false
     state.style.error = trimError(error)
+    saveRuntimeState()
     renderStyle()
   }
 }
@@ -6361,7 +6382,7 @@ async function generateStyleTransfer() {
   if (!state.style.subject.trim() && state.style.subjectRefs.length === 0) return
 
   state.style.generating = true
-  state.style.resultDataUrl = ''
+  const previousResultDataUrl = state.style.resultDataUrl
   state.style.error = ''
   renderStyle()
 
@@ -6400,6 +6421,7 @@ async function generateStyleTransfer() {
     renderStyle()
   } catch (error) {
     state.style.generating = false
+    state.style.resultDataUrl = previousResultDataUrl
     state.style.error = trimError(error)
     renderStyle()
   }
@@ -8394,8 +8416,11 @@ function bindDropSurface({ surface, input, onFiles, onClick = null, clickable = 
 
   input.addEventListener('change', async () => {
     if (!input.files?.length) return
-    await onFiles(input.files)
-    input.value = ''
+    try {
+      await onFiles(input.files)
+    } finally {
+      input.value = ''
+    }
   })
 
   for (const eventName of ['dragenter', 'dragover']) {
@@ -9308,6 +9333,7 @@ async function restoreRuntimeState() {
   state.style.styleSummary = runtime.style?.styleSummary || ''
   state.style.colorPalette = runtime.style?.colorPalette || []
   state.style.tags = runtime.style?.tags || []
+  state.style.subject = runtime.style?.subject || ''
   state.style.history = await hydrateStyleHistory(getStoredStyleHistory(savedResults, runtime.style?.history))
 
   restoringRuntimeState = false
