@@ -2276,6 +2276,9 @@ function serializeAiMessage(msg = {}) {
     aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
     images: Array.isArray(msg.images) ? msg.images.map(serializeAiMessageImage).filter(Boolean).slice(0, 12) : [],
     workflow: Array.isArray(msg.workflow) ? msg.workflow.map(serializeAiWorkflowItem).filter(Boolean).slice(0, 12) : [],
+    suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
+    needsClarification: Boolean(msg.needsClarification),
+    styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
   }
 }
 
@@ -2349,6 +2352,9 @@ function sanitizeAiMessages(value) {
         aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
         images,
         workflow: sanitizeAiWorkflowItems(msg.workflow),
+        suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
+        needsClarification: Boolean(msg.needsClarification),
+        styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
         loading: false,
         loadingText: '',
         streaming: false,
@@ -2372,6 +2378,17 @@ function sanitizeAiWorkflowItems(value) {
     .map((item) => serializeAiWorkflowItem(item || {}))
     .filter(Boolean)
     .slice(0, 12)
+}
+
+function sanitizeAiMessageStyleIntent(value) {
+  if (!value || typeof value !== 'object') return null
+  const styleIntent = {
+    category: typeof value.category === 'string' ? value.category.slice(0, 160) : '',
+    medium: typeof value.medium === 'string' ? value.medium.slice(0, 160) : '',
+    visualLanguage: typeof value.visualLanguage === 'string' ? value.visualLanguage.slice(0, 160) : '',
+    reason: typeof value.reason === 'string' ? value.reason.slice(0, 160) : '',
+  }
+  return Object.values(styleIntent).some(Boolean) ? styleIntent : null
 }
 
 function sanitizeAiMessageRefs(value) {
@@ -5454,9 +5471,45 @@ function renderAiMessages() {
       }
       node.append(imgWrap)
     }
+    const suggestionNodes = createAiSuggestionNodes(msg.suggestions, {
+      numbered: Boolean(msg.needsClarification),
+    })
+    if (suggestionNodes) node.append(suggestionNodes)
     return node
   }))
   dom.gAiMessages.scrollTop = dom.gAiMessages.scrollHeight
+}
+
+function createAiSuggestionNodes(items, options = {}) {
+  const prompts = Array.isArray(items)
+    ? items.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 4)
+    : []
+  if (!prompts.length) return null
+
+  const suggestions = document.createElement('div')
+  const numbered = Boolean(options.numbered)
+  suggestions.className = numbered ? 'ai-suggestions' : 'ai-suggestion-chips'
+  prompts.forEach((prompt, index) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = numbered ? 'ai-suggestion' : 'ai-suggestion-chip'
+    button.dataset.aiPrompt = prompt
+    button.addEventListener('click', () => {
+      dom.gInput.value = prompt
+      dom.gInput.focus()
+    })
+    if (numbered) {
+      const strong = document.createElement('strong')
+      strong.textContent = `风格选项 ${index + 1}`
+      const span = document.createElement('span')
+      span.textContent = prompt
+      button.append(strong, span)
+    } else {
+      button.textContent = prompt
+    }
+    suggestions.append(button)
+  })
+  return suggestions
 }
 
 function createAiLoadingNode(text) {
@@ -5730,6 +5783,9 @@ async function sendCanvasAiMessage() {
     const replyText = agentData.reply || '我已经整理好设计方向。'
     await streamAiMessageContent(assistantMsg, replyText)
     assistantMsg.steps = Array.isArray(agentData.steps) ? agentData.steps : []
+    assistantMsg.suggestions = Array.isArray(agentData.suggestions) ? agentData.suggestions : []
+    assistantMsg.needsClarification = Boolean(agentData.needsClarification)
+    assistantMsg.styleIntent = agentData.styleIntent || null
     renderAiMessages()
 
     if (!agentData.shouldGenerate) {

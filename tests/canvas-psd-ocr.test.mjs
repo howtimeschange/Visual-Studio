@@ -200,3 +200,133 @@ test('PSD decomposition normalization keeps extracted transparent layers and rep
     await cleanup()
   }
 })
+
+test('PSD OCR normalization merges fragmented semantic plans into compact editable layers', async () => {
+  const { mod, cleanup } = await importEntry('functions/api/canvas/psd-ocr.ts', ['normalizeCanvasPsdOcrResult'])
+  try {
+    const result = mod.normalizeCanvasPsdOcrResult({
+      semanticLayers: [
+        {
+          name: 'Background',
+          type: 'background',
+          bbox: { x: 0, y: 0, width: 1000, height: 800 },
+          zIndex: 0,
+        },
+        {
+          name: 'Face',
+          type: 'subject',
+          bbox: { x: 300, y: 120, width: 220, height: 260 },
+          zIndex: 42,
+        },
+        {
+          name: 'Body',
+          type: 'person',
+          bbox: { x: 260, y: 300, width: 300, height: 360 },
+          zIndex: 40,
+        },
+        {
+          name: 'sparkle 1',
+          type: 'decoration',
+          bbox: { x: 90, y: 80, width: 30, height: 30 },
+          zIndex: 90,
+        },
+        {
+          name: 'sparkle 2',
+          type: 'decoration',
+          bbox: { x: 860, y: 110, width: 28, height: 28 },
+          zIndex: 91,
+        },
+        {
+          name: 'brand mark',
+          type: 'logo',
+          bbox: { x: 780, y: 680, width: 130, height: 70 },
+          zIndex: 80,
+        },
+      ],
+    }, 1000, 800)
+
+    assert.equal(result.semanticLayerCount, 4)
+    assert.deepEqual(result.semanticLayers.map((layer) => layer.type), [
+      'background',
+      'subject',
+      'logo',
+      'decoration',
+    ])
+    assert.ok(result.semanticLayers[1].bbox.x <= 260)
+    assert.ok(result.semanticLayers[1].bbox.y <= 120)
+    assert.ok(result.semanticLayers[1].bbox.x + result.semanticLayers[1].bbox.width >= 560)
+    assert.ok(result.semanticLayers[1].bbox.y + result.semanticLayers[1].bbox.height >= 660)
+    assert.match(result.semanticLayers[1].name, /Main subject|Subject/i)
+    assert.ok(result.semanticLayers[3].bbox.x <= 90)
+    assert.ok(result.semanticLayers[3].bbox.y <= 80)
+    assert.ok(result.semanticLayers[3].bbox.x + result.semanticLayers[3].bbox.width >= 888)
+    assert.ok(result.semanticLayers[3].bbox.y + result.semanticLayers[3].bbox.height >= 138)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('PSD extraction target selection keeps meaningful objects ahead of tiny high-z fragments', async () => {
+  const { mod, cleanup } = await importEntry('functions/api/canvas/psd-ocr.ts', ['selectCanvasPsdExtractionTargets'])
+  try {
+    const layers = [
+      {
+        name: 'Tiny glow',
+        type: 'effect',
+        bbox: { x: 20, y: 20, width: 20, height: 20 },
+        description: '',
+        confidence: 0.7,
+        zIndex: 99,
+      },
+      {
+        name: 'Main product',
+        type: 'subject',
+        bbox: { x: 220, y: 160, width: 420, height: 360 },
+        description: '',
+        confidence: 0.92,
+        zIndex: 40,
+      },
+      {
+        name: 'Logo',
+        type: 'logo',
+        bbox: { x: 720, y: 620, width: 180, height: 90 },
+        description: '',
+        confidence: 0.86,
+        zIndex: 80,
+      },
+    ]
+
+    const targets = mod.selectCanvasPsdExtractionTargets(layers, 2, 1000, 800)
+
+    assert.deepEqual(targets.map((layer) => layer.name), ['Main product', 'Logo'])
+  } finally {
+    await cleanup()
+  }
+})
+
+test('PSD cutout generation runs layer jobs concurrently and keeps failure warnings', async () => {
+  const { mod, cleanup } = await importEntry('functions/api/canvas/psd-ocr.ts', ['runCanvasPsdCutoutJobs'])
+  try {
+    const layers = [
+      { name: 'Main subject', type: 'subject', bbox: { x: 0, y: 0, width: 10, height: 10 } },
+      { name: 'Logo', type: 'logo', bbox: { x: 10, y: 10, width: 10, height: 10 } },
+      { name: 'Decoration', type: 'decoration', bbox: { x: 20, y: 20, width: 10, height: 10 } },
+    ]
+    let active = 0
+    let peakActive = 0
+    const result = await mod.runCanvasPsdCutoutJobs(layers, async (layer) => {
+      active += 1
+      peakActive = Math.max(peakActive, active)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      active -= 1
+      if (layer.name === 'Logo') return { ok: false, error: 'mask failed', status: 502 }
+      return { ok: true, dataUrl: `data:image/png;base64,${Buffer.from(layer.name).toString('base64')}` }
+    }, { concurrency: 2 })
+
+    assert.equal(peakActive, 2)
+    assert.deepEqual(result.extractedLayers.map((layer) => layer.name), ['Main subject', 'Decoration'])
+    assert.deepEqual(result.warnings, ['Logo 透明图层生成失败：mask failed'])
+  } finally {
+    await cleanup()
+  }
+})

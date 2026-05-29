@@ -118,6 +118,7 @@ async function createHistoryHarness() {
     'sanitizeAiMessages',
     'sanitizeAiMessageImages',
     'sanitizeAiWorkflowItems',
+    'sanitizeAiMessageStyleIntent',
     'sanitizeAiMessageRefs',
     'shouldInlineHistoryDataUrl',
   ]
@@ -267,4 +268,35 @@ test('legacy assistant image fields migrate into images array', async () => {
 
   assert.equal(sanitized[0].images.length, 1)
   assert.equal(sanitized[0].images[0].assetId, 'asset-legacy')
+})
+
+test('canvas AI history preserves prompt suggestions and style intent metadata', async () => {
+  const harness = await createHistoryHarness()
+
+  harness.state.generate.projectId = 'canvas-a'
+  harness.state.generate.aiMessages = [{
+    id: 'assistant-style',
+    role: 'assistant',
+    content: '你想走哪种视觉风格？',
+    suggestions: ['做成杂志摄影风格', '做成扁平插画风格'],
+    needsClarification: true,
+    styleIntent: {
+      category: 'campaign_poster',
+      medium: 'undecided',
+      visualLanguage: 'needs user choice',
+      reason: '用户没有指定视觉风格',
+    },
+  }]
+
+  harness.saveAiHistory()
+  const [message] = harness.loadAiHistory('canvas-a')
+
+  assert.deepEqual(message.suggestions, ['做成杂志摄影风格', '做成扁平插画风格'])
+  assert.equal(message.needsClarification, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(message.styleIntent)), {
+    category: 'campaign_poster',
+    medium: 'undecided',
+    visualLanguage: 'needs user choice',
+    reason: '用户没有指定视觉风格',
+  })
 })
