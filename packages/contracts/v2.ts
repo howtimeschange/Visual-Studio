@@ -4,6 +4,7 @@ export type JobType =
   | 'translate_batch'
   | 'generate_turn'
   | 'outfit_batch'
+  | 'style_transfer_batch'
   | 'generate_batch'
 
 export type JobStatus =
@@ -18,6 +19,7 @@ export type JobStatus =
 export type JobItemType =
   | 'translate_cell'
   | 'outfit_cell'
+  | 'style_transfer_cell'
   | 'generate_turn_step'
   | 'generate_batch_item'
 

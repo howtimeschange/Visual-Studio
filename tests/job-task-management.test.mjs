@@ -30,13 +30,15 @@ async function createJobHarness() {
     CURRENT_TASK_JOB_STATUSES: new Set(['queued', 'running', 'paused', 'partial_failed', 'failed']),
     JOB_TASKS_PER_PAGE: 5,
     clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
-    sanitizeFileName: (value) => String(value || '').replace(/[^\w.-]+/g, '_'),
+    sanitizeFileName: (value) => String(value || '').replace(/[\\/:*?"<>|]+/g, '-'),
     state: {
       translate: { jobs: [], jobId: '', jobTab: 'current' },
       outfit: { jobs: [], jobId: '', jobTab: 'current' },
+      style: { jobs: [], jobId: '', jobTab: 'current' },
     },
     translateJobWatchers: new Map(),
     outfitJobWatchers: new Map(),
+    styleJobWatchers: new Map(),
   }
   const functionNames = [
     'sanitizeJobTaskThumbs',
@@ -222,6 +224,35 @@ test('outfit job task thumbnails mix model and garment references without duplic
   ])
 })
 
+test('style job tasks are isolated and use source plus subject thumbnails', async () => {
+  const harness = await createJobHarness()
+  harness.state.style.jobs = [
+    { jobId: 'style-a', loaded: false },
+    { jobId: 'style-b', loaded: false },
+  ]
+
+  harness.markJobTaskLoaded('style', 'style-b')
+  assert.equal(harness.state.style.jobId, 'style-b')
+  assert.deepEqual(
+    harness.state.style.jobs.map((task) => ({ jobId: task.jobId, loaded: task.loaded })),
+    [
+      { jobId: 'style-a', loaded: false },
+      { jobId: 'style-b', loaded: true },
+    ],
+  )
+
+  const thumbs = harness.getJobTaskThumbsFromItems('style', [
+    { inputJson: { sourceAssetId: 'style-source', subjectAssetIds: ['subject-a'], subject: '手袋' } },
+    { inputJson: { sourceAssetId: 'style-source', subjectAssetIds: ['subject-b'], subject: '鞋子' } },
+  ])
+
+  assert.deepEqual(JSON.parse(JSON.stringify(thumbs)), [
+    { src: '/api/results/style-source', label: '风格源图' },
+    { src: '/api/results/subject-a', label: '主体 1' },
+    { src: '/api/results/subject-b', label: '主体 2' },
+  ])
+})
+
 test('canvas generate result asset fetch retries transient empty reads', async () => {
   const source = await readFile(APP_PATH, 'utf8')
   const calls = []
@@ -314,11 +345,21 @@ test('job task downloads include completed outputs from task items', async () =>
       outputJson: { resultAssetId: 'outfit-a' },
     },
   ]
+  const styleItems = [
+    {
+      status: 'completed',
+      inputJson: { subject: '红色手袋' },
+      outputJson: { resultAssetId: 'style-a' },
+    },
+  ]
 
   assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('translate', translateItems))), [
     { href: '/api/results/translated-a', name: 'source-a.en.png' },
   ])
   assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('outfit', outfitItems))), [
     { href: '/api/results/outfit-a', name: 'model-a__look-1.png' },
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('style', styleItems))), [
+    { href: '/api/results/style-a', name: 'style-transfer-红色手袋.png' },
   ])
 })

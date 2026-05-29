@@ -55,6 +55,8 @@ const MODEL_OPTIONS = [
 
 const TRANSLATE_FONT_MODES = new Set(['match_original', 'reference'])
 const DEFAULT_TRANSLATE_MODEL = 'gpt-image-2'
+const DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY = 10
+const MAX_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const TRANSLATE_TEXT_COLOR_MODES = new Set(['match_original', 'custom'])
 const TRANSLATE_TEXT_COLOR_SWATCHES = [
   '#111827',
@@ -240,10 +242,13 @@ const KNOWN_JOB_STATUSES = new Set(['', 'queued', 'running', 'paused', 'complete
 const JOB_TASKS_PER_PAGE = 5
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
+let styleWatcherToken = 0
 const translateJobWatchers = new Map()
 const outfitJobWatchers = new Map()
+const styleJobWatchers = new Map()
 let translateWorkspaceLoadToken = 0
 let outfitWorkspaceLoadToken = 0
+let styleWorkspaceLoadToken = 0
 let canvasSpaceHeld = false
 let canvasSaveTimer = 0
 let canvasSaveInFlight = null
@@ -271,7 +276,7 @@ const state = {
     targets: ['en'],
     model: DEFAULT_TRANSLATE_MODEL,
     preserveBrand: true,
-    concurrency: 3,
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
     fontMode: 'match_original',
     fontFamily: '',
     fontPrompt: '',
@@ -330,6 +335,7 @@ const state = {
     aiSessions: [],
     aiMessages: [],
     aiRefs: [],
+    aiMode: 'image',
     aiRunning: false,
     // gen panel
     genTargetId: '',
@@ -385,7 +391,7 @@ const state = {
   outfit: {
     model: 'nano-banana-2',
     garmentType: 'full_outfit',
-    concurrency: 3,
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
     models: [],
     garments: [],
 	    results: {},
@@ -400,6 +406,14 @@ const state = {
   },
   style: {
     model: 'nano-banana-2',
+    running: false,
+    submittingJobId: '',
+    pendingSignature: '',
+    progress: '',
+    jobId: '',
+    jobTab: 'current',
+    jobPage: 1,
+    jobs: [],
     sourceImage: null,
     visualStyle: null,
     styleSummary: '',
@@ -411,6 +425,7 @@ const state = {
     generating: false,
     pendingTask: null,
     resultDataUrl: '',
+    batchResults: [],
     error: '',
     history: [],
   },
@@ -438,7 +453,6 @@ const dom = {
   targetMenu: $('#target-langs-menu'),
   targetChips: $('#target-chips'),
   tModel: $('#t-model'),
-  tConcurrency: $('#t-concurrency'),
   tPreserve: $('#t-preserve'),
   tFontMode: $('#t-font-mode'),
   tFontPrompt: $('#t-font-prompt'),
@@ -511,6 +525,7 @@ const dom = {
   gZoomIn: $('#g-zoom-in'),
   gZoomValue: $('#g-zoom-value'),
   gContextMenu: $('#g-context-menu'),
+  gAiMode: $('#g-ai-mode'),
   gAiModel: $('#g-ai-model'),
   gAiRatio: $('#g-ai-ratio'),
   gAiResolution: $('#g-ai-resolution'),
@@ -568,7 +583,6 @@ const dom = {
   taskDeleteStatus: $('#task-delete-status'),
   oModel: $('#o-model'),
   oGarmentType: $('#o-garment-type'),
-  oConcurrency: $('#o-concurrency'),
   oModelInput: $('#o-model-input'),
   oModelAdd: $('#o-model-add'),
   oModelLibraryOpen: $('#o-model-library-open'),
@@ -628,6 +642,9 @@ const dom = {
   sResultLightbox: $('#s-result-lightbox'),
   sDownload: $('#s-download'),
   sError: $('#s-error'),
+  sJobList: $('#s-job-list'),
+  sJobEmpty: $('#s-job-empty'),
+  sJobTabs: $$('#s-job-tabs [data-job-tab]'),
   sHistorySection: $('#s-history-section'),
   sHistory: $('#s-history'),
   sClearHistory: $('#s-clear-history'),
@@ -796,6 +813,7 @@ function hydrateStoredState() {
   state.style.colorPalette = runtime.style?.colorPalette || []
   state.style.tags = runtime.style?.tags || []
   state.style.subjectRefs = runtime.style?.subjectRefs || []
+  state.style.batchResults = runtime.style?.batchResults || []
   state.style.history = getStoredStyleHistory(storedResults, runtime.style?.history)
     .filter((entry) => entry.resultDataUrl)
 
@@ -827,7 +845,7 @@ function sanitizeTranslatePrefs(raw = {}) {
     targets: targetCodes.length ? unique(targetCodes) : state.translate.targets,
     model: getModel(raw.model)?.id || state.translate.model,
     preserveBrand: typeof raw.preserveBrand === 'boolean' ? raw.preserveBrand : state.translate.preserveBrand,
-    concurrency: clamp(Number(raw.concurrency) || state.translate.concurrency, 1, 6),
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
     fontMode: normalizeTranslateFontMode(raw.fontMode),
     fontFamily: '',
     fontPrompt: normalizeTranslateFontPrompt(raw.fontPrompt),
@@ -864,6 +882,96 @@ function normalizeTranslateTextColor(value, fallback = '') {
   return fallback
 }
 
+function normalizeCanvasCreativeMode(value) {
+  return String(value || '') === 'poster_banner' ? 'poster_banner' : 'image'
+}
+
+function applyCanvasCreativeModeDefaults() {
+  if (state.generate.aiMode !== 'poster_banner') return
+  if (normalizeAspectRatio(state.generate.genRatio) !== '1:1') return
+  state.generate.genRatio = '16:9'
+  if (dom.gAiRatio) dom.gAiRatio.value = '16:9'
+  if (dom.gGenRatio) dom.gGenRatio.value = '16:9'
+}
+
+function inferPosterHeadline(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return '主题海报'
+  return (text.split(/[，。！？,.!?；;：:\n]/)[0] || text).trim().slice(0, 28) || '主题海报'
+}
+
+function normalizeCanvasPosterLayout(value, aspectRatio = '1:1') {
+  const text = String(value || '').trim()
+  if (['left', 'right', 'top', 'bottom', 'center'].includes(text)) return text
+  return ['9:16', '3:4', '1:4', '1:8'].includes(normalizeAspectRatio(aspectRatio)) ? 'bottom' : 'left'
+}
+
+function normalizeCanvasPosterBrief(value = {}, fallbackRequest = '') {
+  const aspectRatio = normalizeAspectRatio(value.aspectRatio || state.generate.genRatio)
+  const resolution = normalizeCanvasResolution(value.resolution || state.generate.genResolution)
+  const layout = normalizeCanvasPosterLayout(value.layout, aspectRatio)
+  const sourceRequest = String(value.sourceRequest || fallbackRequest || '').replace(/\s+/g, ' ').trim().slice(0, 200)
+  return {
+    format: ['poster', 'banner'].includes(String(value.format || '')) ? String(value.format) : (['9:16', '3:4', '1:4', '1:8'].includes(aspectRatio) ? 'poster' : 'banner'),
+    headline: String(value.headline || inferPosterHeadline(sourceRequest)).replace(/\s+/g, ' ').trim().slice(0, 36) || '主题海报',
+    subheadline: String(value.subheadline || '').replace(/\s+/g, ' ').trim().slice(0, 72),
+    cta: String(value.cta || '').replace(/\s+/g, ' ').trim().slice(0, 18),
+    badges: Array.isArray(value.badges) ? value.badges.map((item) => String(item || '').replace(/\s+/g, ' ').trim().slice(0, 16)).filter(Boolean).slice(0, 4) : [],
+    layout,
+    copySafeArea: String(value.copySafeArea || getDefaultPosterCopySafeArea(layout)).replace(/\s+/g, ' ').trim().slice(0, 32),
+    aspectRatio,
+    resolution,
+    sourceRequest,
+  }
+}
+
+function buildCanvasPosterBrief(requestText, aspectRatio, resolution) {
+  return normalizeCanvasPosterBrief({
+    format: ['9:16', '3:4', '1:4', '1:8'].includes(normalizeAspectRatio(aspectRatio)) ? 'poster' : 'banner',
+    headline: inferPosterHeadline(requestText),
+    layout: ['9:16', '3:4', '1:4', '1:8'].includes(normalizeAspectRatio(aspectRatio)) ? 'bottom' : 'left',
+    aspectRatio,
+    resolution,
+    sourceRequest: requestText,
+  }, requestText)
+}
+
+function getDefaultPosterCopySafeArea(layout) {
+  return ({
+    left: 'left 42%',
+    right: 'right 42%',
+    top: 'top 32%',
+    bottom: 'bottom 35%',
+    center: 'center 52%',
+  })[layout] || 'left 42%'
+}
+
+function getPosterAccentColor(brief = {}) {
+  const text = `${brief.headline || ''} ${brief.subheadline || ''} ${brief.sourceRequest || ''}`.toLowerCase()
+  if (/(ai|gpu|nvidia|黄仁勋|英伟达|科技|芯片|未来)/i.test(text)) return '#5ee6a8'
+  if (/(电影|影院|cinema|film|港|香港|动作|传记)/i.test(text)) return '#ffad39'
+  if (/(新品|上新|促销|夏促|sale|campaign|banner)/i.test(text)) return '#ff7a45'
+  return '#ff9f2d'
+}
+
+function getPosterCompositionTheme(brief = {}, width = 1024, height = 1024) {
+  const accent = getPosterAccentColor(brief)
+  const vertical = height > width * 1.12
+  const poster = brief.format === 'poster' || vertical
+  return {
+    accent,
+    text: '#fffdf6',
+    muted: 'rgba(255, 255, 255, 0.80)',
+    hairline: 'rgba(255, 255, 255, 0.18)',
+    panel: poster ? 'rgba(5, 5, 7, 0.66)' : 'rgba(5, 5, 7, 0.58)',
+    badgeFill: 'rgba(8, 8, 10, 0.58)',
+    ctaText: '#18110a',
+    meta: poster ? 'POSTER VISUAL' : 'CAMPAIGN VISUAL',
+    vertical,
+    poster,
+  }
+}
+
 function getEffectiveTranslateFontMode(config = state.translate) {
   const mode = normalizeTranslateFontMode(config.fontMode)
   if (mode === 'reference' && !config.fontReferenceAssetId && !config.fontReference?.assetId) {
@@ -884,6 +992,7 @@ function sanitizeGeneratePrefs(raw = {}) {
     genRatio: normalizeAspectRatio(raw.genRatio || raw.aspectRatio || state.generate.genRatio),
     genResolution: normalizeCanvasResolution(raw.genResolution || raw.resolution || state.generate.genResolution),
     genUseAgent: typeof raw.genUseAgent === 'boolean' ? raw.genUseAgent : (typeof raw.useDesignAgent === 'boolean' ? raw.useDesignAgent : state.generate.genUseAgent),
+    aiMode: normalizeCanvasCreativeMode(raw.aiMode || state.generate.aiMode),
   }
 }
 
@@ -894,7 +1003,7 @@ function sanitizeOutfitPrefs(raw = {}) {
   return {
     model: getModel(raw.model)?.id || state.outfit.model,
     garmentType,
-    concurrency: clamp(Number(raw.concurrency) || state.outfit.concurrency, 1, 4),
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
   }
 }
 
@@ -907,7 +1016,6 @@ function savePrefs() {
       targets: state.translate.targets,
       model: state.translate.model,
       preserveBrand: state.translate.preserveBrand,
-      concurrency: state.translate.concurrency,
       fontMode: state.translate.fontMode,
       fontFamily: state.translate.fontFamily,
       fontPrompt: state.translate.fontPrompt,
@@ -920,11 +1028,11 @@ function savePrefs() {
       genRatio: state.generate.genRatio,
       genResolution: state.generate.genResolution,
       genUseAgent: state.generate.genUseAgent,
+      aiMode: state.generate.aiMode,
     },
     outfit: {
       model: state.outfit.model,
       garmentType: state.outfit.garmentType,
-      concurrency: state.outfit.concurrency,
     },
     style: {
       model: state.style.model,
@@ -975,12 +1083,18 @@ function createRuntimeStorageSnapshot() {
       })),
     },
     style: {
+      jobId: state.style.jobId || '',
+      jobTab: state.style.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(state.style.jobPage) || 1),
+      jobs: state.style.jobs.map(serializeJobTask),
       sourceImage: state.style.sourceImage ? serializeAssetBackedItem(state.style.sourceImage) : null,
       visualStyle: state.style.visualStyle,
       styleSummary: state.style.styleSummary,
       colorPalette: state.style.colorPalette,
       tags: state.style.tags,
+      subject: state.style.subject,
       subjectRefs: state.style.subjectRefs.map((item) => serializeAssetBackedItem(item)),
+      batchResults: serializeStyleResultEntries(state.style.batchResults),
     },
   }
 }
@@ -1025,14 +1139,20 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
       garments: Array.isArray(snapshot.outfit?.garments) ? snapshot.outfit.garments.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
     },
     style: {
+      jobId: String(snapshot.style?.jobId || ''),
+      jobTab: snapshot.style?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(snapshot.style?.jobPage) || 1),
+      jobs: Array.isArray(snapshot.style?.jobs) ? snapshot.style.jobs.slice(-RUNTIME_FALLBACK_TASK_LIMIT) : [],
       sourceImage: snapshot.style?.sourceImage || null,
       visualStyle: snapshot.style?.visualStyle || null,
       styleSummary: String(snapshot.style?.styleSummary || ''),
       colorPalette: Array.isArray(snapshot.style?.colorPalette) ? snapshot.style.colorPalette : [],
       tags: Array.isArray(snapshot.style?.tags) ? snapshot.style.tags : [],
+      subject: String(snapshot.style?.subject || ''),
       subjectRefs: Array.isArray(snapshot.style?.subjectRefs)
         ? snapshot.style.subjectRefs.slice(-RUNTIME_FALLBACK_SUBJECT_REF_LIMIT)
         : [],
+      batchResults: serializeStyleResultEntries(snapshot.style?.batchResults),
     },
   }
 }
@@ -1392,6 +1512,7 @@ function clearCurrentAiSession() {
 function sanitizeRuntimeState(raw = {}) {
   const translateJobs = sanitizeStoredJobTasks(raw.translate?.jobs, raw.translate?.jobId, 'translate_batch')
   const outfitJobs = sanitizeStoredJobTasks(raw.outfit?.jobs, raw.outfit?.jobId, 'outfit_batch')
+  const styleJobs = sanitizeStoredJobTasks(raw.style?.jobs, raw.style?.jobId, 'style_transfer_batch')
   const translateItems = Array.isArray(raw.translate?.items)
     ? raw.translate.items
       .map((item) => sanitizeStoredAssetItem(item))
@@ -1450,14 +1571,20 @@ function sanitizeRuntimeState(raw = {}) {
       garments: outfitGarments,
     },
     style: {
+      jobId: typeof raw.style?.jobId === 'string' ? raw.style.jobId : '',
+      jobTab: raw.style?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(raw.style?.jobPage) || 1),
+      jobs: styleJobs,
       sourceImage: raw.style?.sourceImage ? sanitizeStoredAssetItem(raw.style.sourceImage) : null,
       visualStyle: raw.style?.visualStyle || null,
       styleSummary: typeof raw.style?.styleSummary === 'string' ? raw.style.styleSummary : '',
       colorPalette: Array.isArray(raw.style?.colorPalette) ? raw.style.colorPalette : [],
       tags: Array.isArray(raw.style?.tags) ? raw.style.tags : [],
+      subject: typeof raw.style?.subject === 'string' ? raw.style.subject : '',
       subjectRefs: Array.isArray(raw.style?.subjectRefs)
         ? raw.style.subjectRefs.map((item) => sanitizeStoredAssetItem(item)).filter(Boolean)
         : [],
+      batchResults: sanitizeStyleResultEntries(raw.style?.batchResults),
       history: sanitizeStyleHistoryEntries(raw.style?.history),
     },
   }
@@ -1506,19 +1633,27 @@ function getLoadedStoredJobId(tasks = []) {
 }
 
 function getJobTasks(kind) {
-  return kind === 'translate' ? state.translate.jobs : state.outfit.jobs
+  if (kind === 'translate') return state.translate.jobs
+  if (kind === 'style') return state.style.jobs
+  return state.outfit.jobs
 }
 
 function getLoadedJobId(kind) {
-  return kind === 'translate' ? state.translate.jobId : state.outfit.jobId
+  if (kind === 'translate') return state.translate.jobId
+  if (kind === 'style') return state.style.jobId
+  return state.outfit.jobId
 }
 
 function getJobTab(kind) {
-  return kind === 'translate' ? state.translate.jobTab : state.outfit.jobTab
+  if (kind === 'translate') return state.translate.jobTab
+  if (kind === 'style') return state.style.jobTab
+  return state.outfit.jobTab
 }
 
 function getJobPage(kind) {
-  return kind === 'translate' ? state.translate.jobPage : state.outfit.jobPage
+  if (kind === 'translate') return state.translate.jobPage
+  if (kind === 'style') return state.style.jobPage
+  return state.outfit.jobPage
 }
 
 function setJobTab(kind, tab) {
@@ -1526,6 +1661,9 @@ function setJobTab(kind, tab) {
   if (kind === 'translate') {
     state.translate.jobTab = next
     state.translate.jobPage = 1
+  } else if (kind === 'style') {
+    state.style.jobTab = next
+    state.style.jobPage = 1
   } else {
     state.outfit.jobTab = next
     state.outfit.jobPage = 1
@@ -1538,6 +1676,8 @@ function setJobPage(kind, page) {
   const next = clampJobTaskPage(tasks, tab, page)
   if (kind === 'translate') {
     state.translate.jobPage = next
+  } else if (kind === 'style') {
+    state.style.jobPage = next
   } else {
     state.outfit.jobPage = next
   }
@@ -1547,6 +1687,8 @@ function setJobPage(kind, page) {
 function setLoadedJobId(kind, jobId) {
   if (kind === 'translate') {
     state.translate.jobId = jobId || ''
+  } else if (kind === 'style') {
+    state.style.jobId = jobId || ''
   } else {
     state.outfit.jobId = jobId || ''
   }
@@ -1575,7 +1717,7 @@ function makeJobTask(jobId, type, extra = {}) {
 function upsertJobTask(kind, jobId, patch = {}) {
   if (!jobId) return null
   const tasks = getJobTasks(kind)
-  const type = kind === 'translate' ? 'translate_batch' : 'outfit_batch'
+  const type = kind === 'translate' ? 'translate_batch' : kind === 'style' ? 'style_transfer_batch' : 'outfit_batch'
   let task = tasks.find((entry) => entry.jobId === jobId)
   if (task) {
     Object.assign(task, patch)
@@ -1595,6 +1737,11 @@ function removeJobTask(kind, jobId) {
     if (state.translate.jobId === jobId) state.translate.jobId = ''
     translateJobWatchers.delete(jobId)
     state.translate.jobPage = clampJobTaskPage(state.translate.jobs, state.translate.jobTab, state.translate.jobPage)
+  } else if (kind === 'style') {
+    state.style.jobs = state.style.jobs.filter((task) => task.jobId !== jobId)
+    if (state.style.jobId === jobId) state.style.jobId = ''
+    styleJobWatchers.delete(jobId)
+    state.style.jobPage = clampJobTaskPage(state.style.jobs, state.style.jobTab, state.style.jobPage)
   } else {
     state.outfit.jobs = state.outfit.jobs.filter((task) => task.jobId !== jobId)
     if (state.outfit.jobId === jobId) state.outfit.jobId = ''
@@ -1667,6 +1814,10 @@ function resetLoadedWorkspaceForDraft(kind) {
     translateWorkspaceLoadToken += 1
     state.translate.items = []
     state.translate.progress = ''
+  } else if (kind === 'style') {
+    styleWorkspaceLoadToken += 1
+    state.style.resultDataUrl = ''
+    state.style.progress = ''
   } else {
     outfitWorkspaceLoadToken += 1
     state.outfit.models = []
@@ -1824,6 +1975,16 @@ function getJobTaskThumbsFromItems(kind, items = []) {
     }
     return thumbs
   }
+  if (kind === 'style') {
+    for (const item of Array.isArray(items) ? items : []) {
+      addJobTaskThumb(thumbs, seen, item?.inputJson?.sourceAssetId, '风格源图')
+      const subjectAssetIds = Array.isArray(item?.inputJson?.subjectAssetIds) ? item.inputJson.subjectAssetIds : []
+      for (const assetId of subjectAssetIds) {
+        addJobTaskThumb(thumbs, seen, assetId, `主体 ${Math.max(1, thumbs.length)}`)
+      }
+    }
+    return thumbs
+  }
 
   let modelCount = 0
   let garmentCount = 0
@@ -1859,6 +2020,16 @@ function getJobTaskThumbsFromWorkspace(kind) {
     }
     return thumbs
   }
+  if (kind === 'style') {
+    addJobTaskThumbFromItem(thumbs, seen, state.style.sourceImage, '风格源图')
+    let subjectCount = 0
+    for (const item of state.style.subjectRefs) {
+      const before = thumbs.length
+      addJobTaskThumbFromItem(thumbs, seen, item, `主体 ${subjectCount + 1}`)
+      if (thumbs.length > before) subjectCount += 1
+    }
+    return thumbs
+  }
 
   let modelCount = 0
   for (const item of state.outfit.models) {
@@ -1888,7 +2059,7 @@ function updateJobTaskFromJob(task, job, items = null) {
   task.progressFailed = Number(job.progressFailed || 0)
   task.itemCount = Array.isArray(items) ? items.length : Number(task.itemCount || job.progressTotal || 0)
   if (Array.isArray(items)) {
-    const kind = job.type === 'translate_batch' ? 'translate' : 'outfit'
+    const kind = job.type === 'translate_batch' ? 'translate' : job.type === 'style_transfer_batch' ? 'style' : 'outfit'
     const thumbs = getJobTaskThumbsFromItems(kind, items)
     task.thumbs = thumbs.length ? thumbs : getJobTaskThumbsFromWorkspace(kind)
   }
@@ -1908,6 +2079,10 @@ function createJobTaskLabel(job, items = null) {
     const languages = Array.isArray(job?.configJson?.targetLanguages) ? job.configJson.targetLanguages.length : 0
     const assets = Array.isArray(job?.configJson?.assetIds) ? job.configJson.assetIds.length : 0
     return `${created} · ${assets || '多'} 张 × ${languages || '多'} 语种`
+  }
+  if (job?.type === 'style_transfer_batch') {
+    const subjects = Number(job?.summaryJson?.subjectCount || job?.progressTotal || 0)
+    return `${created} · ${subjects || '多'} 个主体`
   }
   return `${created} · ${Array.isArray(items) ? items.length : total} 项`
 }
@@ -1945,16 +2120,24 @@ function releaseCompletedLoadedTasksForKind(kind) {
 function releaseCompletedLoadedTasksForView(view) {
   if (view === 'translate') return releaseCompletedLoadedTasksForKind('translate')
   if (view === 'outfit') return releaseCompletedLoadedTasksForKind('outfit')
+  if (view === 'style') return releaseCompletedLoadedTasksForKind('style')
   return false
 }
 
 async function loadJobIntoWorkspace(kind, jobId) {
-  const loadToken = kind === 'translate' ? ++translateWorkspaceLoadToken : ++outfitWorkspaceLoadToken
+  const loadToken = kind === 'translate'
+    ? ++translateWorkspaceLoadToken
+    : kind === 'style'
+      ? ++styleWorkspaceLoadToken
+      : ++outfitWorkspaceLoadToken
   const task = upsertJobTask(kind, jobId, { syncing: true, error: '' })
   markJobTaskLoaded(kind, jobId)
   if (kind === 'translate') {
     state.translate.progress = '正在切换任务结果…'
     renderTranslate()
+  } else if (kind === 'style') {
+    state.style.progress = '正在切换任务结果…'
+    renderStyle()
   } else {
     state.outfit.progress = '正在切换任务结果…'
     renderOutfit()
@@ -1962,7 +2145,8 @@ async function loadJobIntoWorkspace(kind, jobId) {
   renderJobList(kind)
   try {
     const { job, items } = await fetchJobSnapshot(jobId)
-    if ((kind === 'translate' ? translateWorkspaceLoadToken : outfitWorkspaceLoadToken) !== loadToken) {
+    const currentToken = kind === 'translate' ? translateWorkspaceLoadToken : kind === 'style' ? styleWorkspaceLoadToken : outfitWorkspaceLoadToken
+    if (currentToken !== loadToken) {
       return
     }
     updateJobTaskFromJob(task, job, items)
@@ -1971,6 +2155,10 @@ async function loadJobIntoWorkspace(kind, jobId) {
       if (translateWorkspaceLoadToken !== loadToken) return
       applyTranslateJobSnapshot(job, items)
       renderTranslateDropdowns()
+    } else if (kind === 'style') {
+      await hydrateStyleWorkspaceFromJob(job, items)
+      if (styleWorkspaceLoadToken !== loadToken) return
+      applyStyleJobSnapshot(job, items)
     } else {
       await hydrateOutfitWorkspaceFromJob(job, items)
       if (outfitWorkspaceLoadToken !== loadToken) return
@@ -1979,11 +2167,14 @@ async function loadJobIntoWorkspace(kind, jobId) {
     saveRuntimeState()
     if (kind === 'translate') {
       void syncTranslateJob(jobId, { applyToWorkspace: true })
+    } else if (kind === 'style') {
+      void syncStyleJob(jobId, { applyToWorkspace: true })
     } else {
       void syncOutfitJob(jobId, { applyToWorkspace: true })
     }
   } catch (error) {
-    if ((kind === 'translate' ? translateWorkspaceLoadToken : outfitWorkspaceLoadToken) !== loadToken) {
+    const currentToken = kind === 'translate' ? translateWorkspaceLoadToken : kind === 'style' ? styleWorkspaceLoadToken : outfitWorkspaceLoadToken
+    if (currentToken !== loadToken) {
       return
     }
     const status = Number(error?.status || 0)
@@ -1992,11 +2183,14 @@ async function loadJobIntoWorkspace(kind, jobId) {
       clearJobTaskLoaded(kind)
       if (kind === 'translate') {
         state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
+      } else if (kind === 'style') {
+        state.style.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       } else {
         state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       }
       saveRuntimeState()
       if (kind === 'translate') renderTranslate()
+      else if (kind === 'style') renderStyle()
       else renderOutfit()
       return
     }
@@ -2004,6 +2198,7 @@ async function loadJobIntoWorkspace(kind, jobId) {
     clearJobTaskLoaded(kind)
     saveRuntimeState()
     if (kind === 'translate') renderTranslate()
+    else if (kind === 'style') renderStyle()
     else renderOutfit()
   } finally {
     if (task) task.syncing = false
@@ -2018,6 +2213,8 @@ async function pauseJobTask(kind, jobId) {
     await postJson(`/api/jobs/${encodeURIComponent(jobId)}/pause`, {})
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2037,6 +2234,8 @@ async function resumeJobTask(kind, jobId) {
     await postJson(`/api/jobs/${encodeURIComponent(jobId)}/resume`, {})
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2057,6 +2256,8 @@ async function retryJobTask(kind, jobId) {
     setJobTab(kind, 'current')
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2076,6 +2277,8 @@ async function cancelJobTask(kind, jobId) {
     await postJson(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {})
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2101,6 +2304,9 @@ async function deleteJobTask(kind, jobId) {
     if (kind === 'translate') {
       state.translate.running = false
       renderTranslate()
+    } else if (kind === 'style') {
+      state.style.running = false
+      renderStyle()
     } else {
       state.outfit.running = false
       renderOutfit()
@@ -2116,7 +2322,7 @@ async function deleteJobTask(kind, jobId) {
 }
 
 function getTaskDeleteTarget() {
-  const kind = state.taskDelete.kind === 'outfit' ? 'outfit' : 'translate'
+  const kind = state.taskDelete.kind === 'outfit' ? 'outfit' : state.taskDelete.kind === 'style' ? 'style' : 'translate'
   const task = state.taskDelete.jobId
     ? getJobTasks(kind).find((entry) => entry.jobId === state.taskDelete.jobId)
     : null
@@ -2136,7 +2342,7 @@ function openTaskDeleteDialog(kind, jobId) {
 function renderTaskDeleteDialog() {
   if (!dom.taskDeleteDialog) return
   const { kind, task } = getTaskDeleteTarget()
-  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate' ? '批量翻译任务' : '批量换装任务')
+  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate' ? '批量翻译任务' : kind === 'style' ? '批量风格迁移任务' : '批量换装任务')
   dom.taskDeleteMeta.textContent = task
     ? `${getJobStatusLabel(task.status)} · ${task.createdAt ? formatTimestamp(task.createdAt) : task.jobId}`
     : ''
@@ -2264,6 +2470,7 @@ function serializeAiMessage(msg = {}) {
   return {
     id: msg.id || crypto.randomUUID(),
     role,
+    creativeMode: normalizeCanvasCreativeMode(msg.creativeMode),
     content: typeof msg.content === 'string' && msg.content
       ? msg.content
       : (msg.loading ? `${msg.loadingText || 'AI 正在处理'}…` : ''),
@@ -2294,6 +2501,10 @@ function serializeAiMessageImage(image = {}) {
     prompt: typeof image.prompt === 'string' ? image.prompt : '',
     actionId: typeof image.actionId === 'string' ? image.actionId : '',
     aspectRatio: normalizeAspectRatio(image.aspectRatio || ''),
+    creativeMode: normalizeCanvasCreativeMode(image.creativeMode),
+    promptStyle: image.promptStyle === 'visual_base' ? 'visual_base' : '',
+    posterBrief: image.creativeMode === 'poster_banner' ? normalizeCanvasPosterBrief(image.posterBrief || {}, image.prompt || '') : null,
+    baseAssetId: typeof image.baseAssetId === 'string' ? image.baseAssetId : '',
   }
 }
 
@@ -2307,6 +2518,9 @@ function serializeAiWorkflowItem(item = {}) {
     prompt,
     status: ['queued', 'running', 'completed', 'failed'].includes(item.status) ? item.status : 'queued',
     error: typeof item.error === 'string' ? item.error : '',
+    creativeMode: normalizeCanvasCreativeMode(item.creativeMode),
+    promptStyle: item.promptStyle === 'visual_base' ? 'visual_base' : '',
+    posterBrief: item.creativeMode === 'poster_banner' ? normalizeCanvasPosterBrief(item.posterBrief || {}, prompt) : null,
   }
 }
 
@@ -2342,6 +2556,7 @@ function sanitizeAiMessages(value) {
       return {
         id: typeof msg.id === 'string' ? msg.id : crypto.randomUUID(),
         role,
+        creativeMode: normalizeCanvasCreativeMode(msg.creativeMode),
         content: typeof msg.content === 'string' ? msg.content : '',
         steps: Array.isArray(msg.steps) ? msg.steps.map(String).filter(Boolean).slice(0, 8) : [],
         refs: sanitizeAiMessageRefs(msg.refs),
@@ -2523,6 +2738,38 @@ function sanitizeStyleHistoryEntries(value) {
     })
     .filter(Boolean)
     .slice(-STYLE_HISTORY_LIMIT)
+}
+
+function sanitizeStyleResultEntries(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const assetId = typeof entry?.assetId === 'string' ? entry.assetId.trim() : ''
+      const resultDataUrl = typeof entry?.resultDataUrl === 'string' ? entry.resultDataUrl : ''
+      if (!assetId && !resultDataUrl) return null
+      return {
+        id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
+        subject: typeof entry?.subject === 'string' ? entry.subject : '',
+        assetId,
+        mime: typeof entry?.mime === 'string' ? entry.mime : 'image/png',
+        resultDataUrl,
+        timestamp: Number(entry?.timestamp) || Date.now(),
+      }
+    })
+    .filter(Boolean)
+}
+
+function serializeStyleResultEntries(entries) {
+  return sanitizeStyleResultEntries(entries).map((entry) => ({
+    id: entry.id,
+    subject: entry.subject,
+    assetId: entry.assetId || '',
+    mime: entry.mime || '',
+    resultDataUrl: entry.assetId
+      ? ''
+      : (shouldInlineHistoryDataUrl(entry.resultDataUrl) ? entry.resultDataUrl : ''),
+    timestamp: entry.timestamp,
+  }))
 }
 
 function serializeStyleHistoryEntries(entries) {
@@ -2847,12 +3094,6 @@ async function logoutAccount() {
 function bindTranslate() {
   dom.tModel.addEventListener('change', () => {
     state.translate.model = dom.tModel.value
-    savePrefs()
-    renderTranslate()
-  })
-
-  dom.tConcurrency.addEventListener('change', () => {
-    state.translate.concurrency = clamp(Number(dom.tConcurrency.value) || 1, 1, 6)
     savePrefs()
     renderTranslate()
   })
@@ -5180,6 +5421,10 @@ async function executeCanvasGenerate() {
     let finalPrompt = prompt
     if (state.generate.genUseAgent) {
       setCanvasGenerateStatus(el, '正在整理画面提示词…')
+      const creativeMode = normalizeCanvasCreativeMode(state.generate.aiMode)
+      const posterBrief = creativeMode === 'poster_banner'
+        ? buildCanvasPosterBrief(prompt, state.generate.genRatio, state.generate.genResolution)
+        : null
       const agentData = await postJson('/api/canvas/agent', {
         sessionId: state.runtime.sessionId || undefined,
         message: prompt,
@@ -5188,6 +5433,8 @@ async function executeCanvasGenerate() {
         modelId: state.generate.genModel,
         aspectRatio: state.generate.genRatio,
         resolution: state.generate.genResolution,
+        creativeMode,
+        posterBrief,
         hasReferenceImages: refImages.length > 0,
         clientKeys: { ...state.keys },
       })
@@ -5305,6 +5552,12 @@ function bindAiSidebar() {
     savePrefs()
   })
 
+  dom.gAiMode?.addEventListener('change', () => {
+    state.generate.aiMode = normalizeCanvasCreativeMode(dom.gAiMode.value)
+    applyCanvasCreativeModeDefaults()
+    savePrefs()
+    renderGenerate()
+  })
 
   // 上传参考图
   dom.gAiUpload.addEventListener('click', () => dom.gAiFileInput.click())
@@ -5381,6 +5634,13 @@ function renderAiMessages() {
   dom.gAiMessages.replaceChildren(...state.generate.aiMessages.map((msg) => {
     const node = document.createElement('div')
     node.className = `msg ${msg.role}`
+    if (msg.creativeMode === 'poster_banner') {
+      const modeBadge = document.createElement('div')
+      modeBadge.className = 'msg-mode-badge'
+      modeBadge.textContent = '海报/banner'
+      node.append(modeBadge)
+    }
+
     // 显示用户消息中附带的参考图
     if (msg.role === 'user' && msg.refs?.length) {
       const refsWrap = document.createElement('div')
@@ -5657,6 +5917,7 @@ function normalizeCanvasAgentAction(action, index, fallbackAspectRatio, fallback
   if (!type || !prompt) return null
   const aspectRatio = normalizeAspectRatio(action?.aspectRatio || action?.ratio || fallbackAspectRatio)
   const resolution = normalizeCanvasResolution(action?.resolution || fallbackResolution)
+  const creativeMode = normalizeCanvasCreativeMode(action?.creativeMode)
   const id = String(action?.id || `image_${index + 1}`).replace(/[^\w-]/g, '_').slice(0, 48) || `image_${index + 1}`
   const title = String(action?.title || action?.name || `图片 ${index + 1}`).replace(/\s+/g, ' ').trim().slice(0, 80) || `图片 ${index + 1}`
   return {
@@ -5666,6 +5927,15 @@ function normalizeCanvasAgentAction(action, index, fallbackAspectRatio, fallback
     prompt,
     aspectRatio,
     resolution,
+    creativeMode,
+    promptStyle: action?.promptStyle === 'visual_base' ? 'visual_base' : '',
+    posterBrief: creativeMode === 'poster_banner'
+      ? normalizeCanvasPosterBrief({
+          ...(action?.posterBrief || action?.brief || {}),
+          aspectRatio,
+          resolution,
+        }, prompt)
+      : null,
   }
 }
 
@@ -5682,6 +5952,261 @@ function getCanvasWorkflowPlacement(index, total, aspectRatio) {
   return {
     x: centerX - totalWidth / 2 + col * (size.width + gap),
     y: centerY - size.height / 2 + row * (size.height + gap),
+  }
+}
+
+function getPosterCanvasOutputSize(aspectRatio = '16:9', resolution = '1k') {
+  const ratio = normalizeAspectRatio(aspectRatio, '16:9')
+  const scale = ({ '1k': 1, '2k': 2, '4k': 4 })[normalizeCanvasResolution(resolution)] || 1
+  const base = {
+    '1:1': [1024, 1024],
+    '4:3': [1200, 900],
+    '3:4': [900, 1200],
+    '16:9': [1344, 768],
+    '9:16': [768, 1344],
+    '1:4': [512, 2048],
+    '1:8': [384, 3072],
+  }[ratio] || [1344, 768]
+  return {
+    width: Math.round(base[0] * scale),
+    height: Math.round(base[1] * scale),
+  }
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Failed to load image for poster composition'))
+    image.src = src
+  })
+}
+
+function wrapPosterText(ctx, text, maxWidth, maxLines = 2) {
+  const raw = String(text || '').trim()
+  if (!raw) return []
+  const hasSpaces = /\s/.test(raw)
+  const units = hasSpaces ? raw.split(/\s+/) : Array.from(raw)
+  const lines = []
+  let current = ''
+  for (const unit of units) {
+    const next = hasSpaces ? (current ? `${current} ${unit}` : unit) : `${current}${unit}`
+    if (ctx.measureText(next).width <= maxWidth || !current) {
+      current = next
+      continue
+    }
+    lines.push(current)
+    current = unit
+    if (lines.length >= maxLines) break
+  }
+  if (current && lines.length < maxLines) lines.push(current)
+  if (lines.length === maxLines && units.length) {
+    const last = lines[lines.length - 1]
+    let trimmed = last
+    while (trimmed.length > 1 && ctx.measureText(`${trimmed}…`).width > maxWidth) {
+      trimmed = trimmed.slice(0, -1)
+    }
+    if (trimmed !== last) lines[lines.length - 1] = `${trimmed}…`
+  }
+  return lines
+}
+
+function getPosterTextBox(brief, width, height) {
+  const margin = Math.round(Math.min(width, height) * 0.07)
+  const layout = normalizeCanvasPosterLayout(brief.layout, brief.aspectRatio)
+  if (layout === 'right') {
+    return { x: Math.round(width * 0.55), y: margin, width: Math.round(width * 0.37), height: height - margin * 2, align: 'left', scrim: 'right' }
+  }
+  if (layout === 'top') {
+    return { x: margin, y: margin, width: width - margin * 2, height: Math.round(height * 0.36), align: 'left', scrim: 'top' }
+  }
+  if (layout === 'bottom') {
+    const y = Math.round(height * 0.64)
+    return { x: margin, y, width: width - margin * 2, height: height - y - margin, align: 'left', scrim: 'bottom' }
+  }
+  if (layout === 'center') {
+    return { x: margin, y: Math.round(height * 0.32), width: width - margin * 2, height: Math.round(height * 0.42), align: 'center', scrim: 'center' }
+  }
+  return { x: margin, y: margin, width: Math.round(width * 0.43), height: height - margin * 2, align: 'left', scrim: 'left' }
+}
+
+function drawPosterScrim(ctx, box, width, height, theme = getPosterCompositionTheme({}, width, height)) {
+  ctx.save()
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
+  ctx.fillRect(0, 0, width, height)
+
+  const gradient = box.scrim === 'right'
+    ? ctx.createLinearGradient(width, 0, 0, 0)
+    : box.scrim === 'top'
+      ? ctx.createLinearGradient(0, 0, 0, height)
+      : box.scrim === 'bottom'
+        ? ctx.createLinearGradient(0, height, 0, 0)
+        : ctx.createLinearGradient(0, 0, width, 0)
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0.82)')
+  gradient.addColorStop(0.48, 'rgba(0, 0, 0, 0.56)')
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
+  if (box.scrim === 'center') {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.48)'
+  } else {
+    ctx.fillStyle = gradient
+  }
+  ctx.fillRect(0, 0, width, height)
+
+  const bottomStart = box.scrim === 'bottom' ? Math.max(0, box.y - Math.round(height * 0.12)) : Math.round(height * 0.58)
+  const bottom = ctx.createLinearGradient(0, height, 0, bottomStart)
+  bottom.addColorStop(0, 'rgba(0, 0, 0, 0.72)')
+  bottom.addColorStop(0.58, 'rgba(0, 0, 0, 0.62)')
+  bottom.addColorStop(1, 'rgba(0, 0, 0, 0)')
+  ctx.fillStyle = bottom
+  ctx.fillRect(0, 0, width, height)
+
+  ctx.globalAlpha = 0.85
+  ctx.strokeStyle = theme.hairline
+  ctx.lineWidth = Math.max(1, Math.round(Math.min(width, height) * 0.0015))
+  ctx.strokeRect(Math.round(width * 0.025), Math.round(height * 0.025), Math.round(width * 0.95), Math.round(height * 0.95))
+
+  const accentLength = box.scrim === 'bottom' || box.scrim === 'top'
+    ? Math.round(Math.min(box.width * 0.36, width * 0.42))
+    : Math.round(Math.min(box.width * 0.72, width * 0.32))
+  const accentX = box.align === 'center'
+    ? Math.round(box.x + (box.width - accentLength) / 2)
+    : box.x
+  const accentY = box.scrim === 'bottom'
+    ? Math.max(box.y + Math.round(Math.min(width, height) * 0.018), Math.round(height * 0.62))
+    : box.y + Math.round(Math.min(width, height) * 0.06)
+  const accent = ctx.createLinearGradient(accentX, accentY, accentX + accentLength, accentY)
+  accent.addColorStop(0, theme.accent)
+  accent.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.strokeStyle = accent
+  ctx.lineWidth = Math.max(3, Math.round(Math.min(width, height) * 0.006))
+  ctx.beginPath()
+  ctx.moveTo(accentX, accentY)
+  ctx.lineTo(accentX + accentLength, accentY)
+  ctx.stroke()
+  ctx.restore()
+}
+
+function drawPosterText(ctx, brief, box, canvasWidth, canvasHeight) {
+  const theme = getPosterCompositionTheme(brief, canvasWidth, canvasHeight)
+  const minSide = Math.min(canvasWidth, canvasHeight)
+  const headlineSize = Math.round(clamp(theme.vertical ? canvasWidth * 0.11 : canvasWidth * 0.062, 38, theme.vertical ? 104 : 98))
+  const subSize = Math.round(clamp(headlineSize * 0.31, 18, 38))
+  const badgeSize = Math.round(clamp(headlineSize * 0.22, 14, 24))
+  const lineGap = Math.round(headlineSize * 0.22)
+  let y = box.y + Math.round(box.height * (box.scrim === 'bottom' ? 0.085 : 0.13))
+  const x = box.align === 'center' ? box.x + box.width / 2 : box.x
+
+  ctx.save()
+  ctx.textAlign = box.align
+  ctx.textBaseline = 'top'
+  ctx.fillStyle = theme.text
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.45)'
+  ctx.shadowBlur = Math.round(minSide * 0.024)
+  ctx.font = `900 ${headlineSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+  for (const line of wrapPosterText(ctx, brief.headline, box.width, 2)) {
+    ctx.fillText(line, x, y)
+    y += headlineSize + lineGap
+  }
+  if (brief.subheadline) {
+    y += Math.round(subSize * 0.5)
+    ctx.font = `700 ${subSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+    ctx.fillStyle = theme.muted
+    for (const line of wrapPosterText(ctx, brief.subheadline, box.width, 2)) {
+      ctx.fillText(line, x, y)
+      y += subSize * 1.45
+    }
+  }
+  const badges = Array.isArray(brief.badges) ? brief.badges.slice(0, 4) : []
+  if (badges.length) {
+    y += Math.round(badgeSize * 0.9)
+    ctx.font = `800 ${badgeSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+    ctx.shadowBlur = 0
+    let bx = box.align === 'center' ? box.x + box.width / 2 : box.x
+    const startX = bx
+    for (const badge of badges) {
+      const padX = Math.round(badgeSize * 0.85)
+      const padY = Math.round(badgeSize * 0.45)
+      const bw = Math.round(ctx.measureText(badge).width + padX * 2)
+      if (box.align !== 'center' && bx + bw > box.x + box.width) {
+        bx = startX
+        y += badgeSize + padY * 2 + Math.round(badgeSize * 0.45)
+      }
+      if (box.align === 'center') bx -= bw / 2
+      ctx.fillStyle = theme.badgeFill
+      roundRect(ctx, bx, y, bw, badgeSize + padY * 2, Math.round(badgeSize * 0.45))
+      ctx.fill()
+      ctx.strokeStyle = theme.accent
+      ctx.globalAlpha = 0.72
+      ctx.stroke()
+      ctx.globalAlpha = 1
+      ctx.fillStyle = theme.text
+      ctx.fillText(badge, bx + padX, y + padY)
+      bx += bw + Math.round(badgeSize * 0.7)
+    }
+    y += badgeSize * 2.3
+  }
+  if (brief.cta) {
+    y += Math.round(badgeSize * 0.8)
+    ctx.font = `900 ${badgeSize}px "Noto Sans SC", "Geist", Arial, sans-serif`
+    const padX = Math.round(badgeSize * 1.1)
+    const padY = Math.round(badgeSize * 0.65)
+    const measuredWidth = Math.round(ctx.measureText(brief.cta).width + padX * 2)
+    const ctaWidth = Math.min(measuredWidth, Math.round(box.width * 0.92))
+    const ctaX = box.align === 'center' ? x - ctaWidth / 2 : box.x
+    ctx.fillStyle = theme.accent
+    ctx.shadowBlur = 0
+    roundRect(ctx, ctaX, y, ctaWidth, badgeSize + padY * 2, Math.round(badgeSize * 0.58))
+    ctx.fill()
+    ctx.fillStyle = theme.ctaText
+    ctx.fillText(brief.cta, ctaX + padX, y + padY)
+    y += badgeSize + padY * 2
+  }
+  if (brief.format !== 'poster' || box.scrim !== 'bottom') {
+    const meta = brief.format === 'poster' ? 'A CINEMATIC POSTER COMPOSITION' : 'CAMPAIGN BANNER COMPOSITION'
+    ctx.shadowBlur = 0
+    ctx.font = `700 ${Math.round(clamp(badgeSize * 0.78, 10, 16))}px "Geist", "Noto Sans SC", Arial, sans-serif`
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.54)'
+    ctx.textAlign = box.align
+    const metaY = Math.min(canvasHeight - Math.round(minSide * 0.075), y + Math.round(badgeSize * 0.85))
+    ctx.fillText(meta, x, metaY)
+  }
+  ctx.restore()
+}
+
+function roundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + width, y, x + width, y + height, r)
+  ctx.arcTo(x + width, y + height, x, y + height, r)
+  ctx.arcTo(x, y + height, x, y, r)
+  ctx.arcTo(x, y, x + width, y, r)
+  ctx.closePath()
+}
+
+async function composePosterBannerImage(baseDataUrl, action, fallbackRequest) {
+  const brief = normalizeCanvasPosterBrief(action.posterBrief || {}, fallbackRequest)
+  const { width, height } = getPosterCanvasOutputSize(action.aspectRatio || brief.aspectRatio, action.resolution || brief.resolution)
+  const image = await loadImageElement(baseDataUrl)
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法创建海报合成画布')
+  const scale = Math.max(width / Math.max(1, image.naturalWidth || image.width), height / Math.max(1, image.naturalHeight || image.height))
+  const drawWidth = (image.naturalWidth || image.width) * scale
+  const drawHeight = (image.naturalHeight || image.height) * scale
+  ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight)
+  const box = getPosterTextBox(brief, width, height)
+  const theme = getPosterCompositionTheme(brief, width, height)
+  drawPosterScrim(ctx, box, width, height, theme)
+  drawPosterText(ctx, brief, box, width, height)
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    width,
+    height,
+    mime: 'image/png',
+    brief,
   }
 }
 
@@ -5714,11 +6239,17 @@ async function sendCanvasAiMessage() {
   const aiModelId = dom.gAiModel.value || state.generate.genModel
   const aiAspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
   const aiResolution = normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution)
+  const aiMode = normalizeCanvasCreativeMode(dom.gAiMode?.value || state.generate.aiMode)
+  state.generate.aiMode = aiMode
+  const posterBrief = aiMode === 'poster_banner'
+    ? buildCanvasPosterBrief(requestText, aiAspectRatio, aiResolution)
+    : null
   const canvasPendingEls = []
 
   const userMsg = {
     id: crypto.randomUUID(),
     role: 'user',
+    creativeMode: aiMode,
     content: requestText,
     refs: state.generate.aiRefs.map((r) => ({ assetId: r.assetId || '', dataUrl: r.dataUrl, name: r.name, mime: r.mime || 'image/png' })),
   }
@@ -5729,6 +6260,7 @@ async function sendCanvasAiMessage() {
     loading: true,
     loadingText: '正在理解画布和需求',
     steps: [],
+    creativeMode: aiMode,
   }
   state.generate.aiMessages.push(userMsg)
   dom.gInput.value = ''
@@ -5776,6 +6308,8 @@ async function sendCanvasAiMessage() {
       modelId: aiModelId,
       aspectRatio: aiAspectRatio,
       resolution: aiResolution,
+      creativeMode: aiMode,
+      posterBrief,
       hasReferenceImages: refImages.length > 0,
       clientKeys: { ...state.keys },
     })
@@ -5804,6 +6338,9 @@ async function sendCanvasAiMessage() {
       prompt: action.prompt,
       status: 'queued',
       error: '',
+      creativeMode: action.creativeMode,
+      promptStyle: action.promptStyle,
+      posterBrief: action.posterBrief,
     }))
     assistantMsg.images = []
     renderAiMessages()
@@ -5839,12 +6376,21 @@ async function sendCanvasAiMessage() {
         })
 
         state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-        const resultDataUrl = data.resultDataUrl
+        const composed = action.creativeMode === 'poster_banner'
+          ? await composePosterBannerImage(data.resultDataUrl, action, requestText)
+          : null
+        const resultDataUrl = composed?.dataUrl || data.resultDataUrl
         const imageName = action.title || `ai-${Date.now()}-${index + 1}`
         const { storedResult, imageSize } = await storeCanvasGeneratedResult(
-          data,
+          {
+            ...data,
+            resultDataUrl,
+            resultAsset: composed ? null : data.resultAsset,
+            width: composed?.width || data.width,
+            height: composed?.height || data.height,
+          },
           `ai-${Date.now()}-${index + 1}.png`,
-          'canvas_ai_sidebar',
+          composed ? 'canvas_ai_poster_banner' : 'canvas_ai_sidebar',
         )
         assistantMsg.images.push({
           dataUrl: resultDataUrl,
@@ -5854,6 +6400,10 @@ async function sendCanvasAiMessage() {
           prompt: action.prompt,
           actionId: action.id,
           aspectRatio: action.aspectRatio,
+          creativeMode: action.creativeMode,
+          promptStyle: action.promptStyle,
+          posterBrief: composed?.brief || action.posterBrief || null,
+          baseAssetId: composed ? data.resultAsset?.id || '' : '',
         })
         if (!assistantMsg.imageDataUrl) {
           assistantMsg.imageDataUrl = resultDataUrl
@@ -5927,6 +6477,7 @@ function renderGenerate() {
     })
   }
   dom.gModel.value = state.generate.genModel
+  if (dom.gAiMode) dom.gAiMode.value = normalizeCanvasCreativeMode(state.generate.aiMode)
   dom.gAiModel.value = state.generate.genModel
   dom.gGenRatio.value = state.generate.genRatio
   dom.gAiRatio.value = state.generate.genRatio
@@ -5934,6 +6485,7 @@ function renderGenerate() {
   dom.gAiResolution.value = state.generate.genResolution
   dom.gAgent.checked = state.generate.genUseAgent
   dom.gAiSidebar.classList.toggle('hidden', !state.generate.showAiPanel)
+  dom.gAiSidebar.dataset.aiMode = normalizeCanvasCreativeMode(state.generate.aiMode)
   renderCanvasProjectMeta()
   renderAiMessages()
   renderAiRefList()
@@ -5951,12 +6503,6 @@ function bindOutfit() {
 
   dom.oGarmentType.addEventListener('change', () => {
     state.outfit.garmentType = dom.oGarmentType.value
-    savePrefs()
-    renderOutfit()
-  })
-
-  dom.oConcurrency.addEventListener('change', () => {
-    state.outfit.concurrency = clamp(Number(dom.oConcurrency.value) || 1, 1, 4)
     savePrefs()
     renderOutfit()
   })
@@ -6088,45 +6634,53 @@ function bindStyle() {
     input: dom.sFileInput,
     onFiles: async (files) => {
       if (state.style.analyzing || state.style.generating) return
-      const images = await readImageFiles(files)
-      if (images.length === 0) return
-      const image = images[0]
-      const upload = createUploadProgressState({
-        title: '风格源图',
-        detail: image.name,
-        percent: 0,
-        active: true,
-      })
-      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
-      const uploaded = await postJson('/api/assets/upload', {
-        sessionId: state.runtime.sessionId || undefined,
-        kind: 'upload',
-        source: 'browser_upload',
-        filename: image.name,
-        mime: image.mime,
-        dataUrl: image.dataUrl,
-      })
-      state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
-      setUploadProgress(upload, { current: 1, total: 1, filename: image.name, percent: 100, active: true, done: true })
-      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
-      state.style.sourceImage = {
-        id: uploaded.asset.id,
-        assetId: uploaded.asset.id,
-        name: image.name,
-        mime: image.mime,
-        dataUrl: image.dataUrl,
-        base64: image.base64,
+      try {
+        const images = await readImageFiles(files)
+        if (images.length === 0) return
+        const image = images[0]
+        const upload = createUploadProgressState({
+          title: '风格源图',
+          detail: image.name,
+          percent: 0,
+          active: true,
+        })
+        renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
+        const uploaded = await postJson('/api/assets/upload', {
+          sessionId: state.runtime.sessionId || undefined,
+          kind: 'upload',
+          source: 'browser_upload',
+          filename: image.name,
+          mime: image.mime,
+          dataUrl: image.dataUrl,
+        })
+        state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
+        setUploadProgress(upload, { current: 1, total: 1, filename: image.name, percent: 100, active: true, done: true })
+        renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
+        state.style.sourceImage = {
+          id: uploaded.asset.id,
+          assetId: uploaded.asset.id,
+          name: image.name,
+          mime: image.mime,
+          dataUrl: image.dataUrl,
+          base64: image.base64,
+        }
+        state.style.visualStyle = null
+        state.style.styleSummary = ''
+        state.style.colorPalette = []
+        state.style.tags = []
+        state.style.resultDataUrl = ''
+        state.style.batchResults = []
+        state.style.error = ''
+        saveRuntimeState()
+        renderStyle()
+        await analyzeStyle()
+      } catch (error) {
+        state.style.error = trimError(error)
+        renderStyle()
+      } finally {
+        renderUploadQueue(dom.sSourceUpload, [])
+        renderStyle()
       }
-      state.style.visualStyle = null
-      state.style.styleSummary = ''
-      state.style.colorPalette = []
-      state.style.tags = []
-      state.style.resultDataUrl = ''
-      state.style.error = ''
-      saveRuntimeState()
-      renderUploadQueue(dom.sSourceUpload, [])
-      renderStyle()
-      analyzeStyle()
     },
   })
 
@@ -6138,9 +6692,11 @@ function bindStyle() {
     state.style.colorPalette = []
     state.style.tags = []
     state.style.resultDataUrl = ''
+    state.style.batchResults = []
     state.style.error = ''
     state.style.subject = ''
     state.style.subjectRefs = []
+    clearJobTaskLoaded('style')
     saveRuntimeState()
     renderStyle()
   })
@@ -6152,6 +6708,7 @@ function bindStyle() {
 
   dom.sRefInput.addEventListener('change', async () => {
     if (!dom.sRefInput.files?.length || state.style.generating) return
+    const previousSummary = state.style.styleSummary
     const imageFiles = Array.from(dom.sRefInput.files).filter((file) => file.type.startsWith('image/'))
     const uploads = imageFiles.map((file, index) => createUploadProgressState({
       title: '主体参考图',
@@ -6162,28 +6719,36 @@ function bindStyle() {
     state.style.styleSummary = '正在上传主体参考图…'
     renderStyle()
     renderUploadQueue(dom.sRefUpload, uploads)
-    const images = await prepareAssetItems(dom.sRefInput.files, {
-      onProgress: ({ current, total, filename }) => {
-        state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
-        setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
-        renderUploadQueue(dom.sRefUpload, uploads)
-        renderStyle()
-      },
-      onUploadProgress: ({ current, total, filename, percent }) => {
-        setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
-        renderUploadQueue(dom.sRefUpload, uploads)
-      },
-    })
-    state.style.subjectRefs.push(...images)
-    if (!state.style.visualStyle) state.style.styleSummary = ''
-    saveRuntimeState()
-    renderUploadQueue(dom.sRefUpload, [])
-    renderStyle()
-    dom.sRefInput.value = ''
+    try {
+      const images = await prepareAssetItems(dom.sRefInput.files, {
+        onProgress: ({ current, total, filename }) => {
+          state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.sRefUpload, uploads)
+          renderStyle()
+        },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.sRefUpload, uploads)
+        },
+      })
+      state.style.subjectRefs.push(...images)
+      state.style.styleSummary = state.style.visualStyle ? previousSummary : ''
+      state.style.error = ''
+      saveRuntimeState()
+    } catch (error) {
+      state.style.styleSummary = previousSummary
+      state.style.error = trimError(error)
+    } finally {
+      renderUploadQueue(dom.sRefUpload, [])
+      renderStyle()
+      dom.sRefInput.value = ''
+    }
   })
 
   dom.sSubject.addEventListener('input', () => {
     state.style.subject = dom.sSubject.value
+    saveRuntimeState()
     dom.sGenerate.disabled = (!state.style.subject.trim() && state.style.subjectRefs.length === 0) || state.style.generating || !state.style.visualStyle
   })
 
@@ -6231,6 +6796,14 @@ function bindStyle() {
     renderStyle()
   })
 
+  for (const button of dom.sJobTabs || []) {
+    button.addEventListener('click', () => {
+      setJobTab('style', button.dataset.jobTab)
+      saveRuntimeState()
+      renderStyle()
+    })
+  }
+
   dom.sJsonCopy.addEventListener('click', () => {
     if (state.style.visualStyle) {
       const text = JSON.stringify(state.style.visualStyle, null, 2)
@@ -6245,7 +6818,7 @@ function bindStyle() {
 
 function renderStyle() {
   const s = state.style
-  const busy = s.analyzing || s.generating
+  const busy = isStyleBusy()
   const visibleHistory = s.history.filter((entry) => entry.resultDataUrl)
 
   dom.sModel.value = s.model
@@ -6255,6 +6828,8 @@ function renderStyle() {
   const hasSourceUpload = Boolean(dom.sSourceUpload?.childElementCount)
   const hasStyle = Boolean(s.visualStyle)
   const hasResult = Boolean(s.resultDataUrl)
+  const batchResults = sanitizeStyleResultEntries(s.batchResults)
+  const hasBatchResults = batchResults.length > 0
   const hasHistory = visibleHistory.length > 0
 
   dom.sDropzone.classList.toggle('hidden', hasSource || hasSourceUpload)
@@ -6265,8 +6840,9 @@ function renderStyle() {
   dom.sAnalyzeProgress.classList.toggle('hidden', !s.analyzing)
   dom.sStyleResult.classList.toggle('hidden', !hasStyle)
   dom.sGenerateSection.classList.toggle('hidden', !hasStyle)
-  dom.sGenProgress.classList.toggle('hidden', !s.generating)
-  dom.sResultWrap.classList.toggle('hidden', !hasResult)
+  dom.sGenProgress.classList.toggle('hidden', !(s.generating || s.running || s.submittingJobId))
+  if (dom.sProgress) dom.sProgress.textContent = s.progress || (s.generating ? '正在生成…' : '正在处理…')
+  dom.sResultWrap.classList.toggle('hidden', !hasResult && !hasBatchResults)
   dom.sError.classList.toggle('hidden', !s.error)
   dom.sHistorySection.classList.toggle('hidden', !hasHistory)
 
@@ -6339,49 +6915,83 @@ function renderStyle() {
   dom.sSubject.disabled = !hasStyle || busy
   dom.sSubject.value = s.subject
   dom.sGenerate.disabled = (!s.subject.trim() && s.subjectRefs.length === 0) || !hasStyle || busy
+  dom.sGenerate.textContent = s.subjectRefs.length > 1 ? '批量生成 ▸' : '生成 ▸'
 
-  if (hasResult) {
-    dom.sResultImg.src = s.resultDataUrl
+  if (hasResult || hasBatchResults) {
+    const title = dom.sResultWrap.querySelector('.style-section-title')
+    if (title) title.textContent = hasBatchResults ? `生成结果 · ${batchResults.length} 张` : '生成结果'
+    const imageWrap = dom.sResultWrap.querySelector('.style-result-img-wrap')
+    const actions = dom.sResultWrap.querySelector('.style-result-actions')
+    if (imageWrap) imageWrap.classList.toggle('hidden', hasBatchResults)
+    if (actions) actions.classList.toggle('hidden', hasBatchResults)
+    if (hasResult) dom.sResultImg.src = s.resultDataUrl
+    let grid = dom.sResultWrap.querySelector('.style-batch-results-grid')
+    if (!grid) {
+      grid = document.createElement('div')
+      grid.className = 'style-batch-results-grid'
+      dom.sResultWrap.append(grid)
+    }
+    grid.classList.toggle('hidden', !hasBatchResults)
+    if (hasBatchResults) {
+      grid.replaceChildren(...batchResults.map((entry, index) => createStyleResultCard(entry, {
+        index,
+        className: 'style-batch-result-card',
+      })))
+    } else {
+      grid.replaceChildren()
+    }
   }
 
   if (s.error) {
     dom.sError.textContent = s.error
   }
 
-  dom.sHistory.replaceChildren(...visibleHistory.slice().reverse().map((entry) => {
-    const card = document.createElement('div')
-    card.className = 'style-history-card'
+  dom.sHistory.replaceChildren(...visibleHistory.slice().reverse().map((entry, index) =>
+    createStyleResultCard(entry, { index, className: 'style-history-card' }),
+  ))
+  renderJobList('style')
+}
 
-    const img = document.createElement('img')
-    img.src = entry.resultDataUrl
-    img.alt = entry.subject || '生成结果'
-    card.append(img)
+function createStyleResultCard(entry, { index = 0, className = 'style-history-card' } = {}) {
+  const card = document.createElement('button')
+  card.type = 'button'
+  card.className = className
 
-    const meta = document.createElement('div')
-    meta.className = 'style-history-meta'
+  const imgWrap = document.createElement('span')
+  imgWrap.className = 'style-result-thumb'
+  const img = document.createElement('img')
+  img.src = entry.resultDataUrl || assetResultUrl(entry.assetId)
+  img.alt = entry.subject || '生成结果'
+  img.loading = 'lazy'
+  imgWrap.append(img)
+  card.append(imgWrap)
 
-    const subj = document.createElement('div')
-    subj.className = 'style-history-subject'
-    subj.textContent = entry.subject || '（无主题）'
-    meta.append(subj)
+  const meta = document.createElement('span')
+  meta.className = 'style-history-meta'
 
-    const time = document.createElement('div')
-    time.className = 'style-history-time'
-    time.textContent = formatTimestamp(entry.timestamp)
-    meta.append(time)
+  const subj = document.createElement('span')
+  subj.className = 'style-history-subject'
+  subj.textContent = entry.subject || `结果 ${index + 1}`
+  meta.append(subj)
 
-    card.append(meta)
+  const time = document.createElement('span')
+  time.className = 'style-history-time'
+  time.textContent = formatTimestamp(entry.timestamp)
+  meta.append(time)
 
-    card.addEventListener('click', () => {
-      openLightbox({
-        src: entry.resultDataUrl,
-        caption: `风格迁移 · ${entry.subject || ''}`,
-        downloadName: `style-transfer-${sanitizeFileName(entry.subject || 'result')}.png`,
-      })
+  card.append(meta)
+
+  card.addEventListener('click', () => {
+    const src = entry.resultDataUrl || assetResultUrl(entry.assetId)
+    if (!src) return
+    openLightbox({
+      src,
+      caption: `风格迁移 · ${entry.subject || ''}`,
+      downloadName: `style-transfer-${sanitizeFileName(entry.subject || `result-${index + 1}`)}.png`,
     })
+  })
 
-    return card
-  }))
+  return card
 }
 
 async function analyzeStyle() {
@@ -6405,10 +7015,12 @@ async function analyzeStyle() {
     state.style.colorPalette = Array.isArray(data.colorPalette) ? data.colorPalette : []
     state.style.tags = Array.isArray(data.tags) ? data.tags : []
     state.style.analyzing = false
+    saveRuntimeState()
     renderStyle()
   } catch (error) {
     state.style.analyzing = false
     state.style.error = trimError(error)
+    saveRuntimeState()
     renderStyle()
   }
 }
@@ -6416,8 +7028,13 @@ async function analyzeStyle() {
 async function generateStyleTransfer() {
   if (!state.style.visualStyle || state.style.generating) return
   if (!state.style.subject.trim() && state.style.subjectRefs.length === 0) return
+  if (state.style.subjectRefs.length > 1) {
+    await runStyleTransferBatch()
+    return
+  }
 
   state.style.generating = true
+  const previousResultDataUrl = state.style.resultDataUrl
   state.style.pendingTask = null
   state.style.resultDataUrl = ''
   state.style.error = ''
@@ -6433,6 +7050,7 @@ async function generateStyleTransfer() {
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     state.style.resultDataUrl = data.resultDataUrl
+    state.style.batchResults = []
     state.style.generating = false
     state.style.pendingTask = null
     setStyleProgressText('正在生成…')
@@ -6458,6 +7076,7 @@ async function generateStyleTransfer() {
     state.style.generating = false
     state.style.pendingTask = null
     setStyleProgressText('正在生成…')
+    state.style.resultDataUrl = previousResultDataUrl
     state.style.error = trimError(error)
     renderStyle()
   }
@@ -6505,6 +7124,92 @@ function formatStyleTaskProgress(status) {
 async function waitForStyleTaskPoll(nextPollAfterMs) {
   const delay = clamp(Number(nextPollAfterMs) || 1500, 1000, 8000)
   await wait(delay)
+}
+
+function getStyleBatchSubjects() {
+  const subject = state.style.subject.trim()
+  if (state.style.subjectRefs.length > 0) {
+    return state.style.subjectRefs.map((ref) => ({
+      subject: subject || basename(ref.name),
+      subjectAssetIds: [ref.assetId || ref.id],
+      label: basename(ref.name),
+    }))
+  }
+  return subject ? [{ subject, subjectAssetIds: [], label: subject }] : []
+}
+
+function getStyleSignature(config) {
+  return JSON.stringify({
+    modelId: config.modelId,
+    sourceAssetId: config.sourceAssetId,
+    visualStyle: config.visualStyle,
+    subjects: config.subjects,
+  })
+}
+
+async function runStyleTransferBatch() {
+  if (!state.style.visualStyle || isStyleBusy()) return
+  const subjects = getStyleBatchSubjects()
+  if (subjects.length === 0) return
+
+  const runConfig = {
+    modelId: state.style.model,
+    sourceAssetId: state.style.sourceImage?.assetId || state.style.sourceImage?.id || '',
+    visualStyle: state.style.visualStyle,
+    subjects,
+    clientKeys: { ...state.keys },
+  }
+  const signature = getStyleSignature(runConfig)
+  if (state.style.submittingJobId && state.style.pendingSignature === signature) {
+    state.style.progress = '任务已提交，正在同步进度…'
+    renderStyle()
+    return
+  }
+
+  try {
+    state.style.running = true
+    state.style.progress = '正在提交风格迁移任务…'
+    state.style.error = ''
+    renderStyle()
+
+    const data = await postJson('/api/jobs/style-transfer-batch', {
+      sessionId: state.runtime.sessionId || undefined,
+      sourceAssetId: runConfig.sourceAssetId,
+      visualStyle: runConfig.visualStyle,
+      subjects: runConfig.subjects,
+      modelId: runConfig.modelId,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+      clientKeys: runConfig.clientKeys,
+    })
+
+    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.style.submittingJobId = data.jobId
+    state.style.pendingSignature = signature
+    upsertJobTask('style', data.jobId, {
+      type: 'style_transfer_batch',
+      status: 'queued',
+      progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
+      label: `刚刚 · ${subjects.length} 个主体`,
+      loaded: true,
+      thumbs: getJobTaskThumbsFromWorkspace('style'),
+      itemCount: Number(data.itemCount || 0),
+      progressTotal: Number(data.itemCount || 0),
+      signature,
+    })
+    markJobTaskLoaded('style', data.jobId)
+    setJobTab('style', 'current')
+    state.style.running = false
+    state.style.progress = '任务已提交，可继续上传新主体'
+    saveRuntimeState()
+    renderStyle()
+    void syncStyleJob(data.jobId, { applyToWorkspace: true })
+  } catch (error) {
+    state.style.running = false
+    clearStyleSubmitLock()
+    state.style.error = trimError(error)
+    state.style.progress = ''
+    renderStyle()
+  }
 }
 
 function renderAll() {
@@ -6727,7 +7432,6 @@ function renderTranslate() {
   state.translate.headlineColor = normalizeTranslateTextColor(state.translate.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR)
   state.translate.bodyColor = normalizeTranslateTextColor(state.translate.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR)
   dom.tModel.value = state.translate.model
-  dom.tConcurrency.value = String(state.translate.concurrency)
   dom.tPreserve.checked = state.translate.preserveBrand
   if (dom.tFontMode) {
     dom.tFontMode.value = state.translate.fontMode
@@ -6751,7 +7455,6 @@ function renderTranslate() {
 
   dom.tRunBtn.disabled = busy || !hasItems || state.translate.targets.length === 0
   dom.tModel.disabled = busy
-  dom.tConcurrency.disabled = busy
   dom.tPreserve.disabled = busy
   if (dom.tFontMode) dom.tFontMode.disabled = busy
   if (dom.tFontPrompt) dom.tFontPrompt.disabled = busy
@@ -6937,8 +7640,8 @@ function renderProjects() {
 }
 
 function renderJobList(kind) {
-  const list = kind === 'translate' ? dom.tJobList : dom.oJobList
-  const empty = kind === 'translate' ? dom.tJobEmpty : dom.oJobEmpty
+  const list = kind === 'translate' ? dom.tJobList : kind === 'style' ? dom.sJobList : dom.oJobList
+  const empty = kind === 'translate' ? dom.tJobEmpty : kind === 'style' ? dom.sJobEmpty : dom.oJobEmpty
   if (!list) return
   const tab = getJobTab(kind)
   const allTasks = getJobTasks(kind)
@@ -6946,7 +7649,7 @@ function renderJobList(kind) {
   const allTabTasks = getSortedJobTasksForTab(allTasks, tab)
   const tasks = getPagedJobTasksForTab(allTasks, tab, page)
   const pageCount = getJobTaskPageCount(allTasks, tab)
-  const tabButtons = kind === 'translate' ? dom.tJobTabs : dom.oJobTabs
+  const tabButtons = kind === 'translate' ? dom.tJobTabs : kind === 'style' ? dom.sJobTabs : dom.oJobTabs
   for (const button of tabButtons || []) {
     const active = button.dataset.jobTab === tab
     const count = filterJobTasksForTab(allTasks, button.dataset.jobTab).length
@@ -7144,6 +7847,14 @@ function getJobTaskDownloadEntries(kind, items = []) {
       })
       continue
     }
+    if (kind === 'style') {
+      const subject = sanitizeFileName(String(item.outputJson?.subject || item.inputJson?.subject || item.inputJson?.label || item.id || 'result'))
+      entries.push({
+        href: assetResultUrl(resultAssetId),
+        name: `style-transfer-${subject}.png`,
+      })
+      continue
+    }
 
     const modelId = sanitizeFileName(String(item.inputJson?.modelAssetId || 'model'))
     const lookId = sanitizeFileName(String(item.inputJson?.lookId || item.id || 'look'))
@@ -7181,7 +7892,7 @@ function createJobTaskThumbs(kind, task) {
   wrap.className = `job-card-thumbs${thumbs.length ? '' : ' empty'}`
   if (!thumbs.length) {
     const placeholder = document.createElement('span')
-    placeholder.textContent = kind === 'translate' ? '译' : '装'
+    placeholder.textContent = kind === 'translate' ? '译' : kind === 'style' ? '风' : '装'
     wrap.append(placeholder)
     return wrap
   }
@@ -7199,6 +7910,7 @@ function createJobTaskThumbs(kind, task) {
 function getJobTypeLabel(type) {
   if (type === 'translate_batch') return '批量翻译'
   if (type === 'outfit_batch') return '批量换装'
+  if (type === 'style_transfer_batch') return '批量风格迁移'
   return '任务'
 }
 
@@ -7303,7 +8015,6 @@ function renderOutfit() {
   const runEstimate = formatOutfitRunEstimate(state.outfit.models.length, looks.length)
   dom.oModel.value = state.outfit.model
   dom.oGarmentType.value = state.outfit.garmentType
-  dom.oConcurrency.value = String(state.outfit.concurrency)
   dom.oProgress.textContent = state.outfit.progress || runEstimate
   dom.oModelCount.textContent = String(state.outfit.models.length)
   dom.oGarmentCount.textContent = String(state.outfit.garments.length)
@@ -7311,7 +8022,6 @@ function renderOutfit() {
   dom.oRun.disabled = busy || state.outfit.models.length === 0 || looks.length === 0
   dom.oModel.disabled = busy
   dom.oGarmentType.disabled = busy
-  dom.oConcurrency.disabled = busy
   dom.oModelAdd.disabled = busy
   if (dom.oModelLibraryOpen) dom.oModelLibraryOpen.disabled = busy
   dom.oGarmentAdd.disabled = busy
@@ -7654,7 +8364,7 @@ async function runTranslateBatch() {
       textColorMode: runConfig.textColorMode,
       headlineColor: runConfig.headlineColor,
       bodyColor: runConfig.bodyColor,
-      concurrency: state.translate.concurrency,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
       clientKeys: runConfig.clientKeys,
     })
 
@@ -7731,7 +8441,7 @@ async function runOutfitBatch() {
         instructions: normalizeGarmentInstructions(item.instructions),
       })),
       modelId: runConfig.modelId,
-      concurrency: state.outfit.concurrency,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
       clientKeys: runConfig.clientKeys,
     })
 
@@ -8033,6 +8743,10 @@ function isOutfitBusy() {
   return state.outfit.running || Boolean(state.outfit.submittingJobId)
 }
 
+function isStyleBusy() {
+  return state.style.analyzing || state.style.running || state.style.generating || Boolean(state.style.submittingJobId)
+}
+
 function clearTranslateSubmitLock(jobId = '') {
   if (jobId && state.translate.submittingJobId !== jobId) return
   state.translate.submittingJobId = ''
@@ -8043,6 +8757,12 @@ function clearOutfitSubmitLock(jobId = '') {
   if (jobId && state.outfit.submittingJobId !== jobId) return
   state.outfit.submittingJobId = ''
   state.outfit.pendingSignature = ''
+}
+
+function clearStyleSubmitLock(jobId = '') {
+  if (jobId && state.style.submittingJobId !== jobId) return
+  state.style.submittingJobId = ''
+  state.style.pendingSignature = ''
 }
 
 function canRetryTranslateItem() {
@@ -8496,8 +9216,11 @@ function bindDropSurface({ surface, input, onFiles, onClick = null, clickable = 
 
   input.addEventListener('change', async () => {
     if (!input.files?.length) return
-    await onFiles(input.files)
-    input.value = ''
+    try {
+      await onFiles(input.files)
+    } finally {
+      input.value = ''
+    }
   })
 
   for (const eventName of ['dragenter', 'dragover']) {
@@ -9377,6 +10100,10 @@ async function restoreRuntimeState() {
   state.outfit.jobId = getLoadedStoredJobId(runtime.outfit.jobs)
   state.outfit.jobTab = runtime.outfit.jobTab
   state.outfit.jobPage = runtime.outfit.jobPage
+  state.style.jobs = runtime.style.jobs
+  state.style.jobId = getLoadedStoredJobId(runtime.style.jobs)
+  state.style.jobTab = runtime.style.jobTab
+  state.style.jobPage = runtime.style.jobPage
 
   const [translateItems, outfitModels, outfitGarments] = await Promise.all([
     hydrateAssetItems(runtime.translate.items),
@@ -9410,6 +10137,7 @@ async function restoreRuntimeState() {
   state.style.styleSummary = runtime.style?.styleSummary || ''
   state.style.colorPalette = runtime.style?.colorPalette || []
   state.style.tags = runtime.style?.tags || []
+  state.style.subject = runtime.style?.subject || ''
   state.style.history = await hydrateStyleHistory(getStoredStyleHistory(savedResults, runtime.style?.history))
 
   restoringRuntimeState = false
@@ -9422,6 +10150,7 @@ async function restoreRuntimeState() {
 
   watchStoredJobTasks('translate')
   watchStoredJobTasks('outfit')
+  watchStoredJobTasks('style')
 }
 
 function assetResultUrl(assetId, projectId = '') {
@@ -9552,7 +10281,11 @@ async function hydrateTranslateWorkspaceFromJob(job, items) {
   state.translate.source = getLanguage(job?.configJson?.sourceLanguage)?.code || 'auto'
   state.translate.model = getModel(job?.configJson?.modelId)?.id || state.translate.model
   state.translate.preserveBrand = job?.configJson?.preserveBrand !== false
-  state.translate.concurrency = clamp(Number(job?.configJson?.concurrency) || state.translate.concurrency, 1, 6)
+  state.translate.concurrency = clamp(
+    Number(job?.configJson?.concurrency) || state.translate.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
   state.translate.fontMode = normalizeTranslateFontMode(job?.configJson?.fontMode)
   state.translate.fontFamily = normalizeTranslateFontFamily(job?.configJson?.fontFamily)
   state.translate.fontPrompt = normalizeTranslateFontPrompt(job?.configJson?.fontPrompt)
@@ -9623,6 +10356,8 @@ function watchStoredJobTasks(kind) {
     }
     if (kind === 'translate') {
       void syncTranslateJob(task.jobId, { passive404: true })
+    } else if (kind === 'style') {
+      void syncStyleJob(task.jobId, { passive404: true })
     } else {
       void syncOutfitJob(task.jobId, { passive404: true })
     }
@@ -9811,7 +10546,11 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
     })),
   ]
   state.outfit.model = getModel(job?.configJson?.modelId)?.id || state.outfit.model
-  state.outfit.concurrency = clamp(Number(job?.configJson?.concurrency) || state.outfit.concurrency, 1, 4)
+  state.outfit.concurrency = clamp(
+    Number(job?.configJson?.concurrency) || state.outfit.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
 }
 
 function applyOutfitJobSnapshot(job, items) {
@@ -9835,6 +10574,138 @@ function applyOutfitJobSnapshot(job, items) {
   state.outfit.results = nextResults
   state.outfit.progress = formatBatchProgress(job)
   renderOutfit()
+}
+
+function getStyleSignatureFromJob(job) {
+  const subjects = Array.isArray(job?.summaryJson?.subjects) ? job.summaryJson.subjects : []
+  return JSON.stringify({
+    modelId: String(job?.configJson?.modelId || state.style.model),
+    sourceAssetId: String(job?.configJson?.sourceAssetId || ''),
+    visualStyle: job?.configJson?.visualStyle || null,
+    subjects,
+  })
+}
+
+async function hydrateStyleWorkspaceFromJob(job, items) {
+  const sourceAssetId = String(job?.configJson?.sourceAssetId || '')
+  if (sourceAssetId && state.style.sourceImage?.assetId !== sourceAssetId) {
+    const [source] = await hydrateAssetItems([{ id: sourceAssetId, assetId: sourceAssetId, name: sourceAssetId, mime: 'image/png' }])
+    state.style.sourceImage = source || { id: sourceAssetId, assetId: sourceAssetId, name: sourceAssetId, mime: 'image/png' }
+  }
+  const subjectIds = unique(items.flatMap((item) =>
+    Array.isArray(item.inputJson?.subjectAssetIds) ? item.inputJson.subjectAssetIds.map(String) : [],
+  ).filter(Boolean))
+  const existing = new Map(state.style.subjectRefs.map((item) => [item.assetId || item.id, item]))
+  const missing = subjectIds
+    .filter((assetId) => !existing.has(assetId))
+    .map((assetId) => ({ id: assetId, assetId, name: assetId, mime: 'image/png' }))
+  const hydrated = await hydrateAssetItems(missing)
+  state.style.subjectRefs = [
+    ...state.style.subjectRefs.filter((item) => subjectIds.includes(item.assetId || item.id)),
+    ...hydrated,
+  ]
+  state.style.visualStyle = job?.configJson?.visualStyle || state.style.visualStyle
+  state.style.model = getModel(job?.configJson?.modelId)?.id || state.style.model
+}
+
+function mapStyleJobItemToHistory(item, signature) {
+  const resultAssetId = String(item.outputJson?.resultAssetId || '')
+  const subject = String(item.outputJson?.subject || item.inputJson?.subject || item.inputJson?.label || '')
+  return {
+    id: item.id,
+    subject: subject || '批量主体',
+    assetId: resultAssetId,
+    resultDataUrl: assetResultUrl(resultAssetId),
+    timestamp: Date.parse(String(item.finishedAt || '')) || Date.now(),
+    signature,
+  }
+}
+
+function applyStyleJobSnapshot(job, items) {
+  const signature = getStyleSignatureFromJob(job)
+  const completed = items
+    .filter((item) => item.status === 'completed' && item.outputJson?.resultAssetId)
+    .map((item) => mapStyleJobItemToHistory(item, signature))
+  if (completed.length) {
+    const byId = new Map(state.style.history.map((entry) => [entry.id || entry.assetId, entry]))
+    for (const entry of completed) {
+      byId.set(entry.id || entry.assetId, entry)
+    }
+    state.style.history = sanitizeStyleHistoryEntries(Array.from(byId.values()))
+    state.style.batchResults = sanitizeStyleResultEntries(completed)
+    state.style.resultDataUrl = ''
+    saveStyleHistory()
+  }
+  state.style.progress = formatBatchProgress(job)
+  renderStyle()
+}
+
+async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
+  const token = ++styleWatcherToken
+  styleJobWatchers.set(jobId, token)
+
+  while (styleJobWatchers.get(jobId) === token) {
+    try {
+      const { job, items } = await fetchJobSnapshot(jobId)
+      clearStyleSubmitLock(jobId)
+      if (job?.type && job.type !== 'style_transfer_batch') {
+        removeJobTask('style', jobId)
+        saveRuntimeState()
+        renderStyle()
+        return
+      }
+
+      const shouldApply = applyToWorkspace || getLoadedJobId('style') === jobId
+      upsertJobTask('style', jobId, { job, items, loaded: shouldApply })
+      const task = getJobTasks('style').find((entry) => entry.jobId === jobId)
+      if (shouldApply && task && job.status === 'completed') {
+        task.loaded = true
+        task.holdInCurrent = true
+      }
+      if (shouldApply) {
+        if (getLoadedJobId('style') !== jobId) {
+          renderJobList('style')
+          saveRuntimeState()
+          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+            styleJobWatchers.delete(jobId)
+            break
+          }
+          await wait(900)
+          continue
+        }
+        await hydrateStyleWorkspaceFromJob(job, items)
+        applyStyleJobSnapshot(job, items)
+      } else {
+        renderStyle()
+      }
+      saveRuntimeState()
+
+      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+        styleJobWatchers.delete(jobId)
+        break
+      }
+
+      await wait(900)
+    } catch (error) {
+      const status = Number(error?.status || 0)
+      if (status === 404 || status === 403) {
+        const wasLoaded = getLoadedJobId('style') === jobId
+        removeJobTask('style', jobId)
+        clearStyleSubmitLock(jobId)
+        if (!passive404 && wasLoaded) {
+          state.style.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
+        }
+        saveRuntimeState()
+        renderStyle()
+        return
+      }
+
+      const task = upsertJobTask('style', jobId, { error: trimError(error) })
+      if (getLoadedJobId('style') === jobId) state.style.progress = task.error
+      renderStyle()
+      await wait(1200)
+    }
+  }
 }
 
 async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {

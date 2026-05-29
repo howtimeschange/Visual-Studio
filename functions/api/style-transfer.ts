@@ -27,7 +27,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return json(await handleAnalyze(env, requestBody))
     }
     if (action === 'generate') {
-      const result = await handleGenerate(env, requestBody)
+      const result = await executeStyleTransferGenerate(env, requestBody)
       return json(result, result.pending ? 202 : 200)
     }
     return json({ error: 'Unknown action. Use "analyze" or "generate".' }, 400)
@@ -129,7 +129,7 @@ async function handleAnalyze(env: Env, body: any) {
 
 // ── Generate ────────────────────────────────────────────────────────────────
 
-async function handleGenerate(env: Env, body: any) {
+export async function executeStyleTransferGenerate(env: Env, body: any) {
   const session = await ensureSession(env, body?.sessionId, body?._authUserId || null)
   const assetId = String(body?.assetId || '').trim()
   const visualStyle = body?.visualStyle
@@ -154,12 +154,15 @@ async function handleGenerate(env: Env, body: any) {
 
   if (!existingTask && assetId) {
     const dataUrl = await getAssetDataUrl(env, assetId)
+    if (!dataUrl) throw createError(`Asset not found: ${assetId}`, 404)
     if (dataUrl) images.push(splitDataUrl(dataUrl))
   }
 
   const subjectImages: Array<{ base64: string; mime: string }> = []
   for (const sid of existingTask ? [] : subjectAssetIds) {
-    const dataUrl = await getAssetDataUrl(env, String(sid))
+    const subjectAssetId = String(sid)
+    const dataUrl = await getAssetDataUrl(env, subjectAssetId)
+    if (!dataUrl) throw createError(`Subject asset not found: ${subjectAssetId}`, 404)
     if (dataUrl) subjectImages.push(splitDataUrl(dataUrl))
   }
 
@@ -233,7 +236,7 @@ function splitDataUrl(dataUrl: string): { mime: string; base64: string } {
   return { mime: match[1], base64: match[2] }
 }
 
-function parseStyleJson(raw: string) {
+export function parseStyleJson(raw: string) {
   const cleaned = raw
     .replace(/^```json\s*/i, '')
     .replace(/^```\s*/i, '')
@@ -250,7 +253,12 @@ function parseStyleJson(raw: string) {
     }
   }
 
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw createError('Style analysis JSON is missing visual_style', 502)
+  }
+
   const vs = parsed?.visual_style || parsed || {}
+  validateVisualStyle(vs)
   const rp = vs?.reproduction_prompt || {}
 
   const dominantColors = Array.isArray(vs?.color_palette?.dominant_colors)
@@ -281,6 +289,26 @@ function parseStyleJson(raw: string) {
         ? vs.overall_concept.keywords.map((t: any) => String(t))
         : [],
     rawJson: JSON.stringify(parsed, null, 2),
+  }
+}
+
+function validateVisualStyle(value: any) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length === 0) {
+    throw createError('Style analysis JSON is missing visual_style', 502)
+  }
+  const hasConcept = Boolean(
+    value?.overall_concept?.theme
+    || (Array.isArray(value?.overall_concept?.keywords) && value.overall_concept.keywords.length),
+  )
+  const hasPalette = Boolean(
+    Array.isArray(value?.color_palette?.dominant_colors) && value.color_palette.dominant_colors.length,
+  )
+  const hasPrompt = Boolean(
+    value?.reproduction_prompt?.style_essence_en
+    || value?.reproduction_prompt?.style_essence_zh,
+  )
+  if (!hasConcept && !hasPalette && !hasPrompt) {
+    throw createError('Style analysis JSON is missing required style details', 502)
   }
 }
 

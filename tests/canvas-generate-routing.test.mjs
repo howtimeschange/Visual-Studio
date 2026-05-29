@@ -65,6 +65,16 @@ async function createCanvasGenerateHarness() {
   const functionNames = [
     'shouldUseAsyncCanvasGenerate',
     'requestCanvasGenerate',
+    'normalizeCanvasCreativeMode',
+    'inferPosterHeadline',
+    'normalizeCanvasPosterLayout',
+    'normalizeCanvasPosterBrief',
+    'buildCanvasPosterBrief',
+    'getDefaultPosterCopySafeArea',
+    'getPosterAccentColor',
+    'getPosterCompositionTheme',
+    'getPosterCanvasOutputSize',
+    'getPosterTextBox',
     'normalizeCanvasAgentActions',
     'normalizeCanvasAgentAction',
   ]
@@ -119,4 +129,84 @@ test('canvas agent action normalizer falls back to the raw user prompt only', as
 
   assert.equal(actions.length, 1)
   assert.equal(actions[0].prompt, '黄仁勋在北京街头吃炸酱面')
+})
+
+test('poster banner mode builds a local composition brief', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  const brief = harness.buildCanvasPosterBrief('夏促新品上市，限时 8 折', '16:9', '2k')
+
+  assert.equal(brief.format, 'banner')
+  assert.equal(brief.headline, '夏促新品上市')
+  assert.equal(brief.layout, 'left')
+  assert.equal(brief.copySafeArea, 'left 42%')
+  assert.equal(brief.aspectRatio, '16:9')
+  assert.equal(brief.resolution, '2k')
+})
+
+test('poster composition theme chooses domain-aware accent colors', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  assert.equal(harness.getPosterAccentColor({ sourceRequest: '黄仁勋 AI 芯片传记电影' }), '#5ee6a8')
+  assert.equal(harness.getPosterAccentColor({ sourceRequest: '香港电影动作海报' }), '#ffad39')
+  assert.equal(harness.getPosterAccentColor({ sourceRequest: '夏促新品 banner' }), '#ff7a45')
+
+  const theme = harness.getPosterCompositionTheme({ format: 'poster', sourceRequest: '香港电影动作海报' }, 900, 1200)
+  assert.equal(theme.accent, '#ffad39')
+  assert.equal(theme.poster, true)
+  assert.equal(theme.vertical, true)
+  assert.equal(theme.meta, 'POSTER VISUAL')
+})
+
+test('poster banner action metadata survives normalization', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  const actions = harness.normalizeCanvasAgentActions({
+    actions: [{
+      type: 'generate_image',
+      title: '夏促 KV',
+      prompt: 'text-free summer campaign visual base',
+      aspectRatio: '16:9',
+      resolution: '2k',
+      creativeMode: 'poster_banner',
+      promptStyle: 'visual_base',
+      posterBrief: {
+        headline: '夏促新品',
+        subheadline: '轻盈上新',
+        cta: '立即查看',
+        badges: ['限时', '新品'],
+        layout: 'right',
+      },
+    }],
+  }, 'fallback', '1:1', '1k')
+
+  assert.equal(actions[0].creativeMode, 'poster_banner')
+  assert.equal(actions[0].promptStyle, 'visual_base')
+  assert.equal(actions[0].posterBrief.headline, '夏促新品')
+  assert.equal(actions[0].posterBrief.layout, 'right')
+  assert.deepEqual(actions[0].posterBrief.badges, ['限时', '新品'])
+})
+
+test('poster output size scales by requested resolution', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  const wide = harness.getPosterCanvasOutputSize('16:9', '1k')
+  assert.equal(wide.width, 1344)
+  assert.equal(wide.height, 768)
+
+  const vertical = harness.getPosterCanvasOutputSize('9:16', '2k')
+  assert.equal(vertical.width, 1536)
+  assert.equal(vertical.height, 2688)
+})
+
+test('bottom poster copy box starts below the main subject region', async () => {
+  const harness = await createCanvasGenerateHarness()
+
+  const box = harness.getPosterTextBox({ layout: 'bottom', aspectRatio: '3:4' }, 900, 1200)
+
+  assert.equal(box.scrim, 'bottom')
+  assert.equal(box.y, 768)
+  assert.equal(box.height, 369)
+  assert.equal(box.x, 63)
+  assert.equal(box.width, 774)
 })

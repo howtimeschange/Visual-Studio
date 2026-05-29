@@ -35,9 +35,10 @@ async function importConsumer() {
   return { mod, cleanup: () => rm(outdir, { recursive: true, force: true }) }
 }
 
-test('local queue bridge runs the queue consumer path and acknowledges skipped paused jobs', async () => {
+test('local queue bridge accepts queue messages and runs the consumer path in waitUntil', async () => {
   const { mod, cleanup } = await importConsumer()
   const env = { VS_LOCAL_QUEUE_BRIDGE: '1' }
+  const background = []
 
   try {
     assert.equal(typeof mod.default.fetch, 'function')
@@ -77,15 +78,23 @@ test('local queue bridge runs the queue consumer path and acknowledges skipped p
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind: 'run_job', jobId: job.id, jobType: job.type, reason: 'submit' }),
-    }), env)
+    }), env, {
+      waitUntil: (promise) => {
+        background.push(promise)
+      },
+    })
     const payload = await response.json()
+    await Promise.all(background)
     const stillPaused = await mod.getJob(env, job.id)
     const [item] = await mod.listJobItems(env, job.id)
 
     assert.equal(response.status, 200)
     assert.equal(payload.ok, true)
-    assert.equal(payload.acked, 1)
+    assert.equal(payload.accepted, 1)
+    assert.equal(payload.mode, 'background')
+    assert.equal(payload.acked, 0)
     assert.equal(payload.retried, 0)
+    assert.equal(background.length, 1)
     assert.equal(stillPaused.status, 'paused')
     assert.equal(item.status, 'queued')
     assert.equal(item.attemptCount, 0)

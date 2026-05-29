@@ -507,17 +507,41 @@ export async function callTextModel(
         max_tokens: opts.maxTokens ?? 1500,
       }),
     }, normalizeTimeoutMs((opts as { timeoutMs?: number }).timeoutMs, DEFAULT_TEXT_REQUEST_TIMEOUT_MS))
-    if (!res.ok) return null
-    const data = await res.json<any>()
+    const responseText = await res.text()
+    let data: any = null
+    try {
+      data = responseText ? JSON.parse(responseText) : null
+    } catch {
+      data = null
+    }
+    if (!res.ok) {
+      const errorMessage = extractUpstreamErrorMessage(data) || responseText.trim() || res.statusText || 'request failed'
+      throw createUpstreamTextModelError(`Text model upstream failed (${res.status}): ${errorMessage}`, res.status)
+    }
     const raw = data.choices?.[0]?.message?.content
     if (typeof raw === 'string') return raw
     if (Array.isArray(raw)) {
       return raw.map((p) => (p.type === 'text' ? p.text : '')).join('\n').trim()
     }
     return null
-  } catch {
+  } catch (error: any) {
+    if (error?.status) throw error
     return null
   }
+}
+
+function extractUpstreamErrorMessage(data: any): string {
+  const error = data?.error
+  if (typeof error === 'string') return error
+  if (typeof error?.message === 'string') return error.message
+  if (typeof data?.message === 'string') return data.message
+  return ''
+}
+
+function createUpstreamTextModelError(message: string, status = 502) {
+  const error = new Error(message) as Error & { status?: number }
+  error.status = status
+  return error
 }
 
 export function extractImageFromResponse(data: any): string | null {

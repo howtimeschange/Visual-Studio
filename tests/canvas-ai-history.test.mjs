@@ -74,6 +74,11 @@ async function createHistoryHarness() {
         ? String(value).trim()
         : fallback
     ),
+    normalizeCanvasResolution: (value, fallback = '1k') => (
+      ['1k', '2k', '4k'].includes(String(value || '').trim().toLowerCase())
+        ? String(value).trim().toLowerCase()
+        : fallback
+    ),
     readJson: (key, fallback) => {
       try {
         const raw = storage.get(key)
@@ -111,6 +116,11 @@ async function createHistoryHarness() {
     'startNewAiSession',
     'clearCurrentAiSession',
     'renderAiSessionControls',
+    'normalizeCanvasCreativeMode',
+    'inferPosterHeadline',
+    'normalizeCanvasPosterLayout',
+    'getDefaultPosterCopySafeArea',
+    'normalizeCanvasPosterBrief',
     'serializeAiMessage',
     'serializeAiMessageImage',
     'serializeAiWorkflowItem',
@@ -299,4 +309,54 @@ test('canvas AI history preserves prompt suggestions and style intent metadata',
     visualLanguage: 'needs user choice',
     reason: '用户没有指定视觉风格',
   })
+})
+
+test('canvas AI history preserves poster banner composition metadata', async () => {
+  const harness = await createHistoryHarness()
+
+  const saved = harness.serializeAiMessage({
+    id: 'assistant-poster',
+    role: 'assistant',
+    content: '完成海报',
+    creativeMode: 'poster_banner',
+    images: [{
+      assetId: 'asset-poster',
+      name: 'poster.png',
+      mime: 'image/png',
+      prompt: 'text-free visual base',
+      actionId: 'image_1',
+      aspectRatio: '16:9',
+      creativeMode: 'poster_banner',
+      promptStyle: 'visual_base',
+      baseAssetId: 'asset-base',
+      posterBrief: {
+        headline: '夏促新品',
+        subheadline: '轻盈上新',
+        cta: '立即查看',
+        badges: ['限时'],
+        layout: 'left',
+      },
+    }],
+    workflow: [{
+      id: 'image_1',
+      title: '夏促 KV',
+      prompt: 'text-free visual base',
+      status: 'completed',
+      creativeMode: 'poster_banner',
+      promptStyle: 'visual_base',
+      posterBrief: { headline: '夏促新品', layout: 'left' },
+    }],
+  })
+
+  assert.equal(saved.creativeMode, 'poster_banner')
+  assert.equal(saved.images[0].creativeMode, 'poster_banner')
+  assert.equal(saved.images[0].promptStyle, 'visual_base')
+  assert.equal(saved.images[0].posterBrief.headline, '夏促新品')
+  assert.equal(saved.images[0].baseAssetId, 'asset-base')
+  assert.equal(saved.workflow[0].posterBrief.headline, '夏促新品')
+
+  const sanitized = harness.sanitizeAiMessages([saved])
+  assert.equal(sanitized[0].creativeMode, 'poster_banner')
+  assert.equal(sanitized[0].images[0].posterBrief.cta, '立即查看')
+  assert.equal(sanitized[0].workflow[0].creativeMode, 'poster_banner')
 })

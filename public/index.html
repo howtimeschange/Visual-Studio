@@ -213,10 +213,6 @@
             <label>生图模型</label>
             <select id="t-model" class="input"></select>
           </div>
-          <div class="field concurrency-field">
-            <label>并发</label>
-            <input id="t-concurrency" type="number" min="1" max="6" value="2" class="input" />
-          </div>
           <div class="field check preserve-field">
             <label class="switch">
               <input id="t-preserve" type="checkbox" checked />
@@ -412,6 +408,10 @@
         <div class="ai-sidebar-bottom">
           <div class="ai-sidebar-refs" id="g-ai-ref-list"></div>
           <div class="ai-sidebar-controls" aria-describedby="g-ai-controls-help">
+            <select id="g-ai-mode" class="input ai-sidebar-select ai-sidebar-mode" aria-label="AI 工作流模式">
+              <option value="image">普通图</option>
+              <option value="poster_banner">海报/banner</option>
+            </select>
             <select id="g-ai-model" class="input ai-sidebar-select" aria-label="图像模型"></select>
             <select id="g-ai-ratio" class="input ai-sidebar-select" aria-label="画幅比例">
               <option value="1:1">1:1</option>
@@ -551,10 +551,6 @@
               <option value="shoes">鞋品</option>
               <option value="accessory">配饰</option>
             </select>
-          </div>
-          <div class="field inline">
-            <label>并发</label>
-            <input id="o-concurrency" type="number" min="1" max="4" value="2" class="input small" />
           </div>
         </div>
       </header>
@@ -740,6 +736,18 @@
           </div>
 
           <div id="s-error" class="style-error hidden"></div>
+
+          <div class="job-panel style-job-panel">
+            <div class="job-panel-head">
+              <h3 class="style-section-title">风格迁移任务</h3>
+              <div class="job-tabs" id="s-job-tabs" role="tablist" aria-label="风格迁移任务">
+                <button type="button" class="job-tab active" data-job-tab="current" role="tab" aria-selected="true">当前任务</button>
+                <button type="button" class="job-tab" data-job-tab="history" role="tab" aria-selected="false">历史任务</button>
+              </div>
+            </div>
+            <div id="s-job-list" class="job-list"></div>
+            <div id="s-job-empty" class="job-empty">暂无当前任务</div>
+          </div>
 
           <div id="s-history-section" class="style-history-section hidden">
             <div class="style-history-head">

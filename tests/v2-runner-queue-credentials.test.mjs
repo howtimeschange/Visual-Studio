@@ -109,7 +109,7 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
   }
 })
 
-test('batch submit defaults use gpt image 2 for translation and nano banana 2 for outfit', async () => {
+test('batch submit defaults use gpt image 2 for translation and async image concurrency 10', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
     VS_TRANSLATE_JOBS_QUEUE: {
@@ -139,9 +139,54 @@ test('batch submit defaults use gpt image 2 for translation and nano banana 2 fo
     const outfitJob = await mod.getJob(env, outfit.jobId)
 
     assert.equal(translateJob.configJson.modelId, 'gpt-image-2')
-    assert.equal(translateJob.configJson.concurrency, 3)
+    assert.equal(translateJob.configJson.concurrency, 10)
     assert.equal(outfitJob.configJson.modelId, 'nano-banana-2')
-    assert.equal(outfitJob.configJson.concurrency, 3)
+    assert.equal(outfitJob.configJson.concurrency, 10)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('batch submit clamps async image concurrency to 10 for every image model', async () => {
+  const { mod, cleanup } = await importRunner()
+  const env = {
+    VS_TRANSLATE_JOBS_QUEUE: {
+      send: async () => {},
+    },
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+  const models = ['nano-banana-2', 'nano-banana-pro', 'gpt-image-2']
+
+  try {
+    for (const modelId of models) {
+      const translate = await mod.submitTranslateBatch(env, {
+        sessionId: `session_translate_${modelId}`,
+        assetIds: ['source_1'],
+        targetLanguages: ['ja'],
+        modelId,
+        concurrency: 999,
+      })
+      const outfit = await mod.submitOutfitBatch(env, {
+        sessionId: `session_outfit_${modelId}`,
+        modelAssetIds: ['model_1'],
+        modelId,
+        garments: [{
+          assetId: 'garment_1',
+          role: 'top',
+          label: 'top.png',
+        }],
+        concurrency: 999,
+      })
+      const translateJob = await mod.getJob(env, translate.jobId)
+      const outfitJob = await mod.getJob(env, outfit.jobId)
+
+      assert.equal(translateJob.configJson.modelId, modelId)
+      assert.equal(translateJob.configJson.concurrency, 10)
+      assert.equal(outfitJob.configJson.modelId, modelId)
+      assert.equal(outfitJob.configJson.concurrency, 10)
+    }
   } finally {
     await cleanup()
   }
@@ -187,6 +232,130 @@ test('submitTranslateBatch stores uploaded font reference fields and treats remo
     assert.equal(removedPresetJob.configJson.fontPrompt, '')
     assert.notEqual(referenceJob.configJson.configHash, removedPresetJob.configJson.configHash)
   } finally {
+    await cleanup()
+  }
+})
+
+test('submitStyleTransferBatch queues one style item per subject and seals credentials', async () => {
+  const { mod, cleanup } = await importRunner()
+  const sent = []
+  const env = {
+    VS_JOB_CREDENTIAL_KEK: 'shared-style-secret',
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  try {
+    const visualStyle = {
+      overall_concept: { theme: 'Soft catalog' },
+      reproduction_prompt: { style_essence_en: 'soft catalog lighting' },
+    }
+    const submitted = await mod.submitStyleTransferBatch(env, {
+      sessionId: 'session_style_batch_submit',
+      sourceAssetId: 'style_source_asset',
+      visualStyle,
+      subjects: [
+        { subject: '红色手袋', subjectAssetIds: ['bag_asset'], label: 'bag.png' },
+        { subject: '白色运动鞋', subjectAssetIds: ['shoe_asset'], label: 'shoe.png' },
+      ],
+      modelId: 'nano-banana-2',
+      concurrency: 999,
+      clientKeys: { banana2ApiKey: 'style-key' },
+    })
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const items = await mod.listJobItems(env, submitted.jobId)
+    const credential = await mod.getSealedCredential(env, String(job.configJson.sealedCredentialId))
+
+    assert.equal(submitted.itemCount, 2)
+    assert.equal(job.type, 'style_transfer_batch')
+    assert.equal(job.progressTotal, 2)
+    assert.equal(job.configJson.modelId, 'nano-banana-2')
+    assert.equal(job.configJson.concurrency, 10)
+    assert.equal(job.configJson.sourceAssetId, 'style_source_asset')
+    assert.deepEqual(job.configJson.visualStyle, visualStyle)
+    assert.equal(items[0].itemType, 'style_transfer_cell')
+    assert.deepEqual(items.map((item) => item.inputJson.subject), ['红色手袋', '白色运动鞋'])
+    assert.deepEqual(items.map((item) => item.inputJson.subjectAssetIds), [['bag_asset'], ['shoe_asset']])
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].jobType, 'style_transfer_batch')
+    assert.deepEqual(
+      await mod.unsealJson(credential.ciphertext, env.VS_JOB_CREDENTIAL_KEK),
+      { banana2ApiKey: 'style-key' },
+    )
+  } finally {
+    await cleanup()
+  }
+})
+
+test('runStyleTransferBatchJob stores completed style transfer results', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    calls.push({ input: String(input), payload })
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'c3R5bGUtYmF0Y2gtcmVzdWx0' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_style_batch_run', null)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3R5bGUtc291cmNl',
+      filename: 'style.png',
+    })
+    const subject = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'reference',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3ViamVjdA==',
+      filename: 'subject.png',
+    })
+    const submitted = await mod.submitStyleTransferBatch(env, {
+      sessionId: session.id,
+      sourceAssetId: source.id,
+      visualStyle: {
+        overall_concept: { theme: 'Soft catalog' },
+        reproduction_prompt: { style_essence_en: 'soft catalog lighting' },
+      },
+      subjects: [{ subject: '手袋', subjectAssetIds: [subject.id], label: 'subject.png' }],
+      modelId: 'nano-banana-2',
+      clientKeys: { banana2ApiKey: 'style-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    const resultDataUrl = await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId))
+
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(item.outputJson.subject, '手袋')
+    assert.equal(resultDataUrl, 'data:image/png;base64,c3R5bGUtYmF0Y2gtcmVzdWx0')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].payload.image.length, 2)
+    assert.match(calls[0].payload.prompt, /STYLE SOURCE/i)
+    assert.match(calls[0].payload.prompt, /SUBJECT REFERENCE/i)
+  } finally {
+    globalThis.fetch = originalFetch
     await cleanup()
   }
 })
@@ -1148,6 +1317,100 @@ test('runOutfitBatchJob fails item when image task result is empty', async () =>
     assert.equal(item.errorCode, 'outfit_failed')
     assert.match(item.errorMessage, /Image result fetch returned an empty body/)
     assert.equal(Boolean(item.outputJson?.resultAssetId), false)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runOutfitBatchJob retries transient outfit analysis upstream failures', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  let visionCalls = 0
+  let imageCalls = 0
+  const env = {
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    if (payload.model === 'gemini-3-flash-preview') {
+      visionCalls += 1
+      if (visionCalls === 1) {
+        return new Response(JSON.stringify({ error: { message: 'temporary analysis outage' } }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              model: { framing: 'full-body', pose: 'standing' },
+              garments: [{ index: 2, role: 'top', category: 'shirt' }],
+            }),
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    imageCalls += 1
+    return new Response(JSON.stringify({
+      status: 'succeeded',
+      data: [{ b64_json: Buffer.from(`outfit-${imageCalls}`).toString('base64') }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_analysis_retry', null)
+    const model = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,bW9kZWw=',
+      filename: 'model.png',
+    })
+    const top = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,dG9w',
+      filename: 'top.png',
+    })
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: session.id,
+      modelAssetIds: [model.id],
+      modelId: 'nano-banana-2',
+      garments: [{ assetId: top.id, role: 'top', label: 'top.png' }],
+      concurrency: 1,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+        visionApiKey: 'vision-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(visionCalls, 2)
+    assert.equal(imageCalls, 1)
+    assert.equal(Boolean(item.outputJson?.resultAssetId), true)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
