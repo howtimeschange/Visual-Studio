@@ -47,7 +47,7 @@ export default {
     await processQueueMessages(batch.messages, env)
   },
 
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx?: { waitUntil?: (promise: Promise<unknown>) => void }) {
     const url = new URL(request.url)
     if (url.pathname === '/__queue/health') {
       return json({ ok: true, bridgeEnabled: isLocalBridgeEnabled(env) })
@@ -81,10 +81,13 @@ export default {
       },
     }))
 
-    await processQueueMessages(messages, env)
-    if (retried > 0) {
-      return json({ ok: false, acked, retried }, 502)
+    const run = processQueueMessages(messages, env)
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(run)
+      return json({ ok: true, accepted: messages.length, acked, retried, mode: 'background' })
     }
-    return json({ ok: true, acked, retried })
+    await run
+    if (retried > 0) return json({ ok: false, accepted: messages.length, acked, retried, mode: 'inline' }, 502)
+    return json({ ok: true, accepted: messages.length, acked, retried, mode: 'inline' })
   },
 }

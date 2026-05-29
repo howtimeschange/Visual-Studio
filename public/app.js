@@ -55,6 +55,8 @@ const MODEL_OPTIONS = [
 
 const TRANSLATE_FONT_MODES = new Set(['match_original', 'reference'])
 const DEFAULT_TRANSLATE_MODEL = 'gpt-image-2'
+const DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY = 10
+const MAX_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const TRANSLATE_TEXT_COLOR_MODES = new Set(['match_original', 'custom'])
 const TRANSLATE_TEXT_COLOR_SWATCHES = [
   '#111827',
@@ -271,7 +273,7 @@ const state = {
     targets: ['en'],
     model: DEFAULT_TRANSLATE_MODEL,
     preserveBrand: true,
-    concurrency: 3,
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
     fontMode: 'match_original',
     fontFamily: '',
     fontPrompt: '',
@@ -385,7 +387,7 @@ const state = {
   outfit: {
     model: 'nano-banana-2',
     garmentType: 'full_outfit',
-    concurrency: 3,
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
     models: [],
     garments: [],
 	    results: {},
@@ -437,7 +439,6 @@ const dom = {
   targetMenu: $('#target-langs-menu'),
   targetChips: $('#target-chips'),
   tModel: $('#t-model'),
-  tConcurrency: $('#t-concurrency'),
   tPreserve: $('#t-preserve'),
   tFontMode: $('#t-font-mode'),
   tFontPrompt: $('#t-font-prompt'),
@@ -567,7 +568,6 @@ const dom = {
   taskDeleteStatus: $('#task-delete-status'),
   oModel: $('#o-model'),
   oGarmentType: $('#o-garment-type'),
-  oConcurrency: $('#o-concurrency'),
   oModelInput: $('#o-model-input'),
   oModelAdd: $('#o-model-add'),
   oModelLibraryOpen: $('#o-model-library-open'),
@@ -826,7 +826,7 @@ function sanitizeTranslatePrefs(raw = {}) {
     targets: targetCodes.length ? unique(targetCodes) : state.translate.targets,
     model: getModel(raw.model)?.id || state.translate.model,
     preserveBrand: typeof raw.preserveBrand === 'boolean' ? raw.preserveBrand : state.translate.preserveBrand,
-    concurrency: clamp(Number(raw.concurrency) || state.translate.concurrency, 1, 6),
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
     fontMode: normalizeTranslateFontMode(raw.fontMode),
     fontFamily: '',
     fontPrompt: normalizeTranslateFontPrompt(raw.fontPrompt),
@@ -893,7 +893,7 @@ function sanitizeOutfitPrefs(raw = {}) {
   return {
     model: getModel(raw.model)?.id || state.outfit.model,
     garmentType,
-    concurrency: clamp(Number(raw.concurrency) || state.outfit.concurrency, 1, 4),
+    concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
   }
 }
 
@@ -906,7 +906,6 @@ function savePrefs() {
       targets: state.translate.targets,
       model: state.translate.model,
       preserveBrand: state.translate.preserveBrand,
-      concurrency: state.translate.concurrency,
       fontMode: state.translate.fontMode,
       fontFamily: state.translate.fontFamily,
       fontPrompt: state.translate.fontPrompt,
@@ -923,7 +922,6 @@ function savePrefs() {
     outfit: {
       model: state.outfit.model,
       garmentType: state.outfit.garmentType,
-      concurrency: state.outfit.concurrency,
     },
     style: {
       model: state.style.model,
@@ -2832,12 +2830,6 @@ async function logoutAccount() {
 function bindTranslate() {
   dom.tModel.addEventListener('change', () => {
     state.translate.model = dom.tModel.value
-    savePrefs()
-    renderTranslate()
-  })
-
-  dom.tConcurrency.addEventListener('change', () => {
-    state.translate.concurrency = clamp(Number(dom.tConcurrency.value) || 1, 1, 6)
     savePrefs()
     renderTranslate()
   })
@@ -5901,12 +5893,6 @@ function bindOutfit() {
     renderOutfit()
   })
 
-  dom.oConcurrency.addEventListener('change', () => {
-    state.outfit.concurrency = clamp(Number(dom.oConcurrency.value) || 1, 1, 4)
-    savePrefs()
-    renderOutfit()
-  })
-
   dom.oModelAdd.addEventListener('click', () => {
     if (isOutfitBusy()) return
     dom.oModelInput.click()
@@ -6647,7 +6633,6 @@ function renderTranslate() {
   state.translate.headlineColor = normalizeTranslateTextColor(state.translate.headlineColor, DEFAULT_TRANSLATE_HEADLINE_COLOR)
   state.translate.bodyColor = normalizeTranslateTextColor(state.translate.bodyColor, DEFAULT_TRANSLATE_BODY_COLOR)
   dom.tModel.value = state.translate.model
-  dom.tConcurrency.value = String(state.translate.concurrency)
   dom.tPreserve.checked = state.translate.preserveBrand
   if (dom.tFontMode) {
     dom.tFontMode.value = state.translate.fontMode
@@ -6671,7 +6656,6 @@ function renderTranslate() {
 
   dom.tRunBtn.disabled = busy || !hasItems || state.translate.targets.length === 0
   dom.tModel.disabled = busy
-  dom.tConcurrency.disabled = busy
   dom.tPreserve.disabled = busy
   if (dom.tFontMode) dom.tFontMode.disabled = busy
   if (dom.tFontPrompt) dom.tFontPrompt.disabled = busy
@@ -7223,7 +7207,6 @@ function renderOutfit() {
   const runEstimate = formatOutfitRunEstimate(state.outfit.models.length, looks.length)
   dom.oModel.value = state.outfit.model
   dom.oGarmentType.value = state.outfit.garmentType
-  dom.oConcurrency.value = String(state.outfit.concurrency)
   dom.oProgress.textContent = state.outfit.progress || runEstimate
   dom.oModelCount.textContent = String(state.outfit.models.length)
   dom.oGarmentCount.textContent = String(state.outfit.garments.length)
@@ -7231,7 +7214,6 @@ function renderOutfit() {
   dom.oRun.disabled = busy || state.outfit.models.length === 0 || looks.length === 0
   dom.oModel.disabled = busy
   dom.oGarmentType.disabled = busy
-  dom.oConcurrency.disabled = busy
   dom.oModelAdd.disabled = busy
   if (dom.oModelLibraryOpen) dom.oModelLibraryOpen.disabled = busy
   dom.oGarmentAdd.disabled = busy
@@ -7574,7 +7556,7 @@ async function runTranslateBatch() {
       textColorMode: runConfig.textColorMode,
       headlineColor: runConfig.headlineColor,
       bodyColor: runConfig.bodyColor,
-      concurrency: state.translate.concurrency,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
       clientKeys: runConfig.clientKeys,
     })
 
@@ -7651,7 +7633,7 @@ async function runOutfitBatch() {
         instructions: normalizeGarmentInstructions(item.instructions),
       })),
       modelId: runConfig.modelId,
-      concurrency: state.outfit.concurrency,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
       clientKeys: runConfig.clientKeys,
     })
 
@@ -9476,7 +9458,11 @@ async function hydrateTranslateWorkspaceFromJob(job, items) {
   state.translate.source = getLanguage(job?.configJson?.sourceLanguage)?.code || 'auto'
   state.translate.model = getModel(job?.configJson?.modelId)?.id || state.translate.model
   state.translate.preserveBrand = job?.configJson?.preserveBrand !== false
-  state.translate.concurrency = clamp(Number(job?.configJson?.concurrency) || state.translate.concurrency, 1, 6)
+  state.translate.concurrency = clamp(
+    Number(job?.configJson?.concurrency) || state.translate.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
   state.translate.fontMode = normalizeTranslateFontMode(job?.configJson?.fontMode)
   state.translate.fontFamily = normalizeTranslateFontFamily(job?.configJson?.fontFamily)
   state.translate.fontPrompt = normalizeTranslateFontPrompt(job?.configJson?.fontPrompt)
@@ -9735,7 +9721,11 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
     })),
   ]
   state.outfit.model = getModel(job?.configJson?.modelId)?.id || state.outfit.model
-  state.outfit.concurrency = clamp(Number(job?.configJson?.concurrency) || state.outfit.concurrency, 1, 4)
+  state.outfit.concurrency = clamp(
+    Number(job?.configJson?.concurrency) || state.outfit.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
 }
 
 function applyOutfitJobSnapshot(job, items) {

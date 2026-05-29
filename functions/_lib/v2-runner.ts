@@ -48,6 +48,8 @@ type ClientKeys = Record<string, unknown>
 type TranslateFontMode = 'match_original' | 'reference'
 type TranslateTextColorMode = 'match_original' | 'custom'
 const DEFAULT_TRANSLATE_MODEL_ID = 'gpt-image-2'
+const DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY = 10
+const MAX_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
@@ -209,12 +211,12 @@ function createOutfitAnalysisCache(env: Env, job: JobRecord, clientKeys: ClientK
     const cacheKey = String(key || '').trim()
     if (!cacheKey) return Promise.resolve(null)
     if (!cache.has(cacheKey)) {
-      cache.set(cacheKey, prepareOutfitAnalysis({
+      cache.set(cacheKey, runWithAutoRetry(() => prepareOutfitAnalysis({
         modelId: job.configJson.modelId,
         model,
         garments,
         clientKeys,
-      }, env))
+      }, env)).then(({ result }) => result))
     }
     return cache.get(cacheKey) as Promise<any | null>
   }
@@ -414,7 +416,12 @@ export async function submitTranslateBatch(
     sourceLanguage: body?.sourceLanguage || 'auto',
     targetLanguages,
     preserveBrand: body?.preserveBrand !== false,
-    concurrency: Math.max(1, Number(body?.concurrency || 3)),
+    concurrency: clampInt(
+      body?.concurrency,
+      1,
+      MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+      DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+    ),
     assetIds,
     ...fontConfig,
     configHash: await stableHash({
@@ -472,7 +479,12 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 6, 2)
+  const concurrency = clampInt(
+    initialJob.configJson?.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+    DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
   const progress = queueProgressPublisher(env, jobId)
   const getCachedAssetDataUrl = createAssetDataUrlCache(env)
   const getCachedTranslatePlan = createTranslationPlanCache(env, initialJob, clientKeys, getCachedAssetDataUrl)
@@ -650,7 +662,12 @@ export async function submitOutfitBatch(
       garmentRoles: garments.map((item) => `${item.assetId}:${item.role}`).sort(),
       garmentInstructions: garments.map((item) => `${item.assetId}:${item.instructions}`).sort(),
       garmentFingerprint,
-      concurrency: clampInt(body?.concurrency, 1, 4, 3),
+      concurrency: clampInt(
+        body?.concurrency,
+        1,
+        MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+        DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+      ),
       sealedCredentialId,
       configHash: await stableHash({
         modelId: body?.modelId || 'nano-banana-2',
@@ -705,7 +722,12 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 4, 2)
+  const concurrency = clampInt(
+    initialJob.configJson?.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+    DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
   const progress = queueProgressPublisher(env, jobId)
   const getCachedAssetDataUrl = createAssetDataUrlCache(env)
   const getCachedOutfitAnalysis = createOutfitAnalysisCache(env, initialJob, clientKeys)

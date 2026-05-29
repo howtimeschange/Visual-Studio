@@ -4,6 +4,7 @@ import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
+const INDEX_PATH = new URL('../public/index.html', import.meta.url)
 
 function extractStateInitializer(source) {
   const start = source.indexOf('const state = {')
@@ -22,6 +23,9 @@ function extractStateInitializer(source) {
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`)
   if (start === -1) return ''
+  const functionStart = source.slice(Math.max(0, start - 6), start) === 'async '
+    ? start - 6
+    : start
   const paramsEnd = source.indexOf(')', start)
   const bodyStart = source.indexOf('{', paramsEnd)
   let depth = 0
@@ -29,7 +33,7 @@ function extractFunction(source, name) {
     const char = source[index]
     if (char === '{') depth += 1
     if (char === '}') depth -= 1
-    if (depth === 0) return source.slice(start, index + 1)
+    if (depth === 0) return source.slice(functionStart, index + 1)
   }
   throw new Error(`Could not extract function ${name}`)
 }
@@ -59,9 +63,20 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     CANVAS_SHAPES: new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right']),
     TRANSLATE_FONT_MODES: new Set(['match_original', 'reference']),
     DEFAULT_TRANSLATE_MODEL: 'gpt-image-2',
+    DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     TRANSLATE_TEXT_COLOR_MODES: new Set(['match_original', 'custom']),
     DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
     DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
+    GARMENT_ROLE_OPTIONS: [
+      { value: 'full_outfit' },
+      { value: 'top' },
+      { value: 'bottom' },
+      { value: 'dress' },
+      { value: 'outerwear' },
+      { value: 'shoes' },
+      { value: 'accessory' },
+    ],
     state: {
       runtime: { sessionId: 'session-1' },
       translate: {
@@ -70,6 +85,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         jobPage: 1,
         jobs: [],
         items: [],
+        concurrency: 10,
       },
       generate: {
         projectId: 'project-1',
@@ -91,6 +107,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         jobs: [],
         models: [],
         garments: [],
+        concurrency: 10,
       },
       style: {
         sourceImage: null,
@@ -110,6 +127,11 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     serializeAssetBackedItem: (item) => item,
     serializeCanvasElement: (item) => item,
     normalizeGarmentInstructions: (value) => String(value || '').trim(),
+    hydrateAssetItems: async (items) => items.map((item) => ({
+      ...item,
+      dataUrl: item.dataUrl || '',
+      results: item.results || {},
+    })),
     normalizeAspectRatio: (value, fallback = '1:1') => (
       ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(String(value || '').trim())
         ? String(value).trim()
@@ -205,6 +227,9 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'normalizeTranslateTextColor',
     'getEffectiveTranslateFontMode',
     'sanitizeTranslatePrefs',
+    'sanitizeOutfitPrefs',
+    'hydrateTranslateWorkspaceFromJob',
+    'hydrateOutfitWorkspaceFromJob',
     'getTranslateSignature',
   ]
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
@@ -218,12 +243,14 @@ test('app defaults batch translation to gpt image 2 and outfit to nano banana 2'
   const state = vm.runInNewContext(`(${extractStateInitializer(source)})`, {
     DEFAULT_CANVAS_PROJECT_TITLE: '未命名画布',
     DEFAULT_TRANSLATE_MODEL: 'gpt-image-2',
+    DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
     DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
   })
 
   assert.equal(state.translate.model, 'gpt-image-2')
-  assert.equal(state.translate.concurrency, 3)
+  assert.equal(state.translate.concurrency, 10)
   assert.equal(state.translate.fontMode, 'match_original')
   assert.equal(state.translate.fontFamily, '')
   assert.equal(state.translate.fontPrompt, '')
@@ -232,7 +259,69 @@ test('app defaults batch translation to gpt image 2 and outfit to nano banana 2'
   assert.equal(state.translate.headlineColor, '#111827')
   assert.equal(state.translate.bodyColor, '#374151')
   assert.equal(state.outfit.model, 'nano-banana-2')
-  assert.equal(state.outfit.concurrency, 3)
+  assert.equal(state.outfit.concurrency, 10)
+})
+
+test('frontend async image concurrency preferences ignore old values and stay fixed at 10', async () => {
+  const harness = await createRuntimeHarness()
+
+  const translatePrefs = harness.sanitizeTranslatePrefs({
+    targets: ['ja'],
+    concurrency: 999,
+  })
+  const outfitPrefs = harness.sanitizeOutfitPrefs({
+    concurrency: 999,
+  })
+
+  assert.equal(translatePrefs.concurrency, 10)
+  assert.equal(outfitPrefs.concurrency, 10)
+})
+
+test('batch translation and outfit pages do not expose concurrency inputs', async () => {
+  const [appSource, htmlSource] = await Promise.all([
+    readFile(APP_PATH, 'utf8'),
+    readFile(INDEX_PATH, 'utf8'),
+  ])
+
+  assert.doesNotMatch(htmlSource, /id="t-concurrency"|id="o-concurrency"|concurrency-field/)
+  assert.doesNotMatch(appSource, /tConcurrency|oConcurrency|#t-concurrency|#o-concurrency/)
+})
+
+test('frontend async image concurrency job hydration clamps restored jobs at 10', async () => {
+  const harness = await createRuntimeHarness()
+
+  await harness.hydrateTranslateWorkspaceFromJob({
+    configJson: {
+      modelId: 'gpt-image-2',
+      sourceLanguage: 'auto',
+      targetLanguages: ['ja'],
+      preserveBrand: true,
+      concurrency: 999,
+    },
+  }, [{
+    id: 'translate-item-1',
+    inputJson: { assetId: 'asset_1', targetLanguage: 'ja' },
+  }])
+  await harness.hydrateOutfitWorkspaceFromJob({
+    configJson: {
+      modelId: 'nano-banana-pro',
+      concurrency: 999,
+    },
+  }, [{
+    id: 'outfit-item-1',
+    inputJson: {
+      modelAssetId: 'model_1',
+      modelLabel: 'Model 1',
+      modelInstructions: '',
+      lookAssetIds: ['garment_1'],
+      lookRoles: ['top'],
+      lookLabels: ['Top'],
+      lookInstructions: [''],
+    },
+  }])
+
+  assert.equal(harness.state.translate.concurrency, 10)
+  assert.equal(harness.state.outfit.concurrency, 10)
 })
 
 test('sanitizeTranslatePrefs keeps uploaded font reference preferences and drops removed preset mode', async () => {
