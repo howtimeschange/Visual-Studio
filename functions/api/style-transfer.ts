@@ -1,7 +1,8 @@
 import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
-  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
+  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
 } from '../_shared'
+import type { ImageTaskStepResult } from '../_shared'
 import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 import { ensureSession, getAssetDataUrl } from '../_lib/v2-store'
@@ -26,7 +27,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return json(await handleAnalyze(env, requestBody))
     }
     if (action === 'generate') {
-      return json(await handleGenerate(env, requestBody))
+      const result = await handleGenerate(env, requestBody)
+      return json(result, result.pending ? 202 : 200)
     }
     return json({ error: 'Unknown action. Use "analyze" or "generate".' }, 400)
   } catch (error: any) {
@@ -134,6 +136,8 @@ async function handleGenerate(env: Env, body: any) {
   const subject = String(body?.subject || '').trim()
   const modelId = String(body?.modelId || 'nano-banana-2')
   const subjectAssetIds = Array.isArray(body?.subjectAssetIds) ? body.subjectAssetIds.filter(Boolean) : []
+  const existingTask = body?.existingTask || null
+  const maxPollAttempts = normalizeStyleMaxPollAttempts(body?.maxPollAttempts)
 
   if (!subject && subjectAssetIds.length === 0) throw createError('subject or subjectAssetIds required', 400)
   if (!visualStyle) throw createError('visualStyle required', 400)
@@ -148,13 +152,13 @@ async function handleGenerate(env: Env, body: any) {
 
   const images: Array<{ base64: string; mime: string }> = []
 
-  if (assetId) {
+  if (!existingTask && assetId) {
     const dataUrl = await getAssetDataUrl(env, assetId)
     if (dataUrl) images.push(splitDataUrl(dataUrl))
   }
 
   const subjectImages: Array<{ base64: string; mime: string }> = []
-  for (const sid of subjectAssetIds) {
+  for (const sid of existingTask ? [] : subjectAssetIds) {
     const dataUrl = await getAssetDataUrl(env, String(sid))
     if (dataUrl) subjectImages.push(splitDataUrl(dataUrl))
   }
@@ -197,15 +201,22 @@ ${imageNotes.length > 0 ? '## Attached images\n' + imageNotes.join('\n') + '\n' 
 Style reference JSON:
 ${styleJson}`
 
-  const result = await callImageModel(
+  const result = await callImageModelTaskStep(
     baseUrl,
     genKey,
     MODEL_MAP[modelId],
     allImages,
     prompt,
-    imageModelOptions,
+    {
+      ...imageModelOptions,
+      existingTask,
+      maxPollAttempts,
+    },
   )
 
+  if (result.pending) {
+    return createPendingStyleResult(session.id, result)
+  }
   if (!result.ok) throw createError(result.error, result.status)
 
   return {
@@ -277,4 +288,22 @@ function createError(message: string, status = 502) {
   const error = new Error(message) as Error & { status?: number }
   error.status = status
   return error
+}
+
+function normalizeStyleMaxPollAttempts(value: unknown): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric < 0) return 0
+  return Math.min(5, numeric)
+}
+
+function createPendingStyleResult(sessionId: string, result: Extract<ImageTaskStepResult, { pending: true }>) {
+  return {
+    sessionId,
+    pending: true,
+    task: result.task,
+    taskStatus: result.taskStatus,
+    pollTarget: result.pollTarget,
+    pollUrl: result.pollUrl,
+    nextPollAfterMs: result.nextPollAfterMs,
+  }
 }

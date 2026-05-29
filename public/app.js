@@ -409,6 +409,7 @@ const state = {
     subjectRefs: [],
     subject: '',
     generating: false,
+    pendingTask: null,
     resultDataUrl: '',
     error: '',
     history: [],
@@ -6361,25 +6362,24 @@ async function generateStyleTransfer() {
   if (!state.style.subject.trim() && state.style.subjectRefs.length === 0) return
 
   state.style.generating = true
+  state.style.pendingTask = null
   state.style.resultDataUrl = ''
   state.style.error = ''
+  setStyleProgressText('正在提交生成任务…')
   renderStyle()
 
   try {
-    const data = await postJson('/api/style-transfer', {
-      action: 'generate',
-      sessionId: state.runtime.sessionId || undefined,
-      assetId: state.style.sourceImage?.assetId || '',
-      visualStyle: state.style.visualStyle,
-      subject: state.style.subject.trim(),
-      subjectAssetIds: state.style.subjectRefs.map((ref) => ref.assetId || ref.id),
-      modelId: state.style.model,
-      clientKeys: { ...state.keys },
-    })
+    const data = await runStyleTransferGeneration()
+
+    if (!data?.resultDataUrl) {
+      throw new Error('Style transfer returned no image')
+    }
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     state.style.resultDataUrl = data.resultDataUrl
     state.style.generating = false
+    state.style.pendingTask = null
+    setStyleProgressText('正在生成…')
     const resultName = `style-transfer-${sanitizeFileName(state.style.subject || 'result')}.png`
     const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, resultName, {
       kind: 'result',
@@ -6400,9 +6400,55 @@ async function generateStyleTransfer() {
     renderStyle()
   } catch (error) {
     state.style.generating = false
+    state.style.pendingTask = null
+    setStyleProgressText('正在生成…')
     state.style.error = trimError(error)
     renderStyle()
   }
+}
+
+async function runStyleTransferGeneration() {
+  let existingTask = null
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const data = await postJson('/api/style-transfer', {
+      action: 'generate',
+      sessionId: state.runtime.sessionId || undefined,
+      assetId: state.style.sourceImage?.assetId || '',
+      visualStyle: state.style.visualStyle,
+      subject: state.style.subject.trim(),
+      subjectAssetIds: state.style.subjectRefs.map((ref) => ref.assetId || ref.id),
+      modelId: state.style.model,
+      existingTask,
+      maxPollAttempts: existingTask ? 1 : 0,
+      clientKeys: { ...state.keys },
+    })
+
+    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    if (data.resultDataUrl) return data
+    if (!data.pending || !data.task) return data
+
+    existingTask = data.task
+    state.style.pendingTask = data
+    setStyleProgressText(formatStyleTaskProgress(data.taskStatus))
+    renderStyle()
+    await waitForStyleTaskPoll(data.nextPollAfterMs)
+  }
+  throw new Error('Style transfer task did not finish in time')
+}
+
+function setStyleProgressText(text) {
+  if (dom.sProgress) dom.sProgress.textContent = text || '正在生成…'
+}
+
+function formatStyleTaskProgress(status) {
+  const label = String(status || '').trim()
+  if (label && !['queued', 'pending'].includes(label)) return `生成任务${label}，正在继续读取结果…`
+  return '任务已提交，正在等待生成完成…'
+}
+
+async function waitForStyleTaskPoll(nextPollAfterMs) {
+  const delay = clamp(Number(nextPollAfterMs) || 1500, 1000, 8000)
+  await wait(delay)
 }
 
 function renderAll() {
