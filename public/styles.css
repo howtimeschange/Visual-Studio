@@ -4040,22 +4040,32 @@ dialog input::placeholder,
 }
 
 .style-json {
+  position: relative;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
 .style-json summary {
-  padding: var(--space-sm) var(--space-md);
+  min-height: 42px;
+  padding: var(--space-sm) 116px var(--space-sm) var(--space-md);
   color: var(--text-soft);
   font-size: var(--text-xs);
   cursor: pointer;
 }
 
 .style-json-actions {
+  position: absolute;
+  top: 7px;
+  right: var(--space-md);
   display: flex;
-  justify-content: flex-end;
-  padding: var(--space-xs) var(--space-md) 0;
+}
+
+.style-json-copy {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: var(--text-xs);
+  flex-shrink: 0;
 }
 
 .style-json-content {

@@ -257,7 +257,7 @@ export function parseStyleJson(raw: string) {
     throw createError('Style analysis JSON is missing visual_style', 502)
   }
 
-  const vs = parsed?.visual_style || parsed || {}
+  const vs = extractVisualStyle(parsed)
   validateVisualStyle(vs)
   const rp = vs?.reproduction_prompt || {}
 
@@ -290,6 +290,28 @@ export function parseStyleJson(raw: string) {
         : [],
     rawJson: JSON.stringify(parsed, null, 2),
   }
+}
+
+function extractVisualStyle(parsed: any): any {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const direct = parsed.visual_style || parsed.visualStyle
+  if (direct && typeof direct === 'object' && !Array.isArray(direct)) return direct
+
+  for (const key of ['style_analysis', 'styleAnalysis', 'analysis', 'result', 'data', 'output']) {
+    const nested = parsed[key]
+    if (!nested || typeof nested !== 'object') continue
+    if (Array.isArray(nested)) {
+      for (const item of nested) {
+        const found = extractVisualStyle(item)
+        if (found) return found
+      }
+      continue
+    }
+    const found = extractVisualStyle(nested)
+    if (found) return found
+  }
+
+  return parsed
 }
 
 function validateVisualStyle(value: any) {

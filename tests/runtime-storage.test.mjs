@@ -224,6 +224,9 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'serializeAiMessageRef',
     'sanitizeStyleHistoryEntries',
     'sanitizeStyleResultEntries',
+    'normalizeImageResultSrc',
+    'normalizeStyleResultEntry',
+    'looksLikeBase64Blob',
     'serializeStyleHistoryEntries',
     'serializeStyleResultEntries',
     'loadResultsStore',
@@ -587,6 +590,33 @@ test('runtime storage preserves style transfer draft and analyzed style', async 
   assert.deepEqual(sanitized.style.tags, ['catalog'])
   assert.equal(sanitized.style.subjectRefs[0].assetId, 'subject-asset')
   assert.equal(sanitized.style.batchResults[0].assetId, 'style-result-1')
+})
+
+test('style result sanitizers normalize bare base64 images before rendering', async () => {
+  const harness = await createRuntimeHarness()
+  const bareBase64 = Buffer.from('style-image-bytes').toString('base64').repeat(8)
+
+  const [result] = harness.sanitizeStyleResultEntries([{
+    id: 'style-item-b64',
+    subject: bareBase64,
+    mime: 'image/png',
+    resultDataUrl: bareBase64,
+    timestamp: 1780056000000,
+  }])
+  const [history] = harness.sanitizeStyleHistoryEntries([{
+    id: 'style-history-b64',
+    subject: '历史结果',
+    mime: 'image/jpeg',
+    resultDataUrl: bareBase64,
+    timestamp: 1780056000000,
+  }])
+
+  assert.equal(result.resultDataUrl, `data:image/png;base64,${bareBase64}`)
+  assert.equal(result.subject, '')
+  assert.equal(history.resultDataUrl, `data:image/jpeg;base64,${bareBase64}`)
+  assert.equal(harness.normalizeImageResultSrc('iWEcAqNwbmcDAQTRAQ', 'image/png'), '')
+  assert.equal(harness.normalizeStyleResultEntry({ resultDataUrl: 'iWEcAqNwbmcDAQTRAQ' }), null)
+  assert.equal(harness.looksLikeBase64Blob(bareBase64), true)
 })
 
 test('migrateLegacyRuntimeStorage skips already compact runtime storage', async () => {

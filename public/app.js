@@ -2630,6 +2630,38 @@ function shouldInlineHistoryDataUrl(value) {
     && value.length <= AI_HISTORY_INLINE_DATA_URL_LIMIT
 }
 
+function normalizeImageResultSrc(value, mime = 'image/png') {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  if (/^(data:image\/|https?:\/\/|\/api\/results\/)/i.test(text)) return text
+  if (/^[A-Za-z0-9+/=]+$/.test(text) && text.length > 80) {
+    const safeMime = /^image\/[\w.+-]+$/i.test(String(mime || '')) ? mime : 'image/png'
+    return `data:${safeMime};base64,${text}`
+  }
+  return ''
+}
+
+function looksLikeBase64Blob(value) {
+  const text = String(value || '').trim()
+  return text.length > 32 && /^[A-Za-z0-9+/=]+$/.test(text)
+}
+
+function normalizeStyleResultEntry(entry = {}) {
+  const assetId = typeof entry?.assetId === 'string' ? entry.assetId.trim() : ''
+  const mime = typeof entry?.mime === 'string' ? entry.mime : 'image/png'
+  const normalizedResultDataUrl = normalizeImageResultSrc(entry?.resultDataUrl, mime)
+  const subject = typeof entry?.subject === 'string' && !looksLikeBase64Blob(entry.subject) ? entry.subject : ''
+  if (!assetId && !normalizedResultDataUrl) return null
+  return {
+    id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
+    subject,
+    assetId,
+    mime,
+    resultDataUrl: normalizedResultDataUrl,
+    timestamp: Number(entry?.timestamp) || Date.now(),
+  }
+}
+
 function sanitizeCanvasPath(value) {
   if (!Array.isArray(value)) return []
   return value
@@ -2723,19 +2755,7 @@ function sanitizeStoredAssetItem(raw = {}) {
 function sanitizeStyleHistoryEntries(value) {
   if (!Array.isArray(value)) return []
   return value
-    .map((entry) => {
-      const assetId = typeof entry?.assetId === 'string' ? entry.assetId.trim() : ''
-      const resultDataUrl = typeof entry?.resultDataUrl === 'string' ? entry.resultDataUrl : ''
-      if (!assetId && !resultDataUrl) return null
-      return {
-        id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
-        subject: typeof entry?.subject === 'string' ? entry.subject : '',
-        assetId,
-        mime: typeof entry?.mime === 'string' ? entry.mime : '',
-        resultDataUrl,
-        timestamp: Number(entry?.timestamp) || Date.now(),
-      }
-    })
+    .map((entry) => normalizeStyleResultEntry(entry))
     .filter(Boolean)
     .slice(-STYLE_HISTORY_LIMIT)
 }
@@ -2743,19 +2763,7 @@ function sanitizeStyleHistoryEntries(value) {
 function sanitizeStyleResultEntries(value) {
   if (!Array.isArray(value)) return []
   return value
-    .map((entry) => {
-      const assetId = typeof entry?.assetId === 'string' ? entry.assetId.trim() : ''
-      const resultDataUrl = typeof entry?.resultDataUrl === 'string' ? entry.resultDataUrl : ''
-      if (!assetId && !resultDataUrl) return null
-      return {
-        id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
-        subject: typeof entry?.subject === 'string' ? entry.subject : '',
-        assetId,
-        mime: typeof entry?.mime === 'string' ? entry.mime : 'image/png',
-        resultDataUrl,
-        timestamp: Number(entry?.timestamp) || Date.now(),
-      }
-    })
+    .map((entry) => normalizeStyleResultEntry(entry))
     .filter(Boolean)
 }
 
@@ -10628,7 +10636,7 @@ function mapStyleJobItemToHistory(item, signature) {
   const subject = String(item.outputJson?.subject || item.inputJson?.subject || item.inputJson?.label || '')
   return {
     id: item.id,
-    subject: subject || '批量主体',
+    subject: looksLikeBase64Blob(subject) ? `批量主体 ${Number(item.inputJson?.index || 0) + 1}` : (subject || '批量主体'),
     assetId: resultAssetId,
     resultDataUrl: assetResultUrl(resultAssetId),
     timestamp: Date.parse(String(item.finishedAt || '')) || Date.now(),
