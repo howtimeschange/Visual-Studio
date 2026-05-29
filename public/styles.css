@@ -3095,8 +3095,8 @@ button.ghost:disabled,
 
 .ai-sidebar-input {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(52px, auto);
-  gap: var(--space-sm);
+  grid-template-columns: 36px minmax(0, 1fr) minmax(52px, auto);
+  gap: 6px;
   padding: var(--space-sm) var(--space-lg) var(--space-md);
   align-items: end;
   min-width: 0;
@@ -3114,6 +3114,20 @@ button.ghost:disabled,
   font-size: var(--text-sm);
   min-width: 52px;
   white-space: nowrap;
+}
+
+.ai-sidebar-attach-btn {
+  width: 36px;
+  min-width: 36px;
+  height: 40px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-soft);
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .ai-sidebar-bottom {
@@ -3171,10 +3185,10 @@ button.ghost:disabled,
 
 .ai-sidebar-controls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+  grid-template-columns: minmax(64px, 0.85fr) minmax(110px, 1.55fr) minmax(54px, 0.7fr) minmax(48px, 0.6fr);
   align-items: center;
-  gap: 6px;
-  padding: var(--space-sm) var(--space-lg) var(--space-xs);
+  gap: 5px;
+  padding: var(--space-sm) var(--space-lg) 4px;
   min-width: 0;
 }
 
@@ -3182,31 +3196,21 @@ button.ghost:disabled,
   width: 100%;
   min-width: 0;
   height: 32px;
+  min-height: 32px;
   font-size: var(--text-xs);
-  padding: 0 6px;
+  padding: 0 24px 0 8px;
+  border-radius: var(--radius-xs);
 }
 
 #g-ai-model {
   text-overflow: ellipsis;
-  grid-column: span 2;
 }
 
 .ai-sidebar-mode {
   font-weight: 600;
-  grid-column: span 2;
 }
 
-.ai-sidebar-upload-btn {
-  width: 100%;
-  height: 32px;
-  padding: 0 8px;
-  font-size: var(--text-xs);
-  color: var(--text-soft);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.ai-sidebar-upload-btn:hover {
+.ai-sidebar-attach-btn:hover {
   border-color: color-mix(in oklch, var(--accent) 35%, var(--line-strong));
   background: var(--bg-4);
   color: var(--text);
@@ -3214,10 +3218,10 @@ button.ghost:disabled,
 
 .ai-sidebar-help {
   margin: 0;
-  padding: 0 var(--space-lg) var(--space-sm);
+  padding: 0 var(--space-lg) 6px;
   color: var(--muted);
   font-size: 0.68rem;
-  line-height: 1.45;
+  line-height: 1.25;
 }
 
 .msg-mode-badge {
@@ -3235,16 +3239,8 @@ button.ghost:disabled,
 
 @media (max-width: 380px) {
   .ai-sidebar-controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  #g-ai-model,
-  .ai-sidebar-mode {
-    grid-column: 1 / -1;
-  }
-
-  .ai-sidebar-upload-btn {
-    grid-column: 1 / -1;
+    grid-template-columns: minmax(60px, 0.85fr) minmax(96px, 1.45fr) minmax(48px, 0.65fr) minmax(44px, 0.58fr);
+    gap: 4px;
   }
 }
 
