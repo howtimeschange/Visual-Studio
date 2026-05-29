@@ -56,7 +56,8 @@ const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
-const DEFAULT_OUTFIT_ITEMS_PER_RUN = 1
+const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
+const DEFAULT_OUTFIT_ITEMS_PER_RUN = 10
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -363,6 +364,10 @@ function createJobSummary(items: JobItemRecord[]): Record<string, unknown> {
   }
 }
 
+function resolveItemsPerRun(value: unknown, fallback: number): number {
+  return clampInt(value, 1, MAX_ASYNC_IMAGE_JOB_CONCURRENCY, fallback)
+}
+
 function isRetryableError(error: any): boolean {
   const status = Number(error?.status || error?.payload?.status || 0)
   return [408, 409, 425, 429].includes(status) || status >= 500 || status === 0
@@ -515,6 +520,9 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
+  if (items.length === 0) return
+  const maxItemsPerRun = resolveItemsPerRun(env.VS_TRANSLATE_ITEMS_PER_RUN, DEFAULT_TRANSLATE_ITEMS_PER_RUN)
+  const runItems = items.slice(0, maxItemsPerRun)
   const concurrency = clampInt(
     initialJob.configJson?.concurrency,
     1,
@@ -525,7 +533,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   const getCachedAssetDataUrl = createAssetDataUrlCache(env)
   const getCachedTranslatePlan = createTranslationPlanCache(env, initialJob, clientKeys, getCachedAssetDataUrl)
 
-  await runPool(items, concurrency, async (queuedItem) => {
+  await runPool(runItems, concurrency, async (queuedItem) => {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
@@ -635,6 +643,21 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   const finalItems = await listJobItems(env, jobId)
   const failed = finalItems.filter((item) => item.status === 'failed').length
   const completed = finalItems.filter((item) => item.status === 'completed').length
+  const queued = finalItems.filter((item) => item.status === 'queued').length
+  if (queued > 0) {
+    const nextJob = await updateJob(env, jobId, {
+      status: 'queued',
+      progressDone: completed,
+      progressFailed: failed,
+      summaryJson: {
+        ...createJobSummary(finalItems),
+        pending: queued,
+      },
+    })
+    if (nextJob) await publishJobProgress(env, nextJob)
+    await scheduleJobExecution(env, { ...(nextJob || initialJob), status: 'queued' }, undefined, 'recover')
+    return
+  }
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
   const finalJob = await updateJob(env, jobId, {
     status,
@@ -759,12 +782,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
   if (items.length === 0) return
-  const maxItemsPerRun = clampInt(
-    (env as Env & { VS_OUTFIT_ITEMS_PER_RUN?: string }).VS_OUTFIT_ITEMS_PER_RUN,
-    1,
-    8,
-    DEFAULT_OUTFIT_ITEMS_PER_RUN,
-  )
+  const maxItemsPerRun = resolveItemsPerRun(env.VS_OUTFIT_ITEMS_PER_RUN, DEFAULT_OUTFIT_ITEMS_PER_RUN)
   const runItems = items.slice(0, maxItemsPerRun)
   const concurrency = Math.min(
     runItems.length || 1,

@@ -24,6 +24,8 @@ export interface Env {
   VS_IMAGE_RETRY_DELAY_MS?: string
   VS_GENERATE_TASK_MAX_POLLS_PER_RUN?: string
   VS_OUTFIT_TASK_MAX_POLLS_PER_RUN?: string
+  VS_TRANSLATE_ITEMS_PER_RUN?: string
+  VS_OUTFIT_ITEMS_PER_RUN?: string
   VS_DB?: D1Database
   VS_INPUTS_BUCKET?: R2Bucket
   VS_RESULTS_BUCKET?: R2Bucket

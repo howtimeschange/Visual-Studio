@@ -244,6 +244,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'sanitizeOutfitPrefs',
     'hydrateTranslateWorkspaceFromJob',
     'hydrateOutfitWorkspaceFromJob',
+    'mapOutfitJobItem',
     'getTranslateSignature',
   ]
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
@@ -336,6 +337,24 @@ test('frontend async image concurrency job hydration clamps restored jobs at 10'
 
   assert.equal(harness.state.translate.concurrency, 10)
   assert.equal(harness.state.outfit.concurrency, 10)
+})
+
+test('queued outfit items with upstream image tasks render as model processing', async () => {
+  const harness = await createRuntimeHarness()
+
+  const mapped = harness.mapOutfitJobItem({
+    id: 'outfit-item-pending',
+    status: 'queued',
+    attemptCount: 1,
+    outputJson: {
+      imageTask: { id: 'task_pending_1' },
+      imageTaskStatus: 'running',
+    },
+  }, 'signature-1')
+
+  assert.equal(mapped.status, 'model_pending')
+  assert.equal(mapped.taskStatus, 'running')
+  assert.equal(mapped.attempt, 1)
 })
 
 test('sanitizeTranslatePrefs keeps uploaded font reference preferences and drops removed preset mode', async () => {

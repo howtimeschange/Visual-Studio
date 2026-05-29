@@ -8731,7 +8731,7 @@ function hasTranslateActiveItems() {
 
 function hasOutfitActiveItems() {
   return Object.values(state.outfit.results).some((result) =>
-    result?.status === 'queue' || result?.status === 'running',
+    result?.status === 'queue' || result?.status === 'running' || result?.status === 'model_pending',
   )
 }
 
@@ -9022,6 +9022,11 @@ function createOutfitResultCell(model, look, signature) {
 
   if (result.status === 'queue') {
     cell.append(createStatusLine('排队中…'))
+    return cell
+  }
+
+  if (result.status === 'model_pending') {
+    cell.append(createStatusLine(getRunningLabel('模型处理中…', result.attempt), 'run', true))
     return cell
   }
 
@@ -10467,6 +10472,16 @@ function mapOutfitJobItem(item, signature) {
       status: 'cancelled',
       signature,
       itemId: item.id,
+    }
+  }
+
+  if (item.status === 'queued' && item.outputJson?.imageTask) {
+    return {
+      status: 'model_pending',
+      signature,
+      attempt: Math.max(1, Number(item.attemptCount || 1)),
+      itemId: item.id,
+      taskStatus: String(item.outputJson?.imageTaskStatus || 'running'),
     }
   }
 
