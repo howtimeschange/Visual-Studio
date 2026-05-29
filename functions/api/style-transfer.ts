@@ -26,7 +26,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return json(await handleAnalyze(env, requestBody))
     }
     if (action === 'generate') {
-      return json(await handleGenerate(env, requestBody))
+      return json(await executeStyleTransferGenerate(env, requestBody))
     }
     return json({ error: 'Unknown action. Use "analyze" or "generate".' }, 400)
   } catch (error: any) {
@@ -127,7 +127,7 @@ async function handleAnalyze(env: Env, body: any) {
 
 // ── Generate ────────────────────────────────────────────────────────────────
 
-async function handleGenerate(env: Env, body: any) {
+export async function executeStyleTransferGenerate(env: Env, body: any) {
   const session = await ensureSession(env, body?.sessionId, body?._authUserId || null)
   const assetId = String(body?.assetId || '').trim()
   const visualStyle = body?.visualStyle

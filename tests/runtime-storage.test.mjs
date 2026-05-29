@@ -66,6 +66,8 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     MAX_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     TRANSLATE_TEXT_COLOR_MODES: new Set(['match_original', 'custom']),
+    KNOWN_JOB_STATUSES: new Set(['', 'queued', 'running', 'paused', 'completed', 'partial_failed', 'failed', 'cancelled']),
+    ACTIVE_JOB_STATUSES: new Set(['queued', 'running']),
     DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
     DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
     GARMENT_ROLE_OPTIONS: [
@@ -110,6 +112,10 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         concurrency: 10,
       },
       style: {
+        jobId: '',
+        jobTab: 'current',
+        jobPage: 1,
+        jobs: [],
         sourceImage: null,
         visualStyle: null,
         styleSummary: '',
@@ -494,6 +500,17 @@ test('migrateLegacyRuntimeStorage moves heavy legacy runtime fields out of runti
 test('runtime storage preserves style transfer draft and analyzed style', async () => {
   const harness = await createRuntimeHarness()
   harness.state.style = {
+    jobId: 'style-job',
+    jobTab: 'history',
+    jobPage: 2,
+    jobs: [{
+      jobId: 'style-job',
+      type: 'style_transfer_batch',
+      status: 'completed',
+      loaded: true,
+      progressDone: 2,
+      progressTotal: 2,
+    }],
     sourceImage: {
       id: 'source-asset',
       assetId: 'source-asset',
@@ -523,7 +540,12 @@ test('runtime storage preserves style transfer draft and analyzed style', async 
   const sanitized = harness.sanitizeRuntimeState(snapshot)
 
   assert.equal(snapshot.style.subject, '新的商品主体')
+  assert.equal(snapshot.style.jobId, 'style-job')
+  assert.equal(snapshot.style.jobTab, 'history')
+  assert.equal(snapshot.style.jobPage, 2)
   assert.equal(sanitized.style.subject, '新的商品主体')
+  assert.equal(sanitized.style.jobId, 'style-job')
+  assert.equal(sanitized.style.jobs[0].type, 'style_transfer_batch')
   assert.equal(sanitized.style.sourceImage.assetId, 'source-asset')
   assert.equal(sanitized.style.visualStyle.overall_concept.theme, 'Soft catalog')
   assert.deepEqual(sanitized.style.colorPalette, [{ hex: '#F7F3EC', role: 'warm white' }])

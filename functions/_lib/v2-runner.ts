@@ -39,6 +39,7 @@ import { createJobQueueMessage, dispatchQueuedJob } from './v2-queue'
 import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
 import { executeTranslate, prepareTranslatePlan } from '../api/translate'
 import { executeOutfitSwap, prepareOutfitAnalysis } from '../api/outfit-swap'
+import { executeStyleTransferGenerate } from '../api/style-transfer'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
 import { executeDirectGenerate, executeDirectGenerateTaskStep, normalizeDirectGenerateRequest } from '../api/generate-direct'
 
@@ -136,6 +137,27 @@ function normalizeTranslateFontConfig(body: any): {
     headlineColor: textColorMode === 'custom' ? normalizeHexColor(body?.headlineColor) : '',
     bodyColor: textColorMode === 'custom' ? normalizeHexColor(body?.bodyColor) : '',
   }
+}
+
+function normalizeStyleSubjects(body: any): Array<{ subject: string; subjectAssetIds: string[]; label: string; index: number }> {
+  const rawSubjects = Array.isArray(body?.subjects)
+    ? body.subjects
+    : Array.isArray(body?.subjectAssetIds)
+      ? body.subjectAssetIds.map((assetId: unknown) => ({ subjectAssetIds: [assetId] }))
+      : []
+  const fallbackSubject = cleanInstruction(body?.subject)
+  return rawSubjects
+    .map((entry: any, index: number) => {
+      const subjectAssetIds = Array.isArray(entry?.subjectAssetIds)
+        ? entry.subjectAssetIds.map((assetId: unknown) => String(assetId || '').trim()).filter(Boolean)
+        : String(entry?.subjectAssetId || entry?.assetId || '').trim()
+          ? [String(entry?.subjectAssetId || entry?.assetId || '').trim()]
+          : []
+      const subject = cleanInstruction(entry?.subject || fallbackSubject)
+      const label = cleanInstruction(entry?.label || entry?.name || subject || subjectAssetIds[0] || `subject-${index + 1}`)
+      return { subject, subjectAssetIds, label, index }
+    })
+    .filter((entry) => entry.subject || entry.subjectAssetIds.length > 0)
 }
 
 function getOutfitGarmentFingerprint(
@@ -870,6 +892,213 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await finalizeCredentialForStatus(env, String(initialJob.configJson?.sealedCredentialId || ''), status)
 }
 
+export async function submitStyleTransferBatch(
+  env: Env,
+  body: any,
+  waitUntil?: WaitUntil,
+) {
+  const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
+  const session = await ensureSession(env, body?.sessionId, userId)
+  const sourceAssetId = String(body?.sourceAssetId || body?.assetId || '').trim()
+  const visualStyle = body?.visualStyle
+  const subjects = normalizeStyleSubjects(body)
+  if (!sourceAssetId) throw createRunnerError('sourceAssetId required', 400)
+  if (!visualStyle || typeof visualStyle !== 'object') throw createRunnerError('visualStyle required', 400)
+  if (subjects.length === 0) throw createRunnerError('subjects required', 400)
+
+  const jobId = createId('job')
+  const modelId = body?.modelId || 'nano-banana-2'
+  const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
+  const configJson = {
+    modelId,
+    sourceAssetId,
+    visualStyle,
+    concurrency: clampInt(
+      body?.concurrency,
+      1,
+      MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+      DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+    ),
+    sealedCredentialId,
+    configHash: await stableHash({
+      modelId,
+      sourceAssetId,
+      visualStyle,
+      subjects,
+    }),
+  }
+  const job = await createJob(env, {
+    id: jobId,
+    sessionId: session.id,
+    userId,
+    type: 'style_transfer_batch',
+    status: 'queued',
+    configJson,
+    summaryJson: { subjectCount: subjects.length },
+    progressTotal: subjects.length,
+    progressDone: 0,
+    progressFailed: 0,
+  })
+
+  const items = await createJobItems(env, job.id, subjects.map((subject) => ({
+    jobId: job.id,
+    itemType: 'style_transfer_cell',
+    status: 'queued',
+    inputJson: {
+      sourceAssetId,
+      subject: subject.subject,
+      subjectAssetIds: subject.subjectAssetIds,
+      label: subject.label,
+      index: subject.index,
+    },
+    outputJson: {},
+    attemptCount: 0,
+    errorCode: null,
+    errorMessage: null,
+    startedAt: null,
+    finishedAt: null,
+  })))
+
+  await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type })
+  await publishJobProgress(env, job)
+
+  await scheduleJobExecution(env, job, waitUntil, 'submit', body?.clientKeys || {})
+
+  return { jobId: job.id, sessionId: session.id, itemCount: items.length }
+}
+
+async function runStyleTransferBatchJob(env: Env, jobId: string) {
+  const initialJob = await getJob(env, jobId)
+  if (!initialJob) return
+  if (STOPPED_JOB_STATUSES.has(initialJob.status)) return
+  const clientKeys = await loadJobClientKeys(env, initialJob)
+  await updateJob(env, jobId, { status: 'running' })
+  await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
+
+  const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
+  const concurrency = clampInt(
+    initialJob.configJson?.concurrency,
+    1,
+    MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+    DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+  )
+  const progress = queueProgressPublisher(env, jobId)
+
+  await runPool(items, concurrency, async (queuedItem) => {
+    const job = await getJob(env, jobId)
+    if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
+
+    const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
+      attemptCount: queuedItem.attemptCount + 1,
+      startedAt: nowIso(),
+      errorCode: null,
+      errorMessage: null,
+    })
+    if (!item) return
+    await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
+
+    try {
+      const subjectAssetIds = Array.isArray(item.inputJson.subjectAssetIds)
+        ? item.inputJson.subjectAssetIds.map(String).filter(Boolean)
+        : []
+      const { result, attempts } = await runWithAutoRetry(() => executeStyleTransferGenerate(env, {
+        sessionId: job.sessionId,
+        _authUserId: job.userId || null,
+        assetId: String(job.configJson.sourceAssetId || item.inputJson.sourceAssetId || ''),
+        visualStyle: job.configJson.visualStyle,
+        subject: String(item.inputJson.subject || ''),
+        subjectAssetIds,
+        modelId: job.configJson.modelId,
+        clientKeys,
+      }))
+
+      const safeLabel = String(item.inputJson.label || item.inputJson.subject || item.id || 'style-transfer')
+        .replace(/[^\w.-]+/g, '_')
+        .slice(0, 80) || 'style-transfer'
+      const resultAsset = await createAsset(env, {
+        sessionId: job.sessionId,
+        userId: job.userId || null,
+        kind: 'result',
+        source: 'style_transfer_batch',
+        dataUrl: result.resultDataUrl,
+        filename: `style-transfer-${safeLabel}.png`,
+      })
+
+      await updateJobItem(env, jobId, item.id, {
+        status: 'completed',
+        attemptCount: attempts,
+        outputJson: {
+          resultAssetId: resultAsset.id,
+          subject: item.inputJson.subject || '',
+          subjectAssetIds,
+        },
+        finishedAt: nowIso(),
+      })
+      await publishEvent(env, 'item', item.id, 'item_completed', {
+        jobId,
+        resultAssetId: resultAsset.id,
+      })
+      await createUsageEvent(env, {
+        userId: job.userId || null,
+        sessionId: job.sessionId,
+        jobId,
+        eventType: 'style_transfer_result',
+        amount: 1,
+        provider: '1xm.ai',
+        modelId: String(job.configJson.modelId || ''),
+      })
+    } catch (error: any) {
+      await updateJobItem(env, jobId, item.id, {
+        status: 'failed',
+        attemptCount: Number(error?.attempts || item.attemptCount || 1),
+        errorCode: 'style_transfer_failed',
+        errorMessage: String(error?.message || 'Style transfer failed'),
+        finishedAt: nowIso(),
+      })
+      await publishEvent(env, 'item', item.id, 'item_failed', {
+        jobId,
+        error: String(error?.message || 'Style transfer failed'),
+      })
+    }
+
+    progress.publish()
+  })
+
+  await progress.drain()
+
+  const latestJob = await getJob(env, jobId)
+  if (latestJob?.status === 'paused') {
+    return
+  }
+  if (latestJob?.status === 'cancelled') {
+    await markRemainingItemsCancelled(env, jobId)
+    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+    return
+  }
+
+  const finalItems = await listJobItems(env, jobId)
+  const failed = finalItems.filter((item) => item.status === 'failed').length
+  const completed = finalItems.filter((item) => item.status === 'completed').length
+  const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
+  const finalJob = await updateJob(env, jobId, {
+    status,
+    progressDone: completed,
+    progressFailed: failed,
+    summaryJson: {
+      ...createJobSummary(finalItems),
+      subjectCount: initialJob.summaryJson.subjectCount || initialJob.progressTotal || 0,
+    },
+  })
+  if (finalJob) {
+    await publishEvent(env, 'job', jobId, 'job_completed', {
+      status: finalJob.status,
+      summary: finalJob.summaryJson,
+    })
+  }
+
+  await finalizeCredentialForStatus(env, String(initialJob.configJson?.sealedCredentialId || ''), status)
+}
+
 export async function submitGenerateTurn(
   env: Env,
   body: any,
@@ -1366,6 +1595,8 @@ export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: C
       await runTranslateBatchJob(env, job.id)
     } else if (job.type === 'outfit_batch') {
       await runOutfitBatchJob(env, job.id)
+    } else if (job.type === 'style_transfer_batch') {
+      await runStyleTransferBatchJob(env, job.id)
     } else if (job.type === 'generate_turn') {
       await runGenerateTurnJob(env, job.id)
     } else if (job.type === 'generate_batch') {
@@ -1491,7 +1722,7 @@ export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
     return { jobId: job.id, type: job.type }
   }
 
-  if (job.type === 'outfit_batch') {
+  if (job.type === 'outfit_batch' || job.type === 'style_transfer_batch') {
     const items = (await listJobItems(env, job.id)).filter((item) => item.status === 'failed')
     await requeueItems(env, job.id, items)
     await updateJob(env, job.id, { status: 'queued' })
@@ -1541,7 +1772,7 @@ export async function retryJobItem(env: Env, jobId: string, itemId: string, wait
   if (!job) throw createRunnerError('Job not found', 404)
   const item = (await listJobItems(env, job.id)).find((entry) => entry.id === itemId)
   if (!item) throw createRunnerError('Job item not found', 404)
-  if (!['translate_batch', 'outfit_batch'].includes(job.type)) {
+  if (!['translate_batch', 'outfit_batch', 'style_transfer_batch'].includes(job.type)) {
     throw createRunnerError(`Item retry not supported for ${job.type}`, 400)
   }
   if (item.status !== 'failed') {

@@ -242,10 +242,13 @@ const KNOWN_JOB_STATUSES = new Set(['', 'queued', 'running', 'paused', 'complete
 const JOB_TASKS_PER_PAGE = 5
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
+let styleWatcherToken = 0
 const translateJobWatchers = new Map()
 const outfitJobWatchers = new Map()
+const styleJobWatchers = new Map()
 let translateWorkspaceLoadToken = 0
 let outfitWorkspaceLoadToken = 0
+let styleWorkspaceLoadToken = 0
 let canvasSpaceHeld = false
 let canvasSaveTimer = 0
 let canvasSaveInFlight = null
@@ -402,6 +405,14 @@ const state = {
   },
   style: {
     model: 'nano-banana-2',
+    running: false,
+    submittingJobId: '',
+    pendingSignature: '',
+    progress: '',
+    jobId: '',
+    jobTab: 'current',
+    jobPage: 1,
+    jobs: [],
     sourceImage: null,
     visualStyle: null,
     styleSummary: '',
@@ -627,6 +638,9 @@ const dom = {
   sResultLightbox: $('#s-result-lightbox'),
   sDownload: $('#s-download'),
   sError: $('#s-error'),
+  sJobList: $('#s-job-list'),
+  sJobEmpty: $('#s-job-empty'),
+  sJobTabs: $$('#s-job-tabs [data-job-tab]'),
   sHistorySection: $('#s-history-section'),
   sHistory: $('#s-history'),
   sClearHistory: $('#s-clear-history'),
@@ -972,6 +986,10 @@ function createRuntimeStorageSnapshot() {
       })),
     },
     style: {
+      jobId: state.style.jobId || '',
+      jobTab: state.style.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(state.style.jobPage) || 1),
+      jobs: state.style.jobs.map(serializeJobTask),
       sourceImage: state.style.sourceImage ? serializeAssetBackedItem(state.style.sourceImage) : null,
       visualStyle: state.style.visualStyle,
       styleSummary: state.style.styleSummary,
@@ -1023,6 +1041,10 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
       garments: Array.isArray(snapshot.outfit?.garments) ? snapshot.outfit.garments.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
     },
     style: {
+      jobId: String(snapshot.style?.jobId || ''),
+      jobTab: snapshot.style?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(snapshot.style?.jobPage) || 1),
+      jobs: Array.isArray(snapshot.style?.jobs) ? snapshot.style.jobs.slice(-RUNTIME_FALLBACK_TASK_LIMIT) : [],
       sourceImage: snapshot.style?.sourceImage || null,
       visualStyle: snapshot.style?.visualStyle || null,
       styleSummary: String(snapshot.style?.styleSummary || ''),
@@ -1391,6 +1413,7 @@ function clearCurrentAiSession() {
 function sanitizeRuntimeState(raw = {}) {
   const translateJobs = sanitizeStoredJobTasks(raw.translate?.jobs, raw.translate?.jobId, 'translate_batch')
   const outfitJobs = sanitizeStoredJobTasks(raw.outfit?.jobs, raw.outfit?.jobId, 'outfit_batch')
+  const styleJobs = sanitizeStoredJobTasks(raw.style?.jobs, raw.style?.jobId, 'style_transfer_batch')
   const translateItems = Array.isArray(raw.translate?.items)
     ? raw.translate.items
       .map((item) => sanitizeStoredAssetItem(item))
@@ -1449,6 +1472,10 @@ function sanitizeRuntimeState(raw = {}) {
       garments: outfitGarments,
     },
     style: {
+      jobId: typeof raw.style?.jobId === 'string' ? raw.style.jobId : '',
+      jobTab: raw.style?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(raw.style?.jobPage) || 1),
+      jobs: styleJobs,
       sourceImage: raw.style?.sourceImage ? sanitizeStoredAssetItem(raw.style.sourceImage) : null,
       visualStyle: raw.style?.visualStyle || null,
       styleSummary: typeof raw.style?.styleSummary === 'string' ? raw.style.styleSummary : '',
@@ -1506,19 +1533,27 @@ function getLoadedStoredJobId(tasks = []) {
 }
 
 function getJobTasks(kind) {
-  return kind === 'translate' ? state.translate.jobs : state.outfit.jobs
+  if (kind === 'translate') return state.translate.jobs
+  if (kind === 'style') return state.style.jobs
+  return state.outfit.jobs
 }
 
 function getLoadedJobId(kind) {
-  return kind === 'translate' ? state.translate.jobId : state.outfit.jobId
+  if (kind === 'translate') return state.translate.jobId
+  if (kind === 'style') return state.style.jobId
+  return state.outfit.jobId
 }
 
 function getJobTab(kind) {
-  return kind === 'translate' ? state.translate.jobTab : state.outfit.jobTab
+  if (kind === 'translate') return state.translate.jobTab
+  if (kind === 'style') return state.style.jobTab
+  return state.outfit.jobTab
 }
 
 function getJobPage(kind) {
-  return kind === 'translate' ? state.translate.jobPage : state.outfit.jobPage
+  if (kind === 'translate') return state.translate.jobPage
+  if (kind === 'style') return state.style.jobPage
+  return state.outfit.jobPage
 }
 
 function setJobTab(kind, tab) {
@@ -1526,6 +1561,9 @@ function setJobTab(kind, tab) {
   if (kind === 'translate') {
     state.translate.jobTab = next
     state.translate.jobPage = 1
+  } else if (kind === 'style') {
+    state.style.jobTab = next
+    state.style.jobPage = 1
   } else {
     state.outfit.jobTab = next
     state.outfit.jobPage = 1
@@ -1538,6 +1576,8 @@ function setJobPage(kind, page) {
   const next = clampJobTaskPage(tasks, tab, page)
   if (kind === 'translate') {
     state.translate.jobPage = next
+  } else if (kind === 'style') {
+    state.style.jobPage = next
   } else {
     state.outfit.jobPage = next
   }
@@ -1547,6 +1587,8 @@ function setJobPage(kind, page) {
 function setLoadedJobId(kind, jobId) {
   if (kind === 'translate') {
     state.translate.jobId = jobId || ''
+  } else if (kind === 'style') {
+    state.style.jobId = jobId || ''
   } else {
     state.outfit.jobId = jobId || ''
   }
@@ -1575,7 +1617,7 @@ function makeJobTask(jobId, type, extra = {}) {
 function upsertJobTask(kind, jobId, patch = {}) {
   if (!jobId) return null
   const tasks = getJobTasks(kind)
-  const type = kind === 'translate' ? 'translate_batch' : 'outfit_batch'
+  const type = kind === 'translate' ? 'translate_batch' : kind === 'style' ? 'style_transfer_batch' : 'outfit_batch'
   let task = tasks.find((entry) => entry.jobId === jobId)
   if (task) {
     Object.assign(task, patch)
@@ -1595,6 +1637,11 @@ function removeJobTask(kind, jobId) {
     if (state.translate.jobId === jobId) state.translate.jobId = ''
     translateJobWatchers.delete(jobId)
     state.translate.jobPage = clampJobTaskPage(state.translate.jobs, state.translate.jobTab, state.translate.jobPage)
+  } else if (kind === 'style') {
+    state.style.jobs = state.style.jobs.filter((task) => task.jobId !== jobId)
+    if (state.style.jobId === jobId) state.style.jobId = ''
+    styleJobWatchers.delete(jobId)
+    state.style.jobPage = clampJobTaskPage(state.style.jobs, state.style.jobTab, state.style.jobPage)
   } else {
     state.outfit.jobs = state.outfit.jobs.filter((task) => task.jobId !== jobId)
     if (state.outfit.jobId === jobId) state.outfit.jobId = ''
@@ -1667,6 +1714,10 @@ function resetLoadedWorkspaceForDraft(kind) {
     translateWorkspaceLoadToken += 1
     state.translate.items = []
     state.translate.progress = ''
+  } else if (kind === 'style') {
+    styleWorkspaceLoadToken += 1
+    state.style.resultDataUrl = ''
+    state.style.progress = ''
   } else {
     outfitWorkspaceLoadToken += 1
     state.outfit.models = []
@@ -1824,6 +1875,16 @@ function getJobTaskThumbsFromItems(kind, items = []) {
     }
     return thumbs
   }
+  if (kind === 'style') {
+    for (const item of Array.isArray(items) ? items : []) {
+      addJobTaskThumb(thumbs, seen, item?.inputJson?.sourceAssetId, '风格源图')
+      const subjectAssetIds = Array.isArray(item?.inputJson?.subjectAssetIds) ? item.inputJson.subjectAssetIds : []
+      for (const assetId of subjectAssetIds) {
+        addJobTaskThumb(thumbs, seen, assetId, `主体 ${Math.max(1, thumbs.length)}`)
+      }
+    }
+    return thumbs
+  }
 
   let modelCount = 0
   let garmentCount = 0
@@ -1859,6 +1920,16 @@ function getJobTaskThumbsFromWorkspace(kind) {
     }
     return thumbs
   }
+  if (kind === 'style') {
+    addJobTaskThumbFromItem(thumbs, seen, state.style.sourceImage, '风格源图')
+    let subjectCount = 0
+    for (const item of state.style.subjectRefs) {
+      const before = thumbs.length
+      addJobTaskThumbFromItem(thumbs, seen, item, `主体 ${subjectCount + 1}`)
+      if (thumbs.length > before) subjectCount += 1
+    }
+    return thumbs
+  }
 
   let modelCount = 0
   for (const item of state.outfit.models) {
@@ -1888,7 +1959,7 @@ function updateJobTaskFromJob(task, job, items = null) {
   task.progressFailed = Number(job.progressFailed || 0)
   task.itemCount = Array.isArray(items) ? items.length : Number(task.itemCount || job.progressTotal || 0)
   if (Array.isArray(items)) {
-    const kind = job.type === 'translate_batch' ? 'translate' : 'outfit'
+    const kind = job.type === 'translate_batch' ? 'translate' : job.type === 'style_transfer_batch' ? 'style' : 'outfit'
     const thumbs = getJobTaskThumbsFromItems(kind, items)
     task.thumbs = thumbs.length ? thumbs : getJobTaskThumbsFromWorkspace(kind)
   }
@@ -1908,6 +1979,10 @@ function createJobTaskLabel(job, items = null) {
     const languages = Array.isArray(job?.configJson?.targetLanguages) ? job.configJson.targetLanguages.length : 0
     const assets = Array.isArray(job?.configJson?.assetIds) ? job.configJson.assetIds.length : 0
     return `${created} · ${assets || '多'} 张 × ${languages || '多'} 语种`
+  }
+  if (job?.type === 'style_transfer_batch') {
+    const subjects = Number(job?.summaryJson?.subjectCount || job?.progressTotal || 0)
+    return `${created} · ${subjects || '多'} 个主体`
   }
   return `${created} · ${Array.isArray(items) ? items.length : total} 项`
 }
@@ -1945,16 +2020,24 @@ function releaseCompletedLoadedTasksForKind(kind) {
 function releaseCompletedLoadedTasksForView(view) {
   if (view === 'translate') return releaseCompletedLoadedTasksForKind('translate')
   if (view === 'outfit') return releaseCompletedLoadedTasksForKind('outfit')
+  if (view === 'style') return releaseCompletedLoadedTasksForKind('style')
   return false
 }
 
 async function loadJobIntoWorkspace(kind, jobId) {
-  const loadToken = kind === 'translate' ? ++translateWorkspaceLoadToken : ++outfitWorkspaceLoadToken
+  const loadToken = kind === 'translate'
+    ? ++translateWorkspaceLoadToken
+    : kind === 'style'
+      ? ++styleWorkspaceLoadToken
+      : ++outfitWorkspaceLoadToken
   const task = upsertJobTask(kind, jobId, { syncing: true, error: '' })
   markJobTaskLoaded(kind, jobId)
   if (kind === 'translate') {
     state.translate.progress = '正在切换任务结果…'
     renderTranslate()
+  } else if (kind === 'style') {
+    state.style.progress = '正在切换任务结果…'
+    renderStyle()
   } else {
     state.outfit.progress = '正在切换任务结果…'
     renderOutfit()
@@ -1962,7 +2045,8 @@ async function loadJobIntoWorkspace(kind, jobId) {
   renderJobList(kind)
   try {
     const { job, items } = await fetchJobSnapshot(jobId)
-    if ((kind === 'translate' ? translateWorkspaceLoadToken : outfitWorkspaceLoadToken) !== loadToken) {
+    const currentToken = kind === 'translate' ? translateWorkspaceLoadToken : kind === 'style' ? styleWorkspaceLoadToken : outfitWorkspaceLoadToken
+    if (currentToken !== loadToken) {
       return
     }
     updateJobTaskFromJob(task, job, items)
@@ -1971,6 +2055,10 @@ async function loadJobIntoWorkspace(kind, jobId) {
       if (translateWorkspaceLoadToken !== loadToken) return
       applyTranslateJobSnapshot(job, items)
       renderTranslateDropdowns()
+    } else if (kind === 'style') {
+      await hydrateStyleWorkspaceFromJob(job, items)
+      if (styleWorkspaceLoadToken !== loadToken) return
+      applyStyleJobSnapshot(job, items)
     } else {
       await hydrateOutfitWorkspaceFromJob(job, items)
       if (outfitWorkspaceLoadToken !== loadToken) return
@@ -1979,11 +2067,14 @@ async function loadJobIntoWorkspace(kind, jobId) {
     saveRuntimeState()
     if (kind === 'translate') {
       void syncTranslateJob(jobId, { applyToWorkspace: true })
+    } else if (kind === 'style') {
+      void syncStyleJob(jobId, { applyToWorkspace: true })
     } else {
       void syncOutfitJob(jobId, { applyToWorkspace: true })
     }
   } catch (error) {
-    if ((kind === 'translate' ? translateWorkspaceLoadToken : outfitWorkspaceLoadToken) !== loadToken) {
+    const currentToken = kind === 'translate' ? translateWorkspaceLoadToken : kind === 'style' ? styleWorkspaceLoadToken : outfitWorkspaceLoadToken
+    if (currentToken !== loadToken) {
       return
     }
     const status = Number(error?.status || 0)
@@ -1992,11 +2083,14 @@ async function loadJobIntoWorkspace(kind, jobId) {
       clearJobTaskLoaded(kind)
       if (kind === 'translate') {
         state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
+      } else if (kind === 'style') {
+        state.style.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       } else {
         state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       }
       saveRuntimeState()
       if (kind === 'translate') renderTranslate()
+      else if (kind === 'style') renderStyle()
       else renderOutfit()
       return
     }
@@ -2004,6 +2098,7 @@ async function loadJobIntoWorkspace(kind, jobId) {
     clearJobTaskLoaded(kind)
     saveRuntimeState()
     if (kind === 'translate') renderTranslate()
+    else if (kind === 'style') renderStyle()
     else renderOutfit()
   } finally {
     if (task) task.syncing = false
@@ -2018,6 +2113,8 @@ async function pauseJobTask(kind, jobId) {
     await postJson(`/api/jobs/${encodeURIComponent(jobId)}/pause`, {})
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2037,6 +2134,8 @@ async function resumeJobTask(kind, jobId) {
     await postJson(`/api/jobs/${encodeURIComponent(jobId)}/resume`, {})
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2057,6 +2156,8 @@ async function retryJobTask(kind, jobId) {
     setJobTab(kind, 'current')
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2076,6 +2177,8 @@ async function cancelJobTask(kind, jobId) {
     await postJson(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {})
     if (kind === 'translate') {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'style') {
+      await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2101,6 +2204,9 @@ async function deleteJobTask(kind, jobId) {
     if (kind === 'translate') {
       state.translate.running = false
       renderTranslate()
+    } else if (kind === 'style') {
+      state.style.running = false
+      renderStyle()
     } else {
       state.outfit.running = false
       renderOutfit()
@@ -2116,7 +2222,7 @@ async function deleteJobTask(kind, jobId) {
 }
 
 function getTaskDeleteTarget() {
-  const kind = state.taskDelete.kind === 'outfit' ? 'outfit' : 'translate'
+  const kind = state.taskDelete.kind === 'outfit' ? 'outfit' : state.taskDelete.kind === 'style' ? 'style' : 'translate'
   const task = state.taskDelete.jobId
     ? getJobTasks(kind).find((entry) => entry.jobId === state.taskDelete.jobId)
     : null
@@ -2136,7 +2242,7 @@ function openTaskDeleteDialog(kind, jobId) {
 function renderTaskDeleteDialog() {
   if (!dom.taskDeleteDialog) return
   const { kind, task } = getTaskDeleteTarget()
-  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate' ? '批量翻译任务' : '批量换装任务')
+  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate' ? '批量翻译任务' : kind === 'style' ? '批量风格迁移任务' : '批量换装任务')
   dom.taskDeleteMeta.textContent = task
     ? `${getJobStatusLabel(task.status)} · ${task.createdAt ? formatTimestamp(task.createdAt) : task.jobId}`
     : ''
@@ -6080,6 +6186,7 @@ function bindStyle() {
     state.style.error = ''
     state.style.subject = ''
     state.style.subjectRefs = []
+    clearJobTaskLoaded('style')
     saveRuntimeState()
     renderStyle()
   })
@@ -6179,6 +6286,14 @@ function bindStyle() {
     renderStyle()
   })
 
+  for (const button of dom.sJobTabs || []) {
+    button.addEventListener('click', () => {
+      setJobTab('style', button.dataset.jobTab)
+      saveRuntimeState()
+      renderStyle()
+    })
+  }
+
   dom.sJsonCopy.addEventListener('click', () => {
     if (state.style.visualStyle) {
       const text = JSON.stringify(state.style.visualStyle, null, 2)
@@ -6193,7 +6308,7 @@ function bindStyle() {
 
 function renderStyle() {
   const s = state.style
-  const busy = s.analyzing || s.generating
+  const busy = isStyleBusy()
   const visibleHistory = s.history.filter((entry) => entry.resultDataUrl)
 
   dom.sModel.value = s.model
@@ -6213,7 +6328,8 @@ function renderStyle() {
   dom.sAnalyzeProgress.classList.toggle('hidden', !s.analyzing)
   dom.sStyleResult.classList.toggle('hidden', !hasStyle)
   dom.sGenerateSection.classList.toggle('hidden', !hasStyle)
-  dom.sGenProgress.classList.toggle('hidden', !s.generating)
+  dom.sGenProgress.classList.toggle('hidden', !(s.generating || s.running || s.submittingJobId))
+  if (dom.sProgress) dom.sProgress.textContent = s.progress || (s.generating ? '正在生成…' : '正在处理…')
   dom.sResultWrap.classList.toggle('hidden', !hasResult)
   dom.sError.classList.toggle('hidden', !s.error)
   dom.sHistorySection.classList.toggle('hidden', !hasHistory)
@@ -6287,6 +6403,7 @@ function renderStyle() {
   dom.sSubject.disabled = !hasStyle || busy
   dom.sSubject.value = s.subject
   dom.sGenerate.disabled = (!s.subject.trim() && s.subjectRefs.length === 0) || !hasStyle || busy
+  dom.sGenerate.textContent = s.subjectRefs.length > 1 ? '批量生成 ▸' : '生成 ▸'
 
   if (hasResult) {
     dom.sResultImg.src = s.resultDataUrl
@@ -6330,6 +6447,7 @@ function renderStyle() {
 
     return card
   }))
+  renderJobList('style')
 }
 
 async function analyzeStyle() {
@@ -6366,6 +6484,10 @@ async function analyzeStyle() {
 async function generateStyleTransfer() {
   if (!state.style.visualStyle || state.style.generating) return
   if (!state.style.subject.trim() && state.style.subjectRefs.length === 0) return
+  if (state.style.subjectRefs.length > 1) {
+    await runStyleTransferBatch()
+    return
+  }
 
   state.style.generating = true
   const previousResultDataUrl = state.style.resultDataUrl
@@ -6409,6 +6531,92 @@ async function generateStyleTransfer() {
     state.style.generating = false
     state.style.resultDataUrl = previousResultDataUrl
     state.style.error = trimError(error)
+    renderStyle()
+  }
+}
+
+function getStyleBatchSubjects() {
+  const subject = state.style.subject.trim()
+  if (state.style.subjectRefs.length > 0) {
+    return state.style.subjectRefs.map((ref) => ({
+      subject: subject || basename(ref.name),
+      subjectAssetIds: [ref.assetId || ref.id],
+      label: basename(ref.name),
+    }))
+  }
+  return subject ? [{ subject, subjectAssetIds: [], label: subject }] : []
+}
+
+function getStyleSignature(config) {
+  return JSON.stringify({
+    modelId: config.modelId,
+    sourceAssetId: config.sourceAssetId,
+    visualStyle: config.visualStyle,
+    subjects: config.subjects,
+  })
+}
+
+async function runStyleTransferBatch() {
+  if (!state.style.visualStyle || isStyleBusy()) return
+  const subjects = getStyleBatchSubjects()
+  if (subjects.length === 0) return
+
+  const runConfig = {
+    modelId: state.style.model,
+    sourceAssetId: state.style.sourceImage?.assetId || state.style.sourceImage?.id || '',
+    visualStyle: state.style.visualStyle,
+    subjects,
+    clientKeys: { ...state.keys },
+  }
+  const signature = getStyleSignature(runConfig)
+  if (state.style.submittingJobId && state.style.pendingSignature === signature) {
+    state.style.progress = '任务已提交，正在同步进度…'
+    renderStyle()
+    return
+  }
+
+  try {
+    state.style.running = true
+    state.style.progress = '正在提交风格迁移任务…'
+    state.style.error = ''
+    renderStyle()
+
+    const data = await postJson('/api/jobs/style-transfer-batch', {
+      sessionId: state.runtime.sessionId || undefined,
+      sourceAssetId: runConfig.sourceAssetId,
+      visualStyle: runConfig.visualStyle,
+      subjects: runConfig.subjects,
+      modelId: runConfig.modelId,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+      clientKeys: runConfig.clientKeys,
+    })
+
+    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.style.submittingJobId = data.jobId
+    state.style.pendingSignature = signature
+    upsertJobTask('style', data.jobId, {
+      type: 'style_transfer_batch',
+      status: 'queued',
+      progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
+      label: `刚刚 · ${subjects.length} 个主体`,
+      loaded: true,
+      thumbs: getJobTaskThumbsFromWorkspace('style'),
+      itemCount: Number(data.itemCount || 0),
+      progressTotal: Number(data.itemCount || 0),
+      signature,
+    })
+    markJobTaskLoaded('style', data.jobId)
+    setJobTab('style', 'current')
+    state.style.running = false
+    state.style.progress = '任务已提交，可继续上传新主体'
+    saveRuntimeState()
+    renderStyle()
+    void syncStyleJob(data.jobId, { applyToWorkspace: true })
+  } catch (error) {
+    state.style.running = false
+    clearStyleSubmitLock()
+    state.style.error = trimError(error)
+    state.style.progress = ''
     renderStyle()
   }
 }
@@ -6841,8 +7049,8 @@ function renderProjects() {
 }
 
 function renderJobList(kind) {
-  const list = kind === 'translate' ? dom.tJobList : dom.oJobList
-  const empty = kind === 'translate' ? dom.tJobEmpty : dom.oJobEmpty
+  const list = kind === 'translate' ? dom.tJobList : kind === 'style' ? dom.sJobList : dom.oJobList
+  const empty = kind === 'translate' ? dom.tJobEmpty : kind === 'style' ? dom.sJobEmpty : dom.oJobEmpty
   if (!list) return
   const tab = getJobTab(kind)
   const allTasks = getJobTasks(kind)
@@ -6850,7 +7058,7 @@ function renderJobList(kind) {
   const allTabTasks = getSortedJobTasksForTab(allTasks, tab)
   const tasks = getPagedJobTasksForTab(allTasks, tab, page)
   const pageCount = getJobTaskPageCount(allTasks, tab)
-  const tabButtons = kind === 'translate' ? dom.tJobTabs : dom.oJobTabs
+  const tabButtons = kind === 'translate' ? dom.tJobTabs : kind === 'style' ? dom.sJobTabs : dom.oJobTabs
   for (const button of tabButtons || []) {
     const active = button.dataset.jobTab === tab
     const count = filterJobTasksForTab(allTasks, button.dataset.jobTab).length
@@ -7048,6 +7256,14 @@ function getJobTaskDownloadEntries(kind, items = []) {
       })
       continue
     }
+    if (kind === 'style') {
+      const subject = sanitizeFileName(String(item.outputJson?.subject || item.inputJson?.subject || item.inputJson?.label || item.id || 'result'))
+      entries.push({
+        href: assetResultUrl(resultAssetId),
+        name: `style-transfer-${subject}.png`,
+      })
+      continue
+    }
 
     const modelId = sanitizeFileName(String(item.inputJson?.modelAssetId || 'model'))
     const lookId = sanitizeFileName(String(item.inputJson?.lookId || item.id || 'look'))
@@ -7085,7 +7301,7 @@ function createJobTaskThumbs(kind, task) {
   wrap.className = `job-card-thumbs${thumbs.length ? '' : ' empty'}`
   if (!thumbs.length) {
     const placeholder = document.createElement('span')
-    placeholder.textContent = kind === 'translate' ? '译' : '装'
+    placeholder.textContent = kind === 'translate' ? '译' : kind === 'style' ? '风' : '装'
     wrap.append(placeholder)
     return wrap
   }
@@ -7103,6 +7319,7 @@ function createJobTaskThumbs(kind, task) {
 function getJobTypeLabel(type) {
   if (type === 'translate_batch') return '批量翻译'
   if (type === 'outfit_batch') return '批量换装'
+  if (type === 'style_transfer_batch') return '批量风格迁移'
   return '任务'
 }
 
@@ -7935,6 +8152,10 @@ function isOutfitBusy() {
   return state.outfit.running || Boolean(state.outfit.submittingJobId)
 }
 
+function isStyleBusy() {
+  return state.style.analyzing || state.style.running || state.style.generating || Boolean(state.style.submittingJobId)
+}
+
 function clearTranslateSubmitLock(jobId = '') {
   if (jobId && state.translate.submittingJobId !== jobId) return
   state.translate.submittingJobId = ''
@@ -7945,6 +8166,12 @@ function clearOutfitSubmitLock(jobId = '') {
   if (jobId && state.outfit.submittingJobId !== jobId) return
   state.outfit.submittingJobId = ''
   state.outfit.pendingSignature = ''
+}
+
+function clearStyleSubmitLock(jobId = '') {
+  if (jobId && state.style.submittingJobId !== jobId) return
+  state.style.submittingJobId = ''
+  state.style.pendingSignature = ''
 }
 
 function canRetryTranslateItem() {
@@ -9282,6 +9509,10 @@ async function restoreRuntimeState() {
   state.outfit.jobId = getLoadedStoredJobId(runtime.outfit.jobs)
   state.outfit.jobTab = runtime.outfit.jobTab
   state.outfit.jobPage = runtime.outfit.jobPage
+  state.style.jobs = runtime.style.jobs
+  state.style.jobId = getLoadedStoredJobId(runtime.style.jobs)
+  state.style.jobTab = runtime.style.jobTab
+  state.style.jobPage = runtime.style.jobPage
 
   const [translateItems, outfitModels, outfitGarments] = await Promise.all([
     hydrateAssetItems(runtime.translate.items),
@@ -9328,6 +9559,7 @@ async function restoreRuntimeState() {
 
   watchStoredJobTasks('translate')
   watchStoredJobTasks('outfit')
+  watchStoredJobTasks('style')
 }
 
 function assetResultUrl(assetId, projectId = '') {
@@ -9533,6 +9765,8 @@ function watchStoredJobTasks(kind) {
     }
     if (kind === 'translate') {
       void syncTranslateJob(task.jobId, { passive404: true })
+    } else if (kind === 'style') {
+      void syncStyleJob(task.jobId, { passive404: true })
     } else {
       void syncOutfitJob(task.jobId, { passive404: true })
     }
@@ -9749,6 +9983,138 @@ function applyOutfitJobSnapshot(job, items) {
   state.outfit.results = nextResults
   state.outfit.progress = formatBatchProgress(job)
   renderOutfit()
+}
+
+function getStyleSignatureFromJob(job) {
+  const subjects = Array.isArray(job?.summaryJson?.subjects) ? job.summaryJson.subjects : []
+  return JSON.stringify({
+    modelId: String(job?.configJson?.modelId || state.style.model),
+    sourceAssetId: String(job?.configJson?.sourceAssetId || ''),
+    visualStyle: job?.configJson?.visualStyle || null,
+    subjects,
+  })
+}
+
+async function hydrateStyleWorkspaceFromJob(job, items) {
+  const sourceAssetId = String(job?.configJson?.sourceAssetId || '')
+  if (sourceAssetId && state.style.sourceImage?.assetId !== sourceAssetId) {
+    const [source] = await hydrateAssetItems([{ id: sourceAssetId, assetId: sourceAssetId, name: sourceAssetId, mime: 'image/png' }])
+    state.style.sourceImage = source || { id: sourceAssetId, assetId: sourceAssetId, name: sourceAssetId, mime: 'image/png' }
+  }
+  const subjectIds = unique(items.flatMap((item) =>
+    Array.isArray(item.inputJson?.subjectAssetIds) ? item.inputJson.subjectAssetIds.map(String) : [],
+  ).filter(Boolean))
+  const existing = new Map(state.style.subjectRefs.map((item) => [item.assetId || item.id, item]))
+  const missing = subjectIds
+    .filter((assetId) => !existing.has(assetId))
+    .map((assetId) => ({ id: assetId, assetId, name: assetId, mime: 'image/png' }))
+  const hydrated = await hydrateAssetItems(missing)
+  state.style.subjectRefs = [
+    ...state.style.subjectRefs.filter((item) => subjectIds.includes(item.assetId || item.id)),
+    ...hydrated,
+  ]
+  state.style.visualStyle = job?.configJson?.visualStyle || state.style.visualStyle
+  state.style.model = getModel(job?.configJson?.modelId)?.id || state.style.model
+}
+
+function mapStyleJobItemToHistory(item, signature) {
+  const resultAssetId = String(item.outputJson?.resultAssetId || '')
+  const subject = String(item.outputJson?.subject || item.inputJson?.subject || item.inputJson?.label || '')
+  return {
+    id: item.id,
+    subject: subject || '批量主体',
+    assetId: resultAssetId,
+    resultDataUrl: assetResultUrl(resultAssetId),
+    timestamp: Date.parse(String(item.finishedAt || '')) || Date.now(),
+    signature,
+  }
+}
+
+function applyStyleJobSnapshot(job, items) {
+  const signature = getStyleSignatureFromJob(job)
+  const completed = items
+    .filter((item) => item.status === 'completed' && item.outputJson?.resultAssetId)
+    .map((item) => mapStyleJobItemToHistory(item, signature))
+  if (completed.length) {
+    const byId = new Map(state.style.history.map((entry) => [entry.id || entry.assetId, entry]))
+    for (const entry of completed) {
+      byId.set(entry.id || entry.assetId, entry)
+    }
+    state.style.history = sanitizeStyleHistoryEntries(Array.from(byId.values()))
+    const latest = completed[completed.length - 1]
+    state.style.resultDataUrl = latest.resultDataUrl
+    saveStyleHistory()
+  }
+  state.style.progress = formatBatchProgress(job)
+  renderStyle()
+}
+
+async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
+  const token = ++styleWatcherToken
+  styleJobWatchers.set(jobId, token)
+
+  while (styleJobWatchers.get(jobId) === token) {
+    try {
+      const { job, items } = await fetchJobSnapshot(jobId)
+      clearStyleSubmitLock(jobId)
+      if (job?.type && job.type !== 'style_transfer_batch') {
+        removeJobTask('style', jobId)
+        saveRuntimeState()
+        renderStyle()
+        return
+      }
+
+      const shouldApply = applyToWorkspace || getLoadedJobId('style') === jobId
+      upsertJobTask('style', jobId, { job, items, loaded: shouldApply })
+      const task = getJobTasks('style').find((entry) => entry.jobId === jobId)
+      if (shouldApply && task && job.status === 'completed') {
+        task.loaded = true
+        task.holdInCurrent = true
+      }
+      if (shouldApply) {
+        if (getLoadedJobId('style') !== jobId) {
+          renderJobList('style')
+          saveRuntimeState()
+          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+            styleJobWatchers.delete(jobId)
+            break
+          }
+          await wait(900)
+          continue
+        }
+        await hydrateStyleWorkspaceFromJob(job, items)
+        applyStyleJobSnapshot(job, items)
+      } else {
+        renderStyle()
+      }
+      saveRuntimeState()
+
+      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+        styleJobWatchers.delete(jobId)
+        break
+      }
+
+      await wait(900)
+    } catch (error) {
+      const status = Number(error?.status || 0)
+      if (status === 404 || status === 403) {
+        const wasLoaded = getLoadedJobId('style') === jobId
+        removeJobTask('style', jobId)
+        clearStyleSubmitLock(jobId)
+        if (!passive404 && wasLoaded) {
+          state.style.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
+        }
+        saveRuntimeState()
+        renderStyle()
+        return
+      }
+
+      const task = upsertJobTask('style', jobId, { error: trimError(error) })
+      if (getLoadedJobId('style') === jobId) state.style.progress = task.error
+      renderStyle()
+      await wait(1200)
+    }
+  }
 }
 
 async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
