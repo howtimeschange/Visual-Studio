@@ -38,7 +38,7 @@ import { publishEvent } from './v2-events'
 import { createJobQueueMessage, dispatchQueuedJob } from './v2-queue'
 import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
 import { executeTranslate, prepareTranslatePlan } from '../api/translate'
-import { executeOutfitSwap, prepareOutfitAnalysis } from '../api/outfit-swap'
+import { executeOutfitSwapTaskStep, prepareOutfitAnalysis } from '../api/outfit-swap'
 import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
 import { executeDirectGenerate, executeDirectGenerateTaskStep, normalizeDirectGenerateRequest } from '../api/generate-direct'
 
@@ -52,6 +52,8 @@ const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
+const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
+const DEFAULT_OUTFIT_ITEMS_PER_RUN = 1
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -340,6 +342,18 @@ function createJobSummary(items: JobItemRecord[]): Record<string, unknown> {
 function isRetryableError(error: any): boolean {
   const status = Number(error?.status || error?.payload?.status || 0)
   return [408, 409, 425, 429].includes(status) || status >= 500 || status === 0
+}
+
+function clearImageTaskOutput(
+  outputJson: Record<string, unknown> | null | undefined,
+  extras: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const next = { ...(outputJson || {}), ...extras }
+  delete next.imageTask
+  delete next.imageTaskPollTarget
+  delete next.imageTaskPollUrl
+  delete next.nextPollAfterMs
+  return next
 }
 
 async function runWithAutoRetry<T>(task: () => Promise<T>): Promise<{ result: T; attempts: number }> {
@@ -705,17 +719,34 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  const concurrency = clampInt(initialJob.configJson?.concurrency, 1, 4, 2)
+  if (items.length === 0) return
+  const maxItemsPerRun = clampInt(
+    (env as Env & { VS_OUTFIT_ITEMS_PER_RUN?: string }).VS_OUTFIT_ITEMS_PER_RUN,
+    1,
+    8,
+    DEFAULT_OUTFIT_ITEMS_PER_RUN,
+  )
+  const runItems = items.slice(0, maxItemsPerRun)
+  const concurrency = Math.min(
+    runItems.length || 1,
+    clampInt(initialJob.configJson?.concurrency, 1, 4, 2),
+  )
+  const maxPollAttempts = clampNonNegativeInt(
+    env.VS_OUTFIT_TASK_MAX_POLLS_PER_RUN,
+    DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN,
+    20,
+  )
   const progress = queueProgressPublisher(env, jobId)
   const getCachedAssetDataUrl = createAssetDataUrlCache(env)
   const getCachedOutfitAnalysis = createOutfitAnalysisCache(env, initialJob, clientKeys)
 
-  await runPool(items, concurrency, async (queuedItem) => {
+  await runPool(runItems, concurrency, async (queuedItem) => {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
+    const queuedExistingTask = queuedItem.outputJson?.imageTask
     const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
-      attemptCount: queuedItem.attemptCount + 1,
+      attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
       startedAt: nowIso(),
       errorCode: null,
       errorMessage: null,
@@ -723,6 +754,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     if (!item) return
     await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
 
+    let outfitAnalysisForRetry = item.outputJson?.outfitAnalysis || null
     try {
       const modelDataUrl = await getCachedAssetDataUrl(String(item.inputJson.modelAssetId || ''))
       if (!modelDataUrl) throw createRunnerError(`Model asset not found: ${item.inputJson.modelAssetId}`, 404)
@@ -749,9 +781,13 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
             : '',
         }
       })
-      const analysis = await getCachedOutfitAnalysis(getOutfitAnalysisCacheKey(item), modelImage, garments)
+      const existingTask = item.outputJson?.imageTask
+      const analysis = existingTask
+        ? item.outputJson?.outfitAnalysis || null
+        : await getCachedOutfitAnalysis(getOutfitAnalysisCacheKey(item), modelImage, garments)
+      outfitAnalysisForRetry = analysis || outfitAnalysisForRetry
 
-      const { result, attempts } = await runWithAutoRetry(() => executeOutfitSwap({
+      const result = await executeOutfitSwapTaskStep({
         modelId: job.configJson.modelId,
         model: {
           ...modelImage,
@@ -762,24 +798,51 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
         instructions: job.configJson.instructions,
         analysis,
         clientKeys,
-      }, env))
+      }, env, {
+        existingTask,
+        maxPollAttempts,
+      })
+
+      if (result.pending) {
+        await updateJobItem(env, jobId, item.id, {
+          status: 'queued',
+          outputJson: {
+            ...item.outputJson,
+            outfitAnalysis: analysis || undefined,
+            imageTask: result.task,
+            imageTaskPollTarget: result.pollTarget,
+            imageTaskPollUrl: result.pollUrl,
+            imageTaskStatus: result.taskStatus,
+            nextPollAfterMs: result.nextPollAfterMs,
+          },
+          errorCode: null,
+          errorMessage: null,
+          startedAt: null,
+          finishedAt: null,
+        })
+        await publishEvent(env, 'item', item.id, 'progress', {
+          jobId,
+          imageTaskStatus: result.taskStatus,
+        })
+        return
+      }
 
       const resultAsset = await createAsset(env, {
         sessionId: job.sessionId,
         userId: job.userId || null,
         kind: 'result',
         source: 'outfit_batch',
-        dataUrl: result.resultDataUrl,
+        dataUrl: result.dataUrl,
         filename: `${String(item.inputJson.modelAssetId)}__${String(item.inputJson.lookId)}.png`,
       })
 
       await updateJobItem(env, jobId, item.id, {
         status: 'completed',
-        attemptCount: attempts,
-        outputJson: {
+        outputJson: clearImageTaskOutput(item.outputJson, {
           resultAssetId: resultAsset.id,
           lookId: item.inputJson.lookId,
-        },
+          imageTaskStatus: 'succeeded',
+        }),
         finishedAt: nowIso(),
       })
       await publishEvent(env, 'item', item.id, 'item_completed', {
@@ -797,16 +860,46 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
         modelId: String(job.configJson.modelId || ''),
       })
     } catch (error: any) {
+      const message = String(error?.message || 'Outfit failed')
+      if (isRetryableError(error) && item.attemptCount < MAX_JOB_ITEM_ATTEMPTS) {
+        await updateJobItem(env, jobId, item.id, {
+          status: 'queued',
+          attemptCount: item.attemptCount,
+          outputJson: clearImageTaskOutput(item.outputJson, {
+            outfitAnalysis: outfitAnalysisForRetry || item.outputJson?.outfitAnalysis || undefined,
+            imageTaskStatus: 'retrying',
+            lastImageTaskError: message.slice(0, 500),
+          }),
+          errorCode: null,
+          errorMessage: null,
+          startedAt: null,
+          finishedAt: null,
+        })
+        await publishEvent(env, 'item', item.id, 'progress', {
+          jobId,
+          imageTaskStatus: 'retrying',
+          retryable: true,
+          error: message,
+        })
+        progress.publish()
+        return
+      }
+
       await updateJobItem(env, jobId, item.id, {
         status: 'failed',
         attemptCount: Number(error?.attempts || item.attemptCount || 1),
         errorCode: 'outfit_failed',
-        errorMessage: String(error?.message || 'Outfit failed'),
+        errorMessage: message,
+        outputJson: clearImageTaskOutput(item.outputJson, {
+          outfitAnalysis: outfitAnalysisForRetry || item.outputJson?.outfitAnalysis || undefined,
+          imageTaskStatus: 'failed',
+          lastImageTaskError: message.slice(0, 500),
+        }),
         finishedAt: nowIso(),
       })
       await publishEvent(env, 'item', item.id, 'item_failed', {
         jobId,
-        error: String(error?.message || 'Outfit failed'),
+        error: message,
       })
     }
 
@@ -828,6 +921,23 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   const finalItems = await listJobItems(env, jobId)
   const failed = finalItems.filter((item) => item.status === 'failed').length
   const completed = finalItems.filter((item) => item.status === 'completed').length
+  const queued = finalItems.filter((item) => item.status === 'queued').length
+  if (queued > 0) {
+    const nextJob = await updateJob(env, jobId, {
+      status: 'queued',
+      progressDone: completed,
+      progressFailed: failed,
+      summaryJson: {
+        ...initialJob.summaryJson,
+        ...createJobSummary(finalItems),
+        pending: queued,
+      },
+    })
+    if (nextJob) await publishJobProgress(env, nextJob)
+    await scheduleJobExecution(env, { ...(nextJob || initialJob), status: 'queued' }, undefined, 'recover')
+    return
+  }
+
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
   const finalJob = await updateJob(env, jobId, {
     status,

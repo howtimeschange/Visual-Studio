@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { webcrypto, createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -7,12 +8,15 @@ import test from 'node:test'
 import { build } from 'esbuild'
 
 async function importEntry(entryPoint, exportNames = ['onRequestPost']) {
+  if (!globalThis.crypto) {
+    globalThis.crypto = webcrypto
+  }
   const outdir = await mkdtemp(path.join(tmpdir(), 'visual-studio-auth-gate-'))
   await build({
     stdin: {
       contents: [
         ...exportNames.map((name) => `export { ${name} } from './${entryPoint}'`),
-        "export { createJob } from './functions/_lib/v2-store.ts'",
+        "export { createAuthSession, createAsset, createJob, createUser, ensureSession, getAssetDataUrl, getJob, listJobItems } from './functions/_lib/v2-store.ts'",
       ].join('\n'),
       resolveDir: process.cwd(),
       sourcefile: 'test-entry.mjs',
@@ -34,6 +38,30 @@ function jsonPost(body = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+}
+
+async function createAuthedEnv(mod, env = {}) {
+  const token = `token-${Date.now()}-${Math.random()}`
+  const tokenHash = createHash('sha256').update(token).digest('hex')
+  const user = await mod.createUser(env, {
+    email: `tester-${Date.now()}-${Math.random()}@example.com`,
+    name: 'Tester',
+    passwordHash: 'hash',
+    passwordSalt: 'salt',
+  })
+  await mod.createAuthSession(env, {
+    userId: user.id,
+    tokenHash,
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+  })
+  return {
+    env,
+    headers: {
+      Cookie: `vs_auth=${encodeURIComponent(token)}`,
+      'Content-Type': 'application/json',
+    },
+    user,
+  }
 }
 
 async function assertLoginRequired(response) {
@@ -82,6 +110,74 @@ test('expensive POST APIs require a logged-in user before spending upstream call
     }
   } finally {
     globalThis.fetch = originalFetch
+  }
+})
+
+test('style-transfer generate returns a pending task instead of synchronously waiting for completion', async () => {
+  const { mod, cleanup } = await importEntry('functions/api/style-transfer.ts')
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = { VS_IMAGE_REQUEST_TIMEOUT_MS: '1000' }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return new Response(JSON.stringify({
+      id: 'task_style_pending_1',
+      status: 'queued',
+      poll_url: 'https://relay.example/v1/images/tasks/task_style_pending_1',
+      poll_after: 1,
+    }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const auth = await createAuthedEnv(mod, env)
+    const session = await mod.ensureSession(env, 'session_style_pending', auth.user.id)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: auth.user.id,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3R5bGU=',
+      filename: 'style.png',
+    })
+
+    const response = await mod.onRequestPost({
+      request: new Request('https://example.com/api/style-transfer', {
+        method: 'POST',
+        headers: auth.headers,
+        body: JSON.stringify({
+          action: 'generate',
+          sessionId: session.id,
+          assetId: source.id,
+          visualStyle: {
+            reproduction_prompt: { style_essence_en: 'muted studio editorial lighting' },
+            overall_concept: { theme: 'editorial' },
+          },
+          subject: 'catalog dress',
+          modelId: 'nano-banana-2',
+          existingTask: null,
+          maxPollAttempts: 0,
+          clientKeys: { banana2ApiKey: 'image-key' },
+        }),
+      }),
+      env,
+      params: {},
+      waitUntil: () => {},
+    })
+
+    const body = await response.json()
+    assert.equal(response.status, 202)
+    assert.equal(body.pending, true)
+    assert.equal(body.task.status, 'queued')
+    assert.equal(body.pollUrl, 'https://relay.example/v1/images/tasks/task_style_pending_1')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].input, 'https://api.1xm.ai/v1/images/tasks')
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
   }
 })
 

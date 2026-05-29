@@ -13,14 +13,28 @@
 
 import {
   Env, DEFAULT_BASE, MODEL_MAP, VISION_MODEL,
-  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
+  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
 } from '../_shared'
+import type { ImageTaskStepResult } from '../_shared'
 import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
 export async function executeOutfitSwap(body: any, env: Env) {
+  const result = await executeOutfitSwapTaskStep(body, env)
+  if (result.pending) throw createOutfitError('Image task is still running.', 202)
+  return { resultDataUrl: result.dataUrl }
+}
+
+export async function executeOutfitSwapTaskStep(
+  body: any,
+  env: Env,
+  stepOptions: { existingTask?: any; maxPollAttempts?: number } = {},
+): Promise<
+  | { pending: false; dataUrl: string }
+  | Extract<ImageTaskStepResult, { pending: true }>
+> {
   const {
     modelId = 'nano-banana-pro',
     model, garment, garments,
@@ -36,19 +50,23 @@ export async function executeOutfitSwap(body: any, env: Env) {
   if (garmentItems.length === 0) throw createOutfitError('at least one garment image required', 400)
 
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
-  const { genKey, visionKey } = resolveKeys(modelId, env, clientKeys)
+  const { genKey } = resolveKeys(modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  imageModelOptions.existingTask = stepOptions.existingTask
+  imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
   if (!genKey) throw createOutfitError(`Missing API key for ${modelId}`, 400)
 
-  const analysis = body?.analysis || await prepareOutfitAnalysis({
-    modelId,
-    model,
-    garments: garmentItems,
-    clientKeys,
-  }, env)
+  const analysis = stepOptions.existingTask
+    ? body?.analysis || null
+    : body?.analysis || await prepareOutfitAnalysis({
+      modelId,
+      model,
+      garments: garmentItems,
+      clientKeys,
+    }, env)
 
   const prompt = buildSwapPrompt(model, garmentItems, instructions, analysis)
-  const result = await callImageModel(
+  const result = await callImageModelTaskStep(
     baseUrl, genKey, MODEL_MAP[modelId],
     [
       { base64: model.base64, mime: model.mime || 'image/jpeg' },
@@ -60,8 +78,9 @@ export async function executeOutfitSwap(body: any, env: Env) {
     prompt,
     imageModelOptions,
   )
+  if (result.pending) return result
   if (!result.ok) throw createOutfitError(result.error, result.status || 502)
-  return { resultDataUrl: result.dataUrl }
+  return { pending: false, dataUrl: result.dataUrl }
 }
 
 export async function prepareOutfitAnalysis(body: any, env: Env): Promise<OutfitAnalysis | null> {

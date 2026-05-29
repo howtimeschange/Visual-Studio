@@ -689,6 +689,7 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
   let visionCalls = 0
   let imageCalls = 0
   const env = {
+    VS_OUTFIT_ITEMS_PER_RUN: '2',
     VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(resultStats),
     VS_OUTFIT_JOBS_QUEUE: {
@@ -784,6 +785,284 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
   }
 })
 
+test('runOutfitBatchJob resumes a pending outfit image task across queue invocations', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '1',
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    const payload = init.body ? JSON.parse(String(init.body || '{}')) : {}
+    if (payload.model === 'gemini-3-flash-preview') {
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              model: { framing: 'full-body', pose: 'standing' },
+              garments: [{ index: 2, role: 'top', category: 'shirt' }],
+            }),
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_outfit_resume_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_outfit_resume_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (calls.filter((call) => String(call.input).includes('task_outfit_resume_1')).length === 1) {
+      return new Response(JSON.stringify({
+        id: 'task_outfit_resume_1',
+        status: 'running',
+        poll_url: 'https://relay.example/v1/images/tasks/task_outfit_resume_1',
+        poll_after: 0,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_outfit_resume_1',
+      status: 'succeeded',
+      data: [{ b64_json: 'b3V0Zml0LXJlc3VtZWQ=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_pending_resume', null)
+    const model = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,bW9kZWw=',
+      filename: 'model.png',
+    })
+    const top = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,dG9w',
+      filename: 'top.png',
+    })
+
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: session.id,
+      modelAssetIds: [model.id],
+      modelId: 'nano-banana-2',
+      garments: [{ assetId: top.id, role: 'top', label: 'top.png' }],
+      concurrency: 1,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+        visionApiKey: 'vision-key',
+      },
+    })
+
+    assert.equal(sent.length, 1)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(sent.length, 2)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,b3V0Zml0LXJlc3VtZWQ=',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runOutfitBatchJob retries a failed upstream image task with a fresh task id', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '1',
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  let taskCreates = 0
+  let firstTaskPolls = 0
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    const payload = init.body ? JSON.parse(String(init.body || '{}')) : {}
+    if (payload.model === 'gemini-3-flash-preview') {
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              model: { framing: 'full-body', pose: 'standing' },
+              garments: [{ index: 2, role: 'top', category: 'shirt' }],
+            }),
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      taskCreates += 1
+      const id = `task_outfit_retry_${taskCreates}`
+      return new Response(JSON.stringify({
+        id,
+        status: 'queued',
+        poll_url: `https://relay.example/v1/images/tasks/${id}`,
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).includes('task_outfit_retry_1')) {
+      firstTaskPolls += 1
+      if (firstTaskPolls === 1) {
+        return new Response(JSON.stringify({
+          id: 'task_outfit_retry_1',
+          status: 'running',
+          poll_url: 'https://relay.example/v1/images/tasks/task_outfit_retry_1',
+          poll_after: 0,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({
+        id: 'task_outfit_retry_1',
+        status: 'failed',
+        error: { message: 'system memory overloaded (current: 91.7%, threshold: 90%)' },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_outfit_retry_2',
+      status: 'succeeded',
+      data: [{ b64_json: 'cmV0cnktb3V0Zml0LXJlc3VsdA==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_failed_task_retry', null)
+    const model = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,bW9kZWw=',
+      filename: 'model.png',
+    })
+    const top = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,dG9w',
+      filename: 'top.png',
+    })
+
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: session.id,
+      modelAssetIds: [model.id],
+      modelId: 'nano-banana-2',
+      garments: [{ assetId: top.id, role: 'top', label: 'top.png' }],
+      concurrency: 1,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+        visionApiKey: 'vision-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(sent.length, 2)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTaskStatus, 'retrying')
+    assert.match(item.outputJson.lastImageTaskError, /system memory overloaded/)
+    assert.equal(Boolean(item.outputJson.imageTask), false)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(item.attemptCount, 2)
+    assert.equal(taskCreates, 2)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,cmV0cnktb3V0Zml0LXJlc3VsdA==',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runOutfitBatchJob fails item when image task result is empty', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
@@ -857,6 +1136,8 @@ test('runOutfitBatchJob fails item when image task result is empty', async () =>
       },
     })
 
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
     await mod.runQueuedJob(env, submitted.jobId)
 
     const job = await mod.getJob(env, submitted.jobId)
