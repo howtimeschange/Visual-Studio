@@ -17,10 +17,20 @@ type StyleIntent = {
   reason: string
 }
 
+type AgentAction = {
+  id: string
+  type: 'generate_image'
+  title: string
+  prompt: string
+  aspectRatio: string
+  resolution: string
+}
+
 type AgentResult = {
   reply: string
   shouldGenerate: boolean
   prompt: string
+  actions: AgentAction[]
   mode: AgentMode
   steps: string[]
   suggestions: string[]
@@ -52,10 +62,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const clientKeys = await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
   const { visionKey } = resolveKeys(modelId, env, clientKeys)
-  const fallback = buildFallbackAgentResult(body, message)
+  const passthrough = buildPassthroughAgentResult(body, message)
 
   if (!visionKey) {
-    return json({ sessionId: session.id, ...fallback, usedModel: false })
+    return json({ sessionId: session.id, ...passthrough, usedModel: false, agentPassthrough: true, passthroughReason: 'missing_vision_key' })
   }
 
   const raw = await callTextModel(
@@ -65,14 +75,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     [
       {
         role: 'system',
-        content: `You are the Canvas AI Designer Agent, an adaptive visual prompt designer for a creative image canvas.
-You behave like Lovart-style ChatCanvas: read the user's message and canvas context, identify the design intent, choose an appropriate visual language, decide whether to generate now, and produce a concise design response.
+        content: `You are the Canvas AI Designer Agent for a commercial image canvas.
+You behave like Lovart-style ChatCanvas: read the user's message and canvas context, identify the design intent, choose an appropriate visual language, decide whether to generate images now, and produce a concise design response.
 
 Return strict JSON only:
 {
   "reply": "Chinese reply shown in chat",
   "shouldGenerate": true,
-  "prompt": "English image-generation prompt if shouldGenerate is true, otherwise empty",
+  "prompt": "Legacy first image-generation prompt if shouldGenerate is true, otherwise empty",
   "mode": "plan|generate|refine|analyze",
   "steps": ["short Chinese step", "..."],
   "suggestions": ["complete Chinese follow-up prompt users can click", "..."],
@@ -82,7 +92,17 @@ Return strict JSON only:
     "medium": "photography|illustration|3d_render|graphic_design|mixed|undecided",
     "visualLanguage": "short English visual style label",
     "reason": "short Chinese reason"
-  }
+  },
+  "actions": [
+    {
+      "id": "image_1",
+      "type": "generate_image",
+      "title": "short Chinese image title",
+      "prompt": "complete image-generation prompt for this one output",
+      "aspectRatio": "1:1",
+      "resolution": "1k"
+    }
+  ]
 }
 
 Rules:
@@ -91,9 +111,13 @@ Rules:
 - First classify the request type: ecommerce main image, campaign poster, social post, editorial photography, illustration, packaging, 3D render, infographic/UI, art concept, or other.
 - Choose a distinct visual language from the user's words, canvas context, references, and purpose. Do not default to ecommerce styling unless the user explicitly asks for ecommerce, product listing, main image, white background, marketplace, SKU, or product detail visuals.
 - Avoid unsupported default phrases such as "clean background", "ecommerce-ready", "polished commercial", "centered product", or "soft studio lighting" unless the user specifically requests that direction.
-- If the user wants an image but the style/medium is missing and the choice would strongly affect the result, set needsClarification=true, shouldGenerate=false, prompt="", ask one short Chinese question, and provide 2-4 complete clickable suggestions with different style directions.
+- If the user wants an image but the style/medium is missing and the choice would strongly affect the result, set needsClarification=true, shouldGenerate=false, prompt="", actions=[], ask one short Chinese question, and provide 2-4 complete clickable suggestions with different style directions.
+- When the user asks for multiple images, variants, a list of prompts, or a series, return one generate_image action per intended output.
+- Do not combine multiple requested outputs into one image unless the user explicitly asks for a collage, contact sheet, grid, or one combined image.
+- Each action must describe exactly one image output and be independently generatable.
 - When generating, reply in Chinese with one concise sentence naming the chosen style direction.
-- The prompt must be concrete and under 180 English words. Reflect the user's intent, medium, visual language, composition, palette, material/texture, lighting, and typography/copy-space when relevant.
+- The prompt must be concrete, complete, and image-model-ready. Reflect the user's intent, medium, visual language, composition, palette, material/texture, lighting, and typography/copy-space when relevant; do not force a short prompt when useful detail matters.
+- Return raw JSON only, without Markdown fences.
 - Do not mention internal JSON, tools, APIs, or model limitations.`,
       },
       {
@@ -108,31 +132,48 @@ Rules:
         }),
       },
     ],
-    { maxTokens: 900, temperature: 0.45 },
+    { maxTokens: 4000, temperature: 0.45 },
   )
 
-  const parsed = normalizeAgentResult(parseJsonObject(raw), fallback)
-  return json({ sessionId: session.id, ...parsed, usedModel: true })
+  const parsedJson = parseJsonObject(raw)
+  const parsed = normalizeAgentResult(parsedJson, passthrough)
+  return json({
+    sessionId: session.id,
+    ...parsed,
+    usedModel: true,
+    agentPassthrough: !parsedJson,
+    passthroughReason: parsedJson ? '' : (raw ? 'invalid_agent_json' : 'empty_agent_response'),
+  })
 }
 
-export function buildFallbackAgentResult(body: any, message: string): AgentResult {
+export function buildPassthroughAgentResult(body: any, message: string): AgentResult {
   const shouldGenerate = inferShouldGenerate(message)
   const aspectRatio = String(body?.aspectRatio || '1:1')
   const resolution = String(body?.resolution || '1k')
   const styleRoute = resolveFallbackStyleRoute(message)
   const needsClarification = shouldGenerate && styleRoute.needsClarification
-  const reply = !shouldGenerate
-    ? '我先按当前画布上下文给出设计判断，不会立即生成图片。'
-    : needsClarification
-      ? '这个需求可以走几种完全不同的视觉方向，你想先选哪一种？'
-      : `我会按${styleRoute.chineseLabel}方向来做，并根据 ${aspectRatio} / ${resolution} 生成一版。`
-
+  const prompt = shouldGenerate && !needsClarification
+    ? buildFallbackPrompt(message, styleRoute, aspectRatio, resolution)
+    : ''
+  const actions: AgentAction[] = shouldGenerate && !needsClarification
+    ? [{
+        id: 'image_1',
+        type: 'generate_image',
+        title: styleRoute.chineseLabel,
+        prompt,
+        aspectRatio,
+        resolution,
+      }]
+    : []
   return {
-    reply,
+    reply: !shouldGenerate
+      ? '我先按当前画布上下文给出设计判断，不会立即生成图片。'
+      : needsClarification
+        ? '这个需求可以走几种完全不同的视觉方向，你想先选哪一种？'
+        : `我会按${styleRoute.chineseLabel}方向来做，并根据 ${aspectRatio} / ${resolution} 生成一版。`,
     shouldGenerate: shouldGenerate && !needsClarification,
-    prompt: shouldGenerate && !needsClarification
-      ? buildFallbackPrompt(message, styleRoute, aspectRatio, resolution)
-      : '',
+    prompt,
+    actions,
     mode: needsClarification ? 'plan' : (shouldGenerate ? 'generate' : 'analyze'),
     steps: needsClarification
       ? ['识别需求类型', '补齐风格方向', '等待用户选择']
@@ -148,6 +189,8 @@ export function buildFallbackAgentResult(body: any, message: string): AgentResul
     styleIntent: styleRoute.styleIntent,
   }
 }
+
+export const buildFallbackAgentResult = buildPassthroughAgentResult
 
 function resolveFallbackStyleRoute(message: string) {
   const text = message.toLowerCase()
@@ -317,22 +360,80 @@ function isAgentMode(value: unknown): value is AgentMode {
   return value === 'plan' || value === 'generate' || value === 'refine' || value === 'analyze'
 }
 
-export function normalizeAgentResult(value: any, fallback: AgentResult): AgentResult {
-  if (!value || typeof value !== 'object') return fallback
+export function normalizeAgentResult(value: any, passthrough: AgentResult): AgentResult {
+  if (!value || typeof value !== 'object') return passthrough
   const needsClarification = value.needsClarification === true
   const shouldGenerate = needsClarification
     ? false
-    : (typeof value.shouldGenerate === 'boolean' ? value.shouldGenerate : fallback.shouldGenerate)
+    : (typeof value.shouldGenerate === 'boolean' ? value.shouldGenerate : passthrough.shouldGenerate)
+  const actions = shouldGenerate ? normalizeAgentActions(value, passthrough) : []
   return {
-    reply: typeof value.reply === 'string' && value.reply.trim() ? value.reply.trim() : fallback.reply,
+    reply: typeof value.reply === 'string' && value.reply.trim() ? value.reply.trim() : passthrough.reply,
     shouldGenerate,
-    prompt: shouldGenerate && typeof value.prompt === 'string' && value.prompt.trim()
-      ? value.prompt.trim()
-      : (shouldGenerate ? fallback.prompt : ''),
-    mode: isAgentMode(value.mode) ? value.mode : (needsClarification ? 'plan' : fallback.mode),
-    steps: Array.isArray(value.steps) ? value.steps.map(String).filter(Boolean).slice(0, 4) : fallback.steps,
-    suggestions: normalizeSuggestions(value.suggestions, fallback.suggestions),
+    prompt: actions[0]?.prompt || '',
+    actions,
+    mode: isAgentMode(value.mode) ? value.mode : (needsClarification ? 'plan' : passthrough.mode),
+    steps: Array.isArray(value.steps) ? value.steps.map(String).filter(Boolean).slice(0, 4) : passthrough.steps,
+    suggestions: normalizeSuggestions(value.suggestions, passthrough.suggestions),
     needsClarification,
-    styleIntent: sanitizeStyleIntent(value.styleIntent, fallback.styleIntent || DEFAULT_STYLE_INTENT),
+    styleIntent: sanitizeStyleIntent(value.styleIntent, passthrough.styleIntent || DEFAULT_STYLE_INTENT),
   }
+}
+
+function normalizeAgentActions(value: any, passthrough: AgentResult) {
+  const fallbackAction = passthrough.actions[0] || {}
+  const rawActions = Array.isArray(value?.actions)
+    ? value.actions
+    : Array.isArray(value?.tasks)
+      ? value.tasks
+      : []
+  const actions = rawActions
+    .map((action: any, index: number) => normalizeAgentAction(action, index, fallbackAction))
+    .filter(Boolean)
+    .slice(0, 8)
+  if (actions.length) return actions
+  if (typeof value?.prompt === 'string' && value.prompt.trim()) {
+    return [normalizeAgentAction({
+      id: 'image_1',
+      type: 'generate_image',
+      title: '生成图片',
+      prompt: value.prompt,
+      aspectRatio: value.aspectRatio,
+      resolution: value.resolution,
+    }, 0, fallbackAction)].filter(Boolean)
+  }
+  return passthrough.actions
+}
+
+function normalizeAgentAction(action: any, index: number, fallbackAction: any = {}) {
+  const type = action?.type === 'generate_image' || action?.tool === 'generate_image' ? 'generate_image' : ''
+  const prompt = String(action?.prompt || action?.input || '').trim()
+  if (!type || !prompt) return null
+  const aspectRatio = normalizeAgentAspectRatio(action?.aspectRatio || action?.ratio) || fallbackAction?.aspectRatio || ''
+  const resolution = normalizeAgentResolution(action?.resolution) || fallbackAction?.resolution || ''
+  const id = String(action?.id || `image_${index + 1}`)
+    .replace(/[^\w-]/g, '_')
+    .slice(0, 48) || `image_${index + 1}`
+  const title = String(action?.title || action?.name || `图片 ${index + 1}`)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+  return {
+    id,
+    type,
+    title,
+    prompt,
+    aspectRatio,
+    resolution,
+  }
+}
+
+function normalizeAgentAspectRatio(value: unknown): string {
+  const text = String(value || '').trim()
+  return ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(text) ? text : ''
+}
+
+function normalizeAgentResolution(value: unknown): string {
+  const text = String(value || '').trim().toLowerCase()
+  return ['1k', '2k', '4k'].includes(text) ? text : ''
 }

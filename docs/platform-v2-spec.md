@@ -498,11 +498,11 @@ Cloudflare Pages Functions
 | `nano-banana-pro` | `gemini-3-pro-image-preview` |
 | `gpt-image-2` | `gpt-image-2` |
 
-`gpt-image-2` 通过 1xm.ai Images API 异步任务调用：统一创建 `/v1/images/tasks`，带参考图时在 JSON `image` 字段传 data URL，并轮询任务结果。它不走 `/v1/chat/completions`。
+图片模型统一通过 1xm.ai 异步任务接口调用：`POST /v1/images/tasks` 创建任务，随后使用 `poll_url` 或 `GET /v1/images/tasks/{task_id}` 轮询终态。参考图通过 JSON `image` 字段传 data URL 数组；生图模型不走 `/v1/chat/completions`，也不再走同步 `/v1/images/generations` / `/v1/images/edits`。
 
 固定视觉模型：
 
-- `gemini-3-flash-preview`
+- `gemini-3.5-flash`
 
 用途：
 

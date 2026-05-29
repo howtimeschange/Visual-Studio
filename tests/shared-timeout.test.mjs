@@ -34,7 +34,7 @@ test('callImageModel aborts a hung upstream request instead of waiting forever',
         'gemini-3.1-flash-image-preview',
         [],
         'make an image',
-        { timeoutMs: 1000 },
+        { timeoutMs: 1000, retryCount: 0 },
       ),
       new Promise((resolve) => setTimeout(() => resolve('hung'), 1500)),
     ])
@@ -60,6 +60,41 @@ test('image model options default to a longer generation timeout and two retries
     assert.equal(options.retryCount, 2)
     assert.equal(options.retryDelayMs, 1_000)
   } finally {
+    await cleanup()
+  }
+})
+
+test('callImageModel keeps retries inside the total generation timeout budget', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = () => {
+    calls += 1
+    return new Promise(() => {})
+  }
+
+  try {
+    const started = Date.now()
+    const result = await Promise.race([
+      mod.callImageModel(
+        'https://relay.example/v1',
+        'test-key',
+        'gpt-image-2',
+        [],
+        'make an image',
+        { timeoutMs: 1200, retryCount: 2, retryDelayMs: 1 },
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 1800)),
+    ])
+
+    assert.notEqual(result, 'hung')
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 504)
+    assert.match(result.error, /timed out/i)
+    assert.ok(Date.now() - started < 1800)
+    assert.ok(calls >= 1)
+  } finally {
+    globalThis.fetch = originalFetch
     await cleanup()
   }
 })

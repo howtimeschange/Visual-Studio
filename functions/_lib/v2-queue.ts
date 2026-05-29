@@ -47,13 +47,13 @@ export async function dispatchQueuedJob(
   const mode = String(env.VS_QUEUE_EXECUTION_MODE || '').trim().toLowerCase()
   const localEndpoint = String(env.VS_LOCAL_QUEUE_ENDPOINT || '').trim()
   if (mode !== 'waituntil' && localEndpoint) {
-    const task = postLocalQueueMessage(localEndpoint, message)
-    if (waitUntil) {
-      waitUntil(task)
-    } else {
-      await task
+    try {
+      await postLocalQueueMessage(localEndpoint, message)
+      return 'local-bridge'
+    } catch {
+      // Local queue is a development bridge. If it is down, keep the job moving
+      // through the same fallbacks used in production-like environments.
     }
-    return 'local-bridge'
   }
 
   const queue = resolveQueue(env, message.jobType)
@@ -68,6 +68,6 @@ export async function dispatchQueuedJob(
     return 'waitUntil'
   }
 
-  void task
+  await task
   return 'inline'
 }

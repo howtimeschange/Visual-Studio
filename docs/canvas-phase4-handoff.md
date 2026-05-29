@@ -320,7 +320,7 @@ OpenLovart 的画布实现在 `src/app/lovart/canvas/page.tsx`，用 React state
 - `nano-banana-pro` → relay `gemini-3-pro-image-preview`
 - `gpt-image-2` → relay `gpt-image-2`
 
-API 调用路径：`POST /api/generate-direct` → `callImageModel()` → relay。`gpt-image-2` 在 `callImageModel()` 内统一创建 `/v1/images/tasks` 异步任务并轮询结果，不走 chat completions。
+API 调用路径：`POST /api/generate-direct` → `callImageModel()` → relay。所有图片模型在 `callImageModel()` 内统一走 1xm.ai 异步任务接口：`POST /v1/images/tasks` 创建任务，再通过 `poll_url` 或 `/v1/images/tasks/{task_id}` 轮询；不走 chat completions，也不再走同步 images generations / edits。
 
 ## 旧的 generate 代码位置
 

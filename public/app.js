@@ -209,6 +209,8 @@ const RUNTIME_MIGRATION_NOTICE_MS = 5200
 const CANVAS_SAVE_DEBOUNCE_MS = 2200
 const CANVAS_GENERATE_POLL_INTERVAL_MS = 1600
 const CANVAS_GENERATE_POLL_TIMEOUT_MS = 25 * 60 * 1000
+const CANVAS_RESULT_FETCH_RETRIES = 3
+const CANVAS_RESULT_FETCH_RETRY_DELAY_MS = 1200
 
 const KEY_STORAGE = 'img-translator:keys:v1'
 const PREF_STORAGE = 'img-translator:workbench:prefs:v1'
@@ -277,10 +279,12 @@ const state = {
     textColorMode: 'match_original',
     headlineColor: DEFAULT_TRANSLATE_HEADLINE_COLOR,
     bodyColor: DEFAULT_TRANSLATE_BODY_COLOR,
-    items: [],
-    running: false,
-    progress: '',
-    jobId: '',
+	    items: [],
+	    running: false,
+	    submittingJobId: '',
+	    pendingSignature: '',
+	    progress: '',
+	    jobId: '',
     jobTab: 'current',
     jobPage: 1,
     jobs: [],
@@ -384,9 +388,11 @@ const state = {
     concurrency: 3,
     models: [],
     garments: [],
-    results: {},
-    running: false,
-    progress: '',
+	    results: {},
+	    running: false,
+	    submittingJobId: '',
+	    pendingSignature: '',
+	    progress: '',
     jobId: '',
     jobTab: 'current',
     jobPage: 1,
@@ -524,6 +530,7 @@ const dom = {
   pShared: $('#p-shared'),
   tJobList: $('#t-job-list'),
   tJobEmpty: $('#t-job-empty'),
+  tUploadQueue: $('#t-upload-queue'),
   tJobTabs: $$('#t-job-tabs [data-job-tab]'),
   accountSummary: $('#account-summary'),
   accountName: $('#account-name'),
@@ -565,7 +572,9 @@ const dom = {
   oModelAdd: $('#o-model-add'),
   oModelLibraryOpen: $('#o-model-library-open'),
   oModelList: $('#o-model-list'),
+  oModelUpload: $('#o-model-upload'),
   oModelCount: $('#o-model-count'),
+  oClearModels: $('#o-clear-models'),
   oModelLibraryDialog: $('#o-model-library-dialog'),
   oModelLibraryForm: $('#o-model-library-form'),
   oModelLibraryGrid: $('#o-model-library-grid'),
@@ -577,8 +586,10 @@ const dom = {
   oGarmentInput: $('#o-garment-input'),
   oGarmentAdd: $('#o-garment-add'),
   oGarmentList: $('#o-garment-list'),
+  oGarmentUpload: $('#o-garment-upload'),
   oGarmentCount: $('#o-garment-count'),
   oLookCount: $('#o-look-count'),
+  oClearGarments: $('#o-clear-garments'),
   oRun: $('#o-run'),
   oProgress: $('#o-progress'),
   oJobList: $('#o-job-list'),
@@ -591,6 +602,7 @@ const dom = {
   sFileInput: $('#s-file-input'),
   sDzInner: $('#s-dz-inner'),
   sSourcePreview: $('#s-source-preview'),
+  sSourceUpload: $('#s-source-upload'),
   sSourceImg: $('#s-source-img'),
   sClearSource: $('#s-clear-source'),
   sAnalyzeProgress: $('#s-analyze-progress'),
@@ -603,6 +615,7 @@ const dom = {
   sGenerateSection: $('#s-generate-section'),
   sRefInput: $('#s-ref-input'),
   sRefAdd: $('#s-ref-add'),
+  sRefUpload: $('#s-ref-upload'),
   sRefList: $('#s-ref-list'),
   sSubject: $('#s-subject'),
   sGenerate: $('#s-generate'),
@@ -1662,6 +1675,135 @@ function resetLoadedWorkspaceForDraft(kind) {
   }
 }
 
+function clampUploadPercent(value = 0) {
+  return clamp(Math.round(Number(value) || 0), 0, 100)
+}
+
+function createUploadProgressState({
+  title = '正在上传',
+  detail = '',
+  percent = 0,
+  label = '',
+  active = false,
+  done = false,
+} = {}) {
+  return {
+    title,
+    detail,
+    percent: clampUploadPercent(percent),
+    label,
+    active,
+    done,
+  }
+}
+
+function setUploadProgress(upload, { current = 0, total = 0, filename = '', percent = null, active = true, done = false } = {}) {
+  if (!upload) return
+  const safeCurrent = Math.max(0, Number(current) || 0)
+  const safeTotal = Math.max(0, Number(total) || 0)
+  upload.detail = filename
+    ? `${safeCurrent}/${safeTotal} · ${filename}`
+    : safeTotal
+      ? `${safeCurrent}/${safeTotal}`
+      : ''
+  const nextPercent = Number(percent)
+  upload.percent = Number.isFinite(nextPercent)
+    ? clampUploadPercent(nextPercent)
+    : safeTotal
+      ? clampUploadPercent((safeCurrent / safeTotal) * 100)
+      : upload.percent
+  upload.label = `${upload.percent}%`
+  upload.active = active
+  upload.done = done || upload.percent >= 100
+}
+
+function createUploadSkeletonCard(upload, { compact = false } = {}) {
+  const card = document.createElement('div')
+  card.className = `upload-item${compact ? ' compact' : ''}`
+
+  const frame = document.createElement('div')
+  frame.className = 'upload-skeleton'
+
+  const ring = document.createElement('div')
+  ring.className = 'upload-skeleton-ring'
+  const radius = 22
+  const circumference = 2 * Math.PI * radius
+  const offset = circumference * (1 - clampUploadPercent(upload?.percent || 0) / 100)
+  ring.innerHTML = `
+    <svg viewBox="0 0 56 56" aria-hidden="true" focusable="false">
+      <circle class="track" cx="28" cy="28" r="22"></circle>
+      <circle class="progress" cx="28" cy="28" r="22" style="stroke-dasharray:${circumference};stroke-dashoffset:${offset}"></circle>
+    </svg>
+  `
+
+  const pct = document.createElement('div')
+  pct.className = 'upload-skeleton-percentage'
+  pct.textContent = upload?.label || `${clampUploadPercent(upload?.percent || 0)}%`
+
+  const hint = document.createElement('div')
+  hint.className = 'upload-skeleton-label'
+  hint.textContent = upload?.done ? '已上传' : upload?.active ? '上传中' : '待上传'
+
+  frame.append(ring, pct, hint)
+
+  const body = document.createElement('div')
+  body.className = 'upload-item-body'
+  const title = document.createElement('div')
+  title.className = 'upload-item-title'
+  title.textContent = upload?.title || '正在上传'
+  const detail = document.createElement('div')
+  detail.className = 'upload-item-meta'
+  detail.textContent = upload?.detail || ''
+  body.append(title, detail)
+
+  if (compact) card.append(frame, body)
+  else card.append(body, frame)
+  return card
+}
+
+function renderUploadQueue(container, uploads = [], options = {}) {
+  if (!container) return
+  if (!uploads.length) {
+    container.replaceChildren()
+    container.classList.add('hidden')
+    return
+  }
+  container.classList.remove('hidden')
+  container.replaceChildren(...uploads.map((upload) => createUploadSkeletonCard(upload, options)))
+}
+
+function clearOutfitModels() {
+  if (isOutfitBusy()) return
+  state.outfit.models = []
+  pruneOutfitResults()
+  saveRuntimeState()
+  renderOutfit()
+}
+
+function clearOutfitGarments() {
+  if (isOutfitBusy()) return
+  state.outfit.garments = []
+  pruneOutfitResults()
+  saveRuntimeState()
+  renderOutfit()
+}
+
+function appendOutfitModels(images = []) {
+  if (!Array.isArray(images) || images.length === 0) return
+  state.outfit.models.push(...images)
+  pruneOutfitResults()
+}
+
+function appendOutfitGarments(images = [], garmentType = state.outfit.garmentType) {
+  if (!Array.isArray(images) || images.length === 0) return
+  state.outfit.garments.push(...images.map((item) => ({
+    ...item,
+    role: garmentType,
+    instructions: '',
+  })))
+  pruneOutfitResults()
+}
+
 function addJobTaskThumb(thumbs, seen, assetId, label) {
   const id = String(assetId || '').trim()
   if (!id || seen.has(id) || thumbs.length >= 3) return
@@ -2131,9 +2273,39 @@ function serializeAiMessage(msg = {}) {
     imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
     imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
     aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+    images: Array.isArray(msg.images) ? msg.images.map(serializeAiMessageImage).filter(Boolean).slice(0, 12) : [],
+    workflow: Array.isArray(msg.workflow) ? msg.workflow.map(serializeAiWorkflowItem).filter(Boolean).slice(0, 12) : [],
     suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
     needsClarification: Boolean(msg.needsClarification),
     styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
+  }
+}
+
+function serializeAiMessageImage(image = {}) {
+  const assetId = typeof image.assetId === 'string' ? image.assetId : ''
+  const dataUrl = shouldInlineHistoryDataUrl(image.dataUrl) ? image.dataUrl : ''
+  if (!assetId && !dataUrl) return null
+  return {
+    assetId,
+    dataUrl,
+    name: typeof image.name === 'string' ? image.name : '',
+    mime: typeof image.mime === 'string' ? image.mime : '',
+    prompt: typeof image.prompt === 'string' ? image.prompt : '',
+    actionId: typeof image.actionId === 'string' ? image.actionId : '',
+    aspectRatio: normalizeAspectRatio(image.aspectRatio || ''),
+  }
+}
+
+function serializeAiWorkflowItem(item = {}) {
+  const title = typeof item.title === 'string' ? item.title : ''
+  const prompt = typeof item.prompt === 'string' ? item.prompt : ''
+  if (!title && !prompt) return null
+  return {
+    id: typeof item.id === 'string' ? item.id : '',
+    title,
+    prompt,
+    status: ['queued', 'running', 'completed', 'failed'].includes(item.status) ? item.status : 'queued',
+    error: typeof item.error === 'string' ? item.error : '',
   }
 }
 
@@ -2155,6 +2327,17 @@ function sanitizeAiMessages(value) {
     .map((msg) => {
       const role = msg?.role === 'user' || msg?.role === 'assistant' ? msg.role : ''
       if (!role) return null
+      const images = sanitizeAiMessageImages(msg.images)
+      if (!images.length && (msg.imageAssetId || msg.imageDataUrl)) {
+        const legacy = serializeAiMessageImage({
+          assetId: msg.imageAssetId,
+          dataUrl: msg.imageDataUrl,
+          name: msg.imageName,
+          mime: msg.imageMime,
+          aspectRatio: msg.aspectRatio,
+        })
+        if (legacy) images.push(legacy)
+      }
       return {
         id: typeof msg.id === 'string' ? msg.id : crypto.randomUUID(),
         role,
@@ -2166,6 +2349,8 @@ function sanitizeAiMessages(value) {
         imageMime: typeof msg.imageMime === 'string' ? msg.imageMime : '',
         imageDataUrl: shouldInlineHistoryDataUrl(msg.imageDataUrl) ? msg.imageDataUrl : '',
         aspectRatio: normalizeAspectRatio(msg.aspectRatio || ''),
+        images,
+        workflow: sanitizeAiWorkflowItems(msg.workflow),
         suggestions: Array.isArray(msg.suggestions) ? msg.suggestions.map(String).filter(Boolean).slice(0, 4) : [],
         needsClarification: Boolean(msg.needsClarification),
         styleIntent: sanitizeAiMessageStyleIntent(msg.styleIntent),
@@ -2176,6 +2361,22 @@ function sanitizeAiMessages(value) {
     })
     .filter(Boolean)
     .slice(-AI_HISTORY_LIMIT)
+}
+
+function sanitizeAiMessageImages(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((image) => serializeAiMessageImage(image || {}))
+    .filter(Boolean)
+    .slice(0, 12)
+}
+
+function sanitizeAiWorkflowItems(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => serializeAiWorkflowItem(item || {}))
+    .filter(Boolean)
+    .slice(0, 12)
 }
 
 function sanitizeAiMessageStyleIntent(value) {
@@ -2700,12 +2901,23 @@ function bindTranslate() {
 
   dom.tFontFileInput?.addEventListener('change', async () => {
     if (!dom.tFontFileInput.files?.length || isTranslateBusy()) return
+    const file = dom.tFontFileInput.files[0]
+    const upload = createUploadProgressState({
+      title: '字体参考图',
+      detail: file?.name || '',
+      percent: 0,
+    })
     state.translate.progress = '正在上传字体参考图…'
     renderTranslate()
+    renderUploadQueue(dom.tUploadQueue, [upload])
     try {
       const [reference] = await prepareAssetItems(dom.tFontFileInput.files, {
         kind: 'reference',
         source: 'translate_font_reference',
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(upload, { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.tUploadQueue, [upload])
+        },
       })
       if (reference) {
         state.translate.fontReference = reference
@@ -2718,6 +2930,7 @@ function bindTranslate() {
       state.translate.progress = trimError(error)
     } finally {
       dom.tFontFileInput.value = ''
+      renderUploadQueue(dom.tUploadQueue, [])
       renderTranslate()
     }
   })
@@ -2734,19 +2947,33 @@ function bindTranslate() {
     input: dom.tFileInput,
     onFiles: async (files) => {
       if (isTranslateBusy()) return
-      resetLoadedWorkspaceForDraft('translate')
       setJobTab('translate', 'current')
+      const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      const uploads = imageFiles.map((file, index) => createUploadProgressState({
+        title: '图片批量翻译',
+        detail: file.name,
+        percent: imageFiles.length ? ((index + 1) / imageFiles.length) * 100 : 0,
+        active: index === 0,
+      }))
       state.translate.progress = '正在读取图片…'
       renderTranslate()
+      renderUploadQueue(dom.tUploadQueue, uploads)
       const images = await prepareAssetItems(files, {
         onProgress: ({ current, total, filename }) => {
           state.translate.progress = `正在上传图片 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.tUploadQueue, uploads)
           renderTranslate()
+        },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.tUploadQueue, uploads)
         },
       })
       state.translate.items.push(...images.map((item) => ({ ...item, results: {} })))
       state.translate.progress = ''
       saveRuntimeState()
+      renderUploadQueue(dom.tUploadQueue, [])
       renderTranslate()
     },
     onClick: () => !isTranslateBusy(),
@@ -3628,11 +3855,11 @@ function addGeneratorToCanvas(x, y, refImageId) {
   return el
 }
 
-function addGeneratingPlaceholderToCanvas({ prompt = '', aspectRatio = state.generate.genRatio, resolution = state.generate.genResolution } = {}) {
+function addGeneratingPlaceholderToCanvas({ prompt = '', aspectRatio = state.generate.genRatio, resolution = state.generate.genResolution, x = null, y = null } = {}) {
   markCanvasGuideSeen()
   const size = getCanvasImageSize(aspectRatio)
-  const cx = (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - size.width / 2
-  const cy = (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - size.height / 2
+  const cx = typeof x === 'number' ? x : (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale - size.width / 2
+  const cy = typeof y === 'number' ? y : (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale - size.height / 2
   const el = {
     id: crypto.randomUUID(),
     type: 'image-generator',
@@ -4821,19 +5048,19 @@ function setCanvasGenerateStatus(el, message) {
   renderCanvas()
 }
 
-function shouldUseAsyncCanvasGenerate(modelId) {
-  return modelId === 'gpt-image-2'
+function shouldUseAsyncCanvasGenerate(modelId, resolution, refImages = []) {
+  return true
 }
 
 async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
-  if (!shouldUseAsyncCanvasGenerate(payload.modelId)) {
+  if (!shouldUseAsyncCanvasGenerate(payload.modelId, payload.resolution, payload.referenceImages || [])) {
     return postJson('/api/generate-direct', payload)
   }
 
   onStatus?.('正在提交生成任务…')
   const submitted = await postJson('/api/jobs/generate-direct', payload)
   state.runtime.sessionId = submitted.sessionId || state.runtime.sessionId
-  onStatus?.('生成任务已提交，正在等待完成…')
+  onStatus?.('任务已提交，正在等待生成完成…')
   return waitForCanvasGenerateJob(submitted.jobId, {
     projectId: state.generate.projectId,
     onStatus,
@@ -4862,8 +5089,8 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
     if (status === 'completed') {
       const resultAssetId = String(item?.outputJson?.resultAssetId || job.summaryJson?.resultAssetId || '').trim()
       if (!resultAssetId) throw new Error('生成完成但缺少结果资源')
-      const assetData = await getJson(`/api/assets/${encodeURIComponent(resultAssetId)}?includeData=1${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`)
-      if (!assetData?.dataUrl) throw new Error('生成结果读取失败')
+	      const assetData = await fetchCanvasGenerateResultAsset(resultAssetId, projectId)
+	      if (!assetData?.dataUrl) throw new Error('生成结果读取失败')
       return {
         sessionId: state.runtime.sessionId,
         jobId,
@@ -4880,7 +5107,25 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
     await wait(CANVAS_GENERATE_POLL_INTERVAL_MS)
   }
 
-  throw new Error('生成任务等待超时，请稍后在项目中查看结果')
+	  throw new Error('生成任务等待超时，请稍后在项目中查看结果')
+	}
+
+async function fetchCanvasGenerateResultAsset(resultAssetId, projectId = '') {
+  const url = `/api/assets/${encodeURIComponent(resultAssetId)}?includeData=1${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`
+  let lastError = null
+  for (let attempt = 0; attempt <= CANVAS_RESULT_FETCH_RETRIES; attempt += 1) {
+    try {
+      const assetData = await getJson(url)
+      if (assetData?.dataUrl) return assetData
+      lastError = new Error('生成结果读取失败')
+    } catch (error) {
+      lastError = error
+    }
+    if (attempt < CANVAS_RESULT_FETCH_RETRIES) {
+      await wait(CANVAS_RESULT_FETCH_RETRY_DELAY_MS * (attempt + 1))
+    }
+  }
+  throw lastError || new Error('生成结果读取失败')
 }
 
 function formatCanvasGenerateJobStatus(status) {
@@ -4946,10 +5191,6 @@ async function executeCanvasGenerate() {
         clientKeys: { ...state.keys },
       })
       state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
-      // This path is the compact generator card, so keep clarification visible in status only.
-      if (agentData.needsClarification && !agentData.shouldGenerate) {
-        throw new Error(agentData.reply || '请先在 AI 助手里选择一个风格方向。')
-      }
       finalPrompt = String(agentData.prompt || '').trim() || prompt
     }
 
@@ -5063,6 +5304,7 @@ function bindAiSidebar() {
     savePrefs()
   })
 
+
   // 上传参考图
   dom.gAiUpload.addEventListener('click', () => dom.gAiFileInput.click())
   dom.gAiFileInput.addEventListener('change', async () => {
@@ -5138,7 +5380,6 @@ function renderAiMessages() {
   dom.gAiMessages.replaceChildren(...state.generate.aiMessages.map((msg) => {
     const node = document.createElement('div')
     node.className = `msg ${msg.role}`
-
     // 显示用户消息中附带的参考图
     if (msg.role === 'user' && msg.refs?.length) {
       const refsWrap = document.createElement('div')
@@ -5189,18 +5430,44 @@ function renderAiMessages() {
       }
       node.append(steps)
     }
-    if (msg.imageDataUrl) {
+    if (Array.isArray(msg.workflow) && msg.workflow.length) {
+      const workflow = document.createElement('ul')
+      workflow.className = 'msg-steps'
+      for (const item of msg.workflow.slice(0, 8)) {
+        const row = document.createElement('li')
+        const status = ({
+          queued: '排队',
+          running: '生成中',
+          completed: '完成',
+          failed: '失败',
+        })[item.status] || '待处理'
+        row.textContent = `${status} · ${item.title || item.prompt || item.id || '图片任务'}`
+        workflow.append(row)
+      }
+      node.append(workflow)
+    }
+    const messageImages = Array.isArray(msg.images) && msg.images.length
+      ? msg.images
+      : (msg.imageDataUrl ? [{
+          dataUrl: msg.imageDataUrl,
+          name: msg.imageName || '生成结果',
+          prompt: msg.generatingPrompt || '',
+        }] : [])
+    if (messageImages.length) {
       const imgWrap = document.createElement('div')
       imgWrap.className = 'msg-images'
-      const img = document.createElement('img')
-      img.className = 'msg-img'
-      img.src = msg.imageDataUrl
-      img.alt = '生成结果'
-      img.style.maxWidth = '200px'
-      img.style.borderRadius = '8px'
-      img.style.cursor = 'pointer'
-      img.addEventListener('click', () => openLightbox({ src: msg.imageDataUrl, caption: '生成结果' }))
-      imgWrap.append(img)
+      for (const image of messageImages) {
+        if (!image?.dataUrl) continue
+        const img = document.createElement('img')
+        img.className = 'msg-img'
+        img.src = image.dataUrl
+        img.alt = image.name || '生成结果'
+        img.style.maxWidth = '200px'
+        img.style.borderRadius = '8px'
+        img.style.cursor = 'pointer'
+        img.addEventListener('click', () => openLightbox({ src: image.dataUrl, caption: image.name || '生成结果' }))
+        imgWrap.append(img)
+      }
       node.append(imgWrap)
     }
     const suggestionNodes = createAiSuggestionNodes(msg.suggestions, {
@@ -5366,6 +5633,73 @@ function getCanvasAgentContext() {
   }
 }
 
+function normalizeCanvasAgentActions(agentData, requestText, aspectRatio, resolution) {
+  const rawActions = Array.isArray(agentData?.actions)
+    ? agentData.actions
+    : Array.isArray(agentData?.tasks)
+      ? agentData.tasks
+      : []
+  const actions = rawActions
+    .map((action, index) => normalizeCanvasAgentAction(action, index, aspectRatio, resolution))
+    .filter(Boolean)
+    .slice(0, 8)
+  if (actions.length) return actions
+  const prompt = String(agentData?.prompt || requestText || '').trim()
+  return prompt
+    ? [normalizeCanvasAgentAction({ type: 'generate_image', title: '生成图片', prompt, aspectRatio, resolution }, 0, aspectRatio, resolution)]
+    : []
+}
+
+function normalizeCanvasAgentAction(action, index, fallbackAspectRatio, fallbackResolution) {
+  const type = action?.type === 'generate_image' || action?.tool === 'generate_image' ? 'generate_image' : ''
+  const prompt = String(action?.prompt || action?.input || '').trim()
+  if (!type || !prompt) return null
+  const aspectRatio = normalizeAspectRatio(action?.aspectRatio || action?.ratio || fallbackAspectRatio)
+  const resolution = normalizeCanvasResolution(action?.resolution || fallbackResolution)
+  const id = String(action?.id || `image_${index + 1}`).replace(/[^\w-]/g, '_').slice(0, 48) || `image_${index + 1}`
+  const title = String(action?.title || action?.name || `图片 ${index + 1}`).replace(/\s+/g, ' ').trim().slice(0, 80) || `图片 ${index + 1}`
+  return {
+    id,
+    type,
+    title,
+    prompt,
+    aspectRatio,
+    resolution,
+  }
+}
+
+function getCanvasWorkflowPlacement(index, total, aspectRatio) {
+  const size = getCanvasImageSize(aspectRatio)
+  const maxColumns = 3
+  const columns = Math.max(1, Math.min(maxColumns, Number(total) || 1))
+  const gap = 36
+  const col = index % columns
+  const row = Math.floor(index / columns)
+  const centerX = (dom.gCanvasContainer.clientWidth / 2 - state.generate.panX) / state.generate.scale
+  const centerY = (dom.gCanvasContainer.clientHeight / 2 - state.generate.panY) / state.generate.scale
+  const totalWidth = columns * size.width + (columns - 1) * gap
+  return {
+    x: centerX - totalWidth / 2 + col * (size.width + gap),
+    y: centerY - size.height / 2 + row * (size.height + gap),
+  }
+}
+
+async function storeCanvasGeneratedResult(data, fallbackName, source) {
+  const storedResult = data.resultAsset
+    ? {
+        assetId: data.resultAsset.id,
+        mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
+        width: data.resultAsset.width || data.width || 0,
+        height: data.resultAsset.height || data.height || 0,
+      }
+    : await uploadCanvasImageAsset(data.resultDataUrl, fallbackName, {
+        kind: 'result',
+        source,
+      })
+  const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
+  return { storedResult, imageSize }
+}
+
 async function sendCanvasAiMessage() {
   if (state.generate.aiRunning) return
   const text = dom.gInput.value.trim()
@@ -5379,7 +5713,7 @@ async function sendCanvasAiMessage() {
   const aiModelId = dom.gAiModel.value || state.generate.genModel
   const aiAspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
   const aiResolution = normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution)
-  let canvasPendingEl = null
+  const canvasPendingEls = []
 
   const userMsg = {
     id: crypto.randomUUID(),
@@ -5458,73 +5792,108 @@ async function sendCanvasAiMessage() {
       return
     }
 
-    const generationPrompt = agentData.prompt || requestText
-    setAiMessageLoading(assistantMsg, '正在生成图片并放到画布')
-    canvasPendingEl = addGeneratingPlaceholderToCanvas({
-      prompt: generationPrompt,
-      aspectRatio: aiAspectRatio,
-      resolution: aiResolution,
-    })
-    renderCanvas()
-
-    const data = await requestCanvasGenerate({
-      sessionId: state.runtime.sessionId || undefined,
-      modelId: aiModelId,
-      prompt: generationPrompt,
-      referenceImages: refImages,
-      aspectRatio: aiAspectRatio,
-      resolution: aiResolution,
-      useDesignAgent: false,
-      clientKeys: { ...state.keys },
-    }, {
-      onStatus: (message) => setAiMessageLoading(assistantMsg, message),
-    })
-
-    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-    const storedResult = data.resultAsset
-      ? {
-          assetId: data.resultAsset.id,
-          mime: data.resultAsset.mime || splitDataUrl(data.resultDataUrl)?.mime || 'image/png',
-          width: data.resultAsset.width || data.width || 0,
-          height: data.resultAsset.height || data.height || 0,
-        }
-      : await uploadCanvasImageAsset(data.resultDataUrl, `ai-${Date.now()}.png`, {
-        kind: 'result',
-        source: 'canvas_ai_sidebar',
-      })
-    const imageSize = await getImageDimensions(data.resultDataUrl).catch(() => null)
-
-    assistantMsg.imageDataUrl = data.resultDataUrl
-    assistantMsg.imageAssetId = storedResult.assetId
-    assistantMsg.imageMime = storedResult.mime
-    assistantMsg.imageName = `ai-${Date.now()}`
-    assistantMsg.aspectRatio = aiAspectRatio
-
-    if (canvasPendingEl && state.generate.elements.includes(canvasPendingEl) && canvasPendingEl.type === 'image-generator') {
-      replaceCanvasElementWithImage(canvasPendingEl, data.resultDataUrl, assistantMsg.imageName, {
-        assetId: storedResult.assetId,
-        mime: storedResult.mime,
-        aspectRatio: aiAspectRatio,
-        resolution: aiResolution,
-        prompt: generationPrompt,
-        width: imageSize?.width || storedResult.width,
-        height: imageSize?.height || storedResult.height,
-      })
-    } else {
-      addImageToCanvas(data.resultDataUrl, assistantMsg.imageName, undefined, undefined, {
-        assetId: storedResult.assetId,
-        mime: storedResult.mime,
-        aspectRatio: aiAspectRatio,
-        resolution: aiResolution,
-        prompt: generationPrompt,
-        width: imageSize?.width || storedResult.width,
-        height: imageSize?.height || storedResult.height,
-      })
+    const actions = normalizeCanvasAgentActions(agentData, requestText, aiAspectRatio, aiResolution)
+    if (!actions.length) {
+      saveRuntimeState()
+      return
     }
+    assistantMsg.workflow = actions.map((action) => ({
+      id: action.id,
+      title: action.title,
+      prompt: action.prompt,
+      status: 'queued',
+      error: '',
+    }))
+    assistantMsg.images = []
+    renderAiMessages()
+
+    let completedCount = 0
+    for (const [index, action] of actions.entries()) {
+      const workflowItem = assistantMsg.workflow[index]
+      if (workflowItem) workflowItem.status = 'running'
+      setAiMessageLoading(assistantMsg, `正在生成 ${index + 1}/${actions.length}：${action.title}`)
+      const placement = getCanvasWorkflowPlacement(index, actions.length, action.aspectRatio)
+      const pendingEl = addGeneratingPlaceholderToCanvas({
+        prompt: action.prompt,
+        aspectRatio: action.aspectRatio,
+        resolution: action.resolution,
+        x: placement.x,
+        y: placement.y,
+      })
+      canvasPendingEls.push(pendingEl)
+      renderCanvas()
+
+      try {
+        const data = await requestCanvasGenerate({
+          sessionId: state.runtime.sessionId || undefined,
+          modelId: aiModelId,
+          prompt: action.prompt,
+          referenceImages: refImages,
+          aspectRatio: action.aspectRatio,
+          resolution: action.resolution,
+          useDesignAgent: false,
+          clientKeys: { ...state.keys },
+        }, {
+          onStatus: (message) => setAiMessageLoading(assistantMsg, `${index + 1}/${actions.length} ${message}`),
+        })
+
+        state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+        const resultDataUrl = data.resultDataUrl
+        const imageName = action.title || `ai-${Date.now()}-${index + 1}`
+        const { storedResult, imageSize } = await storeCanvasGeneratedResult(
+          data,
+          `ai-${Date.now()}-${index + 1}.png`,
+          'canvas_ai_sidebar',
+        )
+        assistantMsg.images.push({
+          dataUrl: resultDataUrl,
+          assetId: storedResult.assetId,
+          mime: storedResult.mime,
+          name: imageName,
+          prompt: action.prompt,
+          actionId: action.id,
+          aspectRatio: action.aspectRatio,
+        })
+        if (!assistantMsg.imageDataUrl) {
+          assistantMsg.imageDataUrl = resultDataUrl
+          assistantMsg.imageAssetId = storedResult.assetId
+          assistantMsg.imageMime = storedResult.mime
+          assistantMsg.imageName = imageName
+          assistantMsg.aspectRatio = action.aspectRatio
+        }
+        replaceCanvasElementWithImage(pendingEl, resultDataUrl, imageName, {
+          assetId: storedResult.assetId,
+          mime: storedResult.mime,
+          aspectRatio: action.aspectRatio,
+          resolution: action.resolution,
+          prompt: action.prompt,
+          width: imageSize?.width || storedResult.width,
+          height: imageSize?.height || storedResult.height,
+        })
+        if (workflowItem) workflowItem.status = 'completed'
+        completedCount += 1
+      } catch (error) {
+        const itemError = trimError(error)
+        pendingEl.generatingStatus = ''
+        pendingEl.generatingError = `处理失败：${itemError}`
+        if (workflowItem) {
+          workflowItem.status = 'failed'
+          workflowItem.error = itemError
+        }
+      }
+      renderCanvas()
+      renderAiMessages()
+      saveRuntimeState()
+    }
+
     state.generate.aiRefs = []
     renderAiRefList()
     renderCanvas()
-    await streamAiMessageContent(assistantMsg, `${replyText}\n\n图片已添加到画布。`, { fromCurrent: true })
+    const failedCount = actions.length - completedCount
+    const finalSummary = failedCount
+      ? `${replyText}\n\n已完成 ${completedCount}/${actions.length} 张图片，${failedCount} 张生成失败。`
+      : `${replyText}\n\n已完成 ${completedCount}/${actions.length} 张图片，并已添加到画布。`
+    await streamAiMessageContent(assistantMsg, finalSummary, { fromCurrent: true })
     saveRuntimeState()
   } catch (error) {
     const message = trimError(error)
@@ -5532,11 +5901,13 @@ async function sendCanvasAiMessage() {
     assistantMsg.streaming = false
     assistantMsg.loadingText = ''
     assistantMsg.content = `处理失败：${message}`
-    if (canvasPendingEl && state.generate.elements.includes(canvasPendingEl) && canvasPendingEl.type === 'image-generator') {
-      canvasPendingEl.generatingStatus = ''
-      canvasPendingEl.generatingError = `处理失败：${message}`
-      renderCanvas()
-      saveRuntimeState()
+    for (const pendingEl of canvasPendingEls) {
+      if (pendingEl && state.generate.elements.includes(pendingEl) && pendingEl.type === 'image-generator') {
+        pendingEl.generatingStatus = ''
+        pendingEl.generatingError = `处理失败：${message}`
+        renderCanvas()
+        saveRuntimeState()
+      }
     }
     saveRuntimeState()
   } finally {
@@ -5618,25 +5989,41 @@ function bindOutfit() {
     dom.oGarmentInput.click()
   })
 
+  dom.oClearModels?.addEventListener('click', clearOutfitModels)
+  dom.oClearGarments?.addEventListener('click', clearOutfitGarments)
+
   bindDropSurface({
     surface: dom.oModelList.closest('.lane'),
     input: dom.oModelInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
-      resetLoadedWorkspaceForDraft('outfit')
       setJobTab('outfit', 'current')
+      const fileList = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      const uploads = fileList.map((file, index) => createUploadProgressState({
+        title: '模特图',
+        detail: file.name,
+        percent: 0,
+        active: index === 0,
+      }))
+      renderUploadQueue(dom.oModelUpload, uploads, { compact: true })
       state.outfit.progress = '正在读取模特图…'
       renderOutfit()
       const images = await prepareAssetItems(files, {
         onProgress: ({ current, total, filename }) => {
           state.outfit.progress = `正在上传模特图 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.oModelUpload, uploads, { compact: true })
           renderOutfit()
         },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.oModelUpload, uploads, { compact: true })
+        },
       })
-      state.outfit.models.push(...images)
-      pruneOutfitResults()
+      appendOutfitModels(images)
       state.outfit.progress = ''
       saveRuntimeState()
+      renderUploadQueue(dom.oModelUpload, [])
       renderOutfit()
     },
     clickable: false,
@@ -5647,24 +6034,33 @@ function bindOutfit() {
     input: dom.oGarmentInput,
     onFiles: async (files) => {
       if (isOutfitBusy()) return
-      resetLoadedWorkspaceForDraft('outfit')
       setJobTab('outfit', 'current')
+      const fileList = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      const uploads = fileList.map((file, index) => createUploadProgressState({
+        title: '服装图',
+        detail: file.name,
+        percent: 0,
+        active: index === 0,
+      }))
+      renderUploadQueue(dom.oGarmentUpload, uploads, { compact: true })
       state.outfit.progress = '正在读取服装图…'
       renderOutfit()
       const images = await prepareAssetItems(files, {
         onProgress: ({ current, total, filename }) => {
           state.outfit.progress = `正在上传服装图 ${current}/${total} · ${filename}`
+          setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+          renderUploadQueue(dom.oGarmentUpload, uploads, { compact: true })
           renderOutfit()
         },
+        onUploadProgress: ({ current, total, filename, percent }) => {
+          setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+          renderUploadQueue(dom.oGarmentUpload, uploads, { compact: true })
+        },
       })
-      state.outfit.garments.push(...images.map((item) => ({
-        ...item,
-        role: state.outfit.garmentType,
-        instructions: '',
-      })))
-      pruneOutfitResults()
+      appendOutfitGarments(images, state.outfit.garmentType)
       state.outfit.progress = ''
       saveRuntimeState()
+      renderUploadQueue(dom.oGarmentUpload, [])
       renderOutfit()
     },
     clickable: false,
@@ -5694,6 +6090,13 @@ function bindStyle() {
       const images = await readImageFiles(files)
       if (images.length === 0) return
       const image = images[0]
+      const upload = createUploadProgressState({
+        title: '风格源图',
+        detail: image.name,
+        percent: 0,
+        active: true,
+      })
+      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
       const uploaded = await postJson('/api/assets/upload', {
         sessionId: state.runtime.sessionId || undefined,
         kind: 'upload',
@@ -5703,6 +6106,8 @@ function bindStyle() {
         dataUrl: image.dataUrl,
       })
       state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
+      setUploadProgress(upload, { current: 1, total: 1, filename: image.name, percent: 100, active: true, done: true })
+      renderUploadQueue(dom.sSourceUpload, [upload], { compact: true })
       state.style.sourceImage = {
         id: uploaded.asset.id,
         assetId: uploaded.asset.id,
@@ -5718,6 +6123,7 @@ function bindStyle() {
       state.style.resultDataUrl = ''
       state.style.error = ''
       saveRuntimeState()
+      renderUploadQueue(dom.sSourceUpload, [])
       renderStyle()
       analyzeStyle()
     },
@@ -5745,17 +6151,32 @@ function bindStyle() {
 
   dom.sRefInput.addEventListener('change', async () => {
     if (!dom.sRefInput.files?.length || state.style.generating) return
+    const imageFiles = Array.from(dom.sRefInput.files).filter((file) => file.type.startsWith('image/'))
+    const uploads = imageFiles.map((file, index) => createUploadProgressState({
+      title: '主体参考图',
+      detail: file.name,
+      percent: 0,
+      active: index === 0,
+    }))
     state.style.styleSummary = '正在上传主体参考图…'
     renderStyle()
+    renderUploadQueue(dom.sRefUpload, uploads)
     const images = await prepareAssetItems(dom.sRefInput.files, {
       onProgress: ({ current, total, filename }) => {
         state.style.styleSummary = `正在上传主体参考图 ${current}/${total} · ${filename}`
+        setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+        renderUploadQueue(dom.sRefUpload, uploads)
         renderStyle()
+      },
+      onUploadProgress: ({ current, total, filename, percent }) => {
+        setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+        renderUploadQueue(dom.sRefUpload, uploads)
       },
     })
     state.style.subjectRefs.push(...images)
     if (!state.style.visualStyle) state.style.styleSummary = ''
     saveRuntimeState()
+    renderUploadQueue(dom.sRefUpload, [])
     renderStyle()
     dom.sRefInput.value = ''
   })
@@ -5830,12 +6251,16 @@ function renderStyle() {
   dom.sModel.disabled = busy
 
   const hasSource = Boolean(s.sourceImage)
+  const hasSourceUpload = Boolean(dom.sSourceUpload?.childElementCount)
   const hasStyle = Boolean(s.visualStyle)
   const hasResult = Boolean(s.resultDataUrl)
   const hasHistory = visibleHistory.length > 0
 
-  dom.sDropzone.classList.toggle('hidden', hasSource)
-  dom.sSourcePreview.classList.toggle('hidden', !hasSource)
+  dom.sDropzone.classList.toggle('hidden', hasSource || hasSourceUpload)
+  dom.sSourcePreview.classList.toggle('hidden', !hasSource && !hasSourceUpload)
+  if (dom.sSourceImg) dom.sSourceImg.classList.toggle('hidden', !hasSource)
+  if (dom.sClearSource) dom.sClearSource.classList.toggle('hidden', !hasSource)
+  dom.sSourceUpload?.classList.toggle('hidden', !hasSourceUpload)
   dom.sAnalyzeProgress.classList.toggle('hidden', !s.analyzing)
   dom.sStyleResult.classList.toggle('hidden', !hasStyle)
   dom.sGenerateSection.classList.toggle('hidden', !hasStyle)
@@ -5884,6 +6309,7 @@ function renderStyle() {
   }
 
   dom.sRefAdd.disabled = !hasStyle || busy
+  dom.sRefUpload?.classList.toggle('hidden', !dom.sRefUpload?.childElementCount)
   dom.sRefList.replaceChildren(...s.subjectRefs.map((ref) => {
     const thumb = document.createElement('div')
     thumb.className = 'style-ref-thumb'
@@ -6273,6 +6699,7 @@ function renderTranslate() {
   if (dom.tBodyColorPicker) dom.tBodyColorPicker.value = state.translate.bodyColor
   renderTranslateColorSwatches()
   dom.tProgress.textContent = state.translate.progress
+  dom.tUploadQueue?.classList.toggle('hidden', !dom.tUploadQueue?.childElementCount)
 
   const hasItems = showLoadedWorkspace && state.translate.items.length > 0
 
@@ -6842,6 +7269,8 @@ function renderOutfit() {
   dom.oModelAdd.disabled = busy
   if (dom.oModelLibraryOpen) dom.oModelLibraryOpen.disabled = busy
   dom.oGarmentAdd.disabled = busy
+  if (dom.oClearModels) dom.oClearModels.disabled = busy || state.outfit.models.length === 0
+  if (dom.oClearGarments) dom.oClearGarments.disabled = busy || state.outfit.garments.length === 0
   renderJobList('outfit')
 
   renderLaneList(dom.oModelList, state.outfit.models, 'model')
@@ -7024,7 +7453,6 @@ async function addSelectedModelLibraryItems() {
   const selectedItems = MODEL_LIBRARY_ITEMS.filter((item) => modelLibrarySelectedIds.has(item.id))
   if (selectedItems.length === 0) return
 
-  resetLoadedWorkspaceForDraft('outfit')
   setJobTab('outfit', 'current')
   if (dom.oModelLibraryConfirm) dom.oModelLibraryConfirm.disabled = true
   state.outfit.progress = '正在加入模特库图片…'
@@ -7038,8 +7466,7 @@ async function addSelectedModelLibraryItems() {
         total: selectedItems.length,
       }))
     }
-    state.outfit.models.push(...uploaded)
-    pruneOutfitResults()
+    appendOutfitModels(uploaded)
     state.outfit.progress = ''
     modelLibrarySelectedIds = new Set()
     saveRuntimeState()
@@ -7145,6 +7572,11 @@ async function runTranslateBatch() {
 
     const runConfig = await prepareTranslateRunConfig()
     const signature = getTranslateSignature(runConfig)
+    if (state.translate.submittingJobId && state.translate.pendingSignature === signature) {
+      state.translate.progress = '任务已提交，正在同步进度…'
+      renderTranslate()
+      return
+    }
     const needsWork = state.translate.items.some((item) =>
       state.translate.targets.some((language) => {
         const existing = item.results[language]
@@ -7181,6 +7613,8 @@ async function runTranslateBatch() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.translate.submittingJobId = data.jobId
+    state.translate.pendingSignature = signature
     upsertJobTask('translate', data.jobId, {
       type: 'translate_batch',
       status: 'queued',
@@ -7190,6 +7624,7 @@ async function runTranslateBatch() {
       thumbs: getJobTaskThumbsFromWorkspace('translate'),
       itemCount: Number(data.itemCount || 0),
       progressTotal: Number(data.itemCount || 0),
+      signature,
     })
     markJobTaskLoaded('translate', data.jobId)
     setJobTab('translate', 'current')
@@ -7200,6 +7635,7 @@ async function runTranslateBatch() {
     void syncTranslateJob(data.jobId, { applyToWorkspace: true })
   } catch (error) {
     state.translate.running = false
+    clearTranslateSubmitLock()
     state.translate.progress = trimError(error)
     renderTranslate()
   }
@@ -7212,6 +7648,11 @@ async function runOutfitBatch() {
 
   const runConfig = getOutfitRunConfig()
   const signature = getOutfitSignature(runConfig)
+  if (state.outfit.submittingJobId && state.outfit.pendingSignature === signature) {
+    state.outfit.progress = '任务已提交，正在同步进度…'
+    renderOutfit()
+    return
+  }
   const needsWork = state.outfit.models.some((model) =>
     looks.some((look) => {
       const existing = state.outfit.results[pairKey(model.id, look.id)]
@@ -7249,6 +7690,8 @@ async function runOutfitBatch() {
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.outfit.submittingJobId = data.jobId
+    state.outfit.pendingSignature = signature
     upsertJobTask('outfit', data.jobId, {
       type: 'outfit_batch',
       status: 'queued',
@@ -7258,6 +7701,7 @@ async function runOutfitBatch() {
       thumbs: getJobTaskThumbsFromWorkspace('outfit'),
       itemCount: Number(data.itemCount || 0),
       progressTotal: Number(data.itemCount || 0),
+      signature,
     })
     markJobTaskLoaded('outfit', data.jobId)
     setJobTab('outfit', 'current')
@@ -7268,6 +7712,7 @@ async function runOutfitBatch() {
     void syncOutfitJob(data.jobId, { applyToWorkspace: true })
   } catch (error) {
     state.outfit.running = false
+    clearOutfitSubmitLock()
     state.outfit.progress = trimError(error)
     renderOutfit()
   }
@@ -7535,11 +7980,23 @@ function hasOutfitActiveItems() {
 }
 
 function isTranslateBusy() {
-  return state.translate.running
+  return state.translate.running || Boolean(state.translate.submittingJobId)
 }
 
 function isOutfitBusy() {
-  return state.outfit.running
+  return state.outfit.running || Boolean(state.outfit.submittingJobId)
+}
+
+function clearTranslateSubmitLock(jobId = '') {
+  if (jobId && state.translate.submittingJobId !== jobId) return
+  state.translate.submittingJobId = ''
+  state.translate.pendingSignature = ''
+}
+
+function clearOutfitSubmitLock(jobId = '') {
+  if (jobId && state.outfit.submittingJobId !== jobId) return
+  state.outfit.submittingJobId = ''
+  state.outfit.pendingSignature = ''
 }
 
 function canRetryTranslateItem() {
@@ -8036,7 +8493,8 @@ async function readImageFiles(fileList) {
   return images
 }
 
-async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_upload', onProgress = null } = {}) {
+async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_upload', onProgress = null, onUploadProgress = null } = {}) {
+  const uploadJson = typeof postJsonWithProgress === 'function' ? postJsonWithProgress : postJson
   const images = await readImageFiles(fileList)
   const uploaded = []
 
@@ -8046,7 +8504,7 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       total: images.length,
       filename: image.name,
     })
-    const data = await postJson('/api/assets/upload', {
+    const data = await uploadJson('/api/assets/upload', {
       sessionId: state.runtime.sessionId || undefined,
       kind,
       source,
@@ -8055,6 +8513,17 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
       dataUrl: image.dataUrl,
       width: image.width || undefined,
       height: image.height || undefined,
+    }, {
+      onProgress: (event) => {
+        onUploadProgress?.({
+          current: index + 1,
+          total: images.length,
+          filename: image.name,
+          loaded: event.loaded || 0,
+          totalBytes: event.total || 0,
+          percent: event.percent || 0,
+        })
+      },
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
@@ -8135,6 +8604,16 @@ async function hydrateAiMessages(messages) {
         mime: msg.imageMime || 'image/png',
       })
     }
+    for (const image of msg.images || []) {
+      if (image.assetId && !image.dataUrl) {
+        assetRefs.push({
+          id: image.assetId,
+          assetId: image.assetId,
+          name: image.name || image.assetId,
+          mime: image.mime || 'image/png',
+        })
+      }
+    }
     for (const ref of msg.refs || []) {
       if (ref.assetId && !ref.dataUrl) {
         assetRefs.push({
@@ -8161,6 +8640,13 @@ async function hydrateAiMessages(messages) {
         next.imageName = next.imageName || image.name
       }
     }
+    next.images = (next.images || []).map((image) => {
+      if (!image.assetId || image.dataUrl) return image
+      const hydratedImage = byAssetId.get(image.assetId)
+      return hydratedImage?.dataUrl
+        ? { ...image, dataUrl: hydratedImage.dataUrl, mime: hydratedImage.mime || image.mime, name: image.name || hydratedImage.name }
+        : image
+    })
     next.refs = (next.refs || []).map((ref) => {
       if (!ref.assetId || ref.dataUrl) return ref
       const image = byAssetId.get(ref.assetId)
@@ -9104,6 +9590,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
   while (translateJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      clearTranslateSubmitLock(jobId)
       if (job?.type && job.type !== 'translate_batch') {
         removeJobTask('translate', jobId)
         saveRuntimeState()
@@ -9146,6 +9633,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
       if (status === 404 || status === 403) {
         const wasLoaded = getLoadedJobId('translate') === jobId
         removeJobTask('translate', jobId)
+        clearTranslateSubmitLock(jobId)
         if (!passive404 && wasLoaded) {
           state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
         }
@@ -9310,6 +9798,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
   while (outfitJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      clearOutfitSubmitLock(jobId)
       if (job?.type && job.type !== 'outfit_batch') {
         removeJobTask('outfit', jobId)
         saveRuntimeState()
@@ -9352,6 +9841,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
       if (status === 404 || status === 403) {
         const wasLoaded = getLoadedJobId('outfit') === jobId
         removeJobTask('outfit', jobId)
+        clearOutfitSubmitLock(jobId)
         if (!passive404 && wasLoaded) {
           state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
         }
@@ -9427,6 +9917,53 @@ async function postJson(url, body) {
     throw createHttpError(response, data)
   }
   return data
+}
+
+async function postJsonWithProgress(url, body, { onProgress = null } = {}) {
+  if (typeof XMLHttpRequest !== 'function') {
+    return postJson(url, body)
+  }
+
+  return await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url, true)
+    xhr.setRequestHeader('Content-Type', 'application/json')
+    xhr.responseType = 'text'
+
+    xhr.upload.onprogress = (event) => {
+      onProgress?.({
+        loaded: event.loaded || 0,
+        total: event.total || 0,
+        percent: event.lengthComputable && event.total
+          ? Math.round((event.loaded / event.total) * 100)
+          : 0,
+      })
+    }
+
+    xhr.onload = () => {
+      let data = {}
+      try {
+        data = JSON.parse(xhr.responseText || '{}')
+      } catch {
+        data = {}
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(createHttpError({ status: xhr.status }, data))
+        return
+      }
+      resolve(data)
+    }
+
+    xhr.onerror = () => {
+      reject(new Error('Network error'))
+    }
+
+    xhr.onabort = () => {
+      reject(new Error('Request aborted'))
+    }
+
+    xhr.send(JSON.stringify(body))
+  })
 }
 
 async function putJson(url, body) {

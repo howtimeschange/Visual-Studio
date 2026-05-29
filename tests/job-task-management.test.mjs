@@ -7,15 +7,17 @@ const APP_PATH = new URL('../public/app.js', import.meta.url)
 
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`)
-  if (start === -1) return ''
-  const paramsEnd = source.indexOf(')', start)
+  const asyncStart = source.indexOf(`async function ${name}(`)
+  const actualStart = start === -1 ? asyncStart : (asyncStart === -1 ? start : Math.min(start, asyncStart))
+  if (actualStart === -1) return ''
+  const paramsEnd = source.indexOf(')', actualStart)
   const bodyStart = source.indexOf('{', paramsEnd)
   let depth = 0
   for (let index = bodyStart; index < source.length; index += 1) {
     const char = source[index]
     if (char === '{') depth += 1
     if (char === '}') depth -= 1
-    if (depth === 0) return source.slice(start, index + 1)
+    if (depth === 0) return source.slice(actualStart, index + 1)
   }
   throw new Error(`Could not extract function ${name}`)
 }
@@ -218,6 +220,57 @@ test('outfit job task thumbnails mix model and garment references without duplic
     { src: '/api/results/dress-1', label: '服装 1' },
     { src: '/api/results/shoe-1', label: '服装 2' },
   ])
+})
+
+test('canvas generate result asset fetch retries transient empty reads', async () => {
+  const source = await readFile(APP_PATH, 'utf8')
+  const calls = []
+  const context = {
+    CANVAS_RESULT_FETCH_RETRIES: 3,
+    CANVAS_RESULT_FETCH_RETRY_DELAY_MS: 1,
+    wait: async () => {},
+    getJson: async (url) => {
+      calls.push(url)
+      if (calls.length === 1) return { asset: { id: 'asset_retry' }, dataUrl: '' }
+      return { asset: { id: 'asset_retry' }, dataUrl: 'data:image/png;base64,cmVzdWx0' }
+    },
+  }
+  vm.createContext(context)
+  vm.runInContext(extractFunction(source, 'fetchCanvasGenerateResultAsset'), context)
+
+  const result = await context.fetchCanvasGenerateResultAsset('asset_retry', 'project_1')
+
+  assert.equal(result.dataUrl, 'data:image/png;base64,cmVzdWx0')
+  assert.deepEqual(calls, [
+    '/api/assets/asset_retry?includeData=1&projectId=project_1',
+    '/api/assets/asset_retry?includeData=1&projectId=project_1',
+  ])
+})
+
+test('canvas generate result asset fetch retries transient 404 reads', async () => {
+  const source = await readFile(APP_PATH, 'utf8')
+  const calls = []
+  const context = {
+    CANVAS_RESULT_FETCH_RETRIES: 3,
+    CANVAS_RESULT_FETCH_RETRY_DELAY_MS: 1,
+    wait: async () => {},
+    getJson: async (url) => {
+      calls.push(url)
+      if (calls.length === 1) {
+        const error = new Error('not found')
+        error.status = 404
+        throw error
+      }
+      return { asset: { id: 'asset_retry_404' }, dataUrl: 'data:image/png;base64,cmVzdWx0' }
+    },
+  }
+  vm.createContext(context)
+  vm.runInContext(extractFunction(source, 'fetchCanvasGenerateResultAsset'), context)
+
+  const result = await context.fetchCanvasGenerateResultAsset('asset_retry_404', '')
+
+  assert.equal(result.dataUrl, 'data:image/png;base64,cmVzdWx0')
+  assert.equal(calls.length, 2)
 })
 
 test('history job tasks are paged five per page', async () => {
