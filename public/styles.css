@@ -2981,6 +2981,7 @@ button.ghost:disabled,
   top: 60px;
   bottom: 60px;
   width: 360px;
+  max-width: calc(100vw - (var(--space-md) * 2));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--bg-2);
@@ -3094,10 +3095,11 @@ button.ghost:disabled,
 
 .ai-sidebar-input {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(52px, auto);
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-lg) var(--space-md);
   align-items: end;
+  min-width: 0;
 }
 
 .ai-sidebar-input textarea {
@@ -3110,6 +3112,8 @@ button.ghost:disabled,
   min-height: 40px;
   padding: 0 14px;
   font-size: var(--text-sm);
+  min-width: 52px;
+  white-space: nowrap;
 }
 
 .ai-sidebar-bottom {
@@ -3167,10 +3171,11 @@ button.ghost:disabled,
 
 .ai-sidebar-controls {
   display: grid;
-  grid-template-columns: minmax(86px, 0.8fr) minmax(118px, 1.1fr) 58px 52px 64px;
+  grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
   align-items: center;
   gap: 6px;
   padding: var(--space-sm) var(--space-lg) var(--space-xs);
+  min-width: 0;
 }
 
 .ai-sidebar-select {
@@ -3183,10 +3188,12 @@ button.ghost:disabled,
 
 #g-ai-model {
   text-overflow: ellipsis;
+  grid-column: span 2;
 }
 
 .ai-sidebar-mode {
   font-weight: 600;
+  grid-column: span 2;
 }
 
 .ai-sidebar-upload-btn {
@@ -3228,7 +3235,12 @@ button.ghost:disabled,
 
 @media (max-width: 380px) {
   .ai-sidebar-controls {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 56px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #g-ai-model,
+  .ai-sidebar-mode {
+    grid-column: 1 / -1;
   }
 
   .ai-sidebar-upload-btn {
@@ -3293,6 +3305,7 @@ button.ghost:disabled,
 
 :root[data-theme="light"] .ai-sidebar {
   width: 400px;
+  max-width: calc(100vw - (var(--space-md) * 2));
   border-color: var(--line-subtle);
   border-radius: var(--radius-xl);
   background: var(--bg-2);
