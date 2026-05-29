@@ -8,12 +8,14 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 
 - **首页**：OpenLovart 风格的中心对话入口，支持从一句设计需求进入画布；展示已有功能入口和最近画布项目。
 - **画布**：无限画布、AI 生图卡片、参考图连线、AI 助手侧边栏、深浅色主题、画布项目自动保存和 PSD 分层导出。
+- **Canvas AI Agent**：读取当前画布上下文，识别用户意图和视觉语言；支持普通生图、海报/banner 模式、澄清式建议和多图 action 拆分。
 - **项目管理**：列出已保存画布项目，支持新建、刷新、打开项目，画布路由使用 `/lovart/canvas?id=...`。
 - **账号与共享**：支持邮箱密码注册/登录、HttpOnly session、项目 owner / viewer / editor 权限、邀请链接、共享项目列表和基础用量统计。
 - **管理后台**：`/admin` 提供管理员用户列表、最近登录、在线推断、用量聚合、任务明细和 API 成本字段展示。
-- **图片批量翻译**：多图 x 多语言矩阵批量执行，支持并发、字体参考图、自动重试、结果预览和下载。
+- **图片批量翻译**：多图 x 多语言矩阵批量执行，支持字体参考图、颜色策略、自动重试、结果预览和下载。
 - **批量换装**：多模特 x 多服装矩阵生成，支持模型选择、模特库、服装角色分类、组合 look、重试和批量下载。
-- **风格迁移**：上传风格源图提取视觉 DNA，再对新主体生成同风格图片。
+- **风格迁移**：上传风格源图提取视觉 DNA，可对单个主体直接生成，也可对多个主体参考图发起批量迁移任务。
+- **异步任务体系**：翻译、换装、风格迁移和直接生图统一走 D1/R2/Queue 任务链路；批量图片任务默认和上限均为 10 图并发。
 
 ## 主要页面
 
@@ -32,7 +34,8 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 - 左侧工具栏：选择、移动、上传图片、文字、画笔、AI 生图。
 - 图片元素支持移动、缩放、删除、下载，以及“用此图生成”。
 - 生图卡片支持模型、画幅比例、分辨率 `1k / 2k / 4k`、参考图和 Agent 开关。
-- AI 助手会读取当前画布上下文，判断是只做分析建议，还是生成图片并添加回画布。
+- AI 助手会读取当前画布上下文，判断是只做分析建议，还是生成图片并添加回画布；当需求缺少关键风格方向时，会先给出可点击的风格建议。
+- AI 助手支持 `普通图` 与 `海报/banner` 两种模式。海报/banner 模式会先生成无字主视觉，再由浏览器本地合成标题、副标题、CTA、徽章、暗部遮罩和安全留白，保证最终 PNG 上的文字更清晰。
 - 选中图片可导出 PSD：默认保留原图尺寸底层，也可通过 Vision / Design Agent 识别文字、规划语义图层、生成透明主体层和修补背景。
 - 首次进入画布默认展开 AI 助手。
 - 画布项目通过 `/api/canvas/projects` 系列接口保存；localStorage 作为快速缓存和恢复兜底。
@@ -48,6 +51,13 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 | `gpt-image-2` | `gpt-image-2` |
 
 图片模型统一使用 1xm.ai 的异步任务接口：`POST /v1/images/tasks` 创建任务，`GET /v1/images/tasks/{task_id}` 或 `poll_url` 轮询，成功后读取 `data[].url`/`data[].b64_json`。参考图通过 JSON `image` 字段传 data URL 数组；不要在批量任务里走长连接同步接口。
+
+批量图片任务的并发契约固定为：
+
+- 默认并发：`10`
+- 最大并发：`10`
+- 适用范围：图片批量翻译、批量换装、风格迁移批量任务
+- 单图直接生成和单轮画布生成仍按一个任务项执行
 
 ## 架构
 
@@ -65,6 +75,9 @@ Browser SPA (public/index.html + public/app.js)
   ├─ POST    /api/assets/upload
   ├─ POST    /api/jobs/translate-batch
   ├─ POST    /api/jobs/outfit-batch
+  ├─ POST    /api/jobs/style-transfer-batch
+  ├─ POST    /api/jobs/generate-direct|generate-turn
+  ├─ GET/POST/DELETE /api/jobs/:jobId
   ├─ POST    /api/style-transfer
   └─ GET     /api/results/:assetId
          │
@@ -81,7 +94,7 @@ Cloudflare Pages Functions
          │
          ├─ D1 metadata store, with in-memory fallback
          ├─ optional R2 for asset/result blobs
-         ├─ optional Queue consumer for durable jobs
+         ├─ Cloudflare Queues for durable translate/outfit/style/generate jobs
          └─ 1xm.ai relay (OpenAI-compatible)
 ```
 
@@ -128,6 +141,7 @@ docs/
   openlovart-canvas-migration-plan.md
   platform-v2-spec.md
   canvas-phase4-handoff.md
+  superpowers/plans/ — 最新功能实现计划和验证记录
 ```
 
 ## 本地开发
@@ -144,6 +158,15 @@ http://127.0.0.1:8788/
 ```
 
 如果端口被占用，Wrangler 会提示新的本地端口。
+
+需要验证 Queue consumer 时，建议同时启动 Pages 和本地队列 worker：
+
+```bash
+npm run dev:queue
+npm run dev:local-queue
+```
+
+其中 `dev:queue` 默认监听 `8798`，`dev:local-queue` 默认监听 `8788` 并把队列请求桥接到本地 worker。
 
 ## 验证
 
@@ -221,13 +244,19 @@ wrangler d1 migrations apply visual-studio --local
 wrangler d1 migrations apply visual-studio --remote
 ```
 
-将创建得到的 `database_id` 写回 `wrangler.toml` 和 `wrangler.queue.toml`。批量任务默认仍使用 Pages `waitUntil` 本地执行；部署队列消费者后可切换为 Queue 执行：
+将创建得到的 `database_id` 写回 `wrangler.toml` 和 `wrangler.queue.toml`。当前 `wrangler.toml` 已配置 `VS_QUEUE_EXECUTION_MODE = "queue"`，生产环境会优先通过 Queue 调度；本地未启动队列 worker 时可回退到 Pages `waitUntil`。
 
 ```bash
 npm run deploy:queue
 ```
 
-然后将 `VS_QUEUE_EXECUTION_MODE` 设置为 `queue`。未配置 D1/R2 时，服务端会回退到内存存储；适合本地验证，不适合作为生产持久化。
+队列配置包含：
+
+- `visual-studio-translate-jobs`
+- `visual-studio-outfit-jobs`
+- `visual-studio-jobs`，用于风格迁移批量、直接生图等通用任务
+
+未配置 D1/R2 时，服务端会回退到内存存储；适合本地验证，不适合作为生产持久化。
 
 ## 当前边界
 
