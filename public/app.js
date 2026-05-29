@@ -423,6 +423,7 @@ const state = {
     subject: '',
     generating: false,
     resultDataUrl: '',
+    batchResults: [],
     error: '',
     history: [],
   },
@@ -809,6 +810,7 @@ function hydrateStoredState() {
   state.style.colorPalette = runtime.style?.colorPalette || []
   state.style.tags = runtime.style?.tags || []
   state.style.subjectRefs = runtime.style?.subjectRefs || []
+  state.style.batchResults = runtime.style?.batchResults || []
   state.style.history = getStoredStyleHistory(storedResults, runtime.style?.history)
     .filter((entry) => entry.resultDataUrl)
 
@@ -997,6 +999,7 @@ function createRuntimeStorageSnapshot() {
       tags: state.style.tags,
       subject: state.style.subject,
       subjectRefs: state.style.subjectRefs.map((item) => serializeAssetBackedItem(item)),
+      batchResults: serializeStyleResultEntries(state.style.batchResults),
     },
   }
 }
@@ -1054,6 +1057,7 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
       subjectRefs: Array.isArray(snapshot.style?.subjectRefs)
         ? snapshot.style.subjectRefs.slice(-RUNTIME_FALLBACK_SUBJECT_REF_LIMIT)
         : [],
+      batchResults: serializeStyleResultEntries(snapshot.style?.batchResults),
     },
   }
 }
@@ -1485,6 +1489,7 @@ function sanitizeRuntimeState(raw = {}) {
       subjectRefs: Array.isArray(raw.style?.subjectRefs)
         ? raw.style.subjectRefs.map((item) => sanitizeStoredAssetItem(item)).filter(Boolean)
         : [],
+      batchResults: sanitizeStyleResultEntries(raw.style?.batchResults),
       history: sanitizeStyleHistoryEntries(raw.style?.history),
     },
   }
@@ -2612,6 +2617,38 @@ function sanitizeStyleHistoryEntries(value) {
     })
     .filter(Boolean)
     .slice(-STYLE_HISTORY_LIMIT)
+}
+
+function sanitizeStyleResultEntries(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const assetId = typeof entry?.assetId === 'string' ? entry.assetId.trim() : ''
+      const resultDataUrl = typeof entry?.resultDataUrl === 'string' ? entry.resultDataUrl : ''
+      if (!assetId && !resultDataUrl) return null
+      return {
+        id: typeof entry?.id === 'string' && entry.id ? entry.id : crypto.randomUUID(),
+        subject: typeof entry?.subject === 'string' ? entry.subject : '',
+        assetId,
+        mime: typeof entry?.mime === 'string' ? entry.mime : 'image/png',
+        resultDataUrl,
+        timestamp: Number(entry?.timestamp) || Date.now(),
+      }
+    })
+    .filter(Boolean)
+}
+
+function serializeStyleResultEntries(entries) {
+  return sanitizeStyleResultEntries(entries).map((entry) => ({
+    id: entry.id,
+    subject: entry.subject,
+    assetId: entry.assetId || '',
+    mime: entry.mime || '',
+    resultDataUrl: entry.assetId
+      ? ''
+      : (shouldInlineHistoryDataUrl(entry.resultDataUrl) ? entry.resultDataUrl : ''),
+    timestamp: entry.timestamp,
+  }))
 }
 
 function serializeStyleHistoryEntries(entries) {
@@ -6161,6 +6198,7 @@ function bindStyle() {
         state.style.colorPalette = []
         state.style.tags = []
         state.style.resultDataUrl = ''
+        state.style.batchResults = []
         state.style.error = ''
         saveRuntimeState()
         renderStyle()
@@ -6183,6 +6221,7 @@ function bindStyle() {
     state.style.colorPalette = []
     state.style.tags = []
     state.style.resultDataUrl = ''
+    state.style.batchResults = []
     state.style.error = ''
     state.style.subject = ''
     state.style.subjectRefs = []
@@ -6318,6 +6357,8 @@ function renderStyle() {
   const hasSourceUpload = Boolean(dom.sSourceUpload?.childElementCount)
   const hasStyle = Boolean(s.visualStyle)
   const hasResult = Boolean(s.resultDataUrl)
+  const batchResults = sanitizeStyleResultEntries(s.batchResults)
+  const hasBatchResults = batchResults.length > 0
   const hasHistory = visibleHistory.length > 0
 
   dom.sDropzone.classList.toggle('hidden', hasSource || hasSourceUpload)
@@ -6330,7 +6371,7 @@ function renderStyle() {
   dom.sGenerateSection.classList.toggle('hidden', !hasStyle)
   dom.sGenProgress.classList.toggle('hidden', !(s.generating || s.running || s.submittingJobId))
   if (dom.sProgress) dom.sProgress.textContent = s.progress || (s.generating ? '正在生成…' : '正在处理…')
-  dom.sResultWrap.classList.toggle('hidden', !hasResult)
+  dom.sResultWrap.classList.toggle('hidden', !hasResult && !hasBatchResults)
   dom.sError.classList.toggle('hidden', !s.error)
   dom.sHistorySection.classList.toggle('hidden', !hasHistory)
 
@@ -6405,49 +6446,81 @@ function renderStyle() {
   dom.sGenerate.disabled = (!s.subject.trim() && s.subjectRefs.length === 0) || !hasStyle || busy
   dom.sGenerate.textContent = s.subjectRefs.length > 1 ? '批量生成 ▸' : '生成 ▸'
 
-  if (hasResult) {
-    dom.sResultImg.src = s.resultDataUrl
+  if (hasResult || hasBatchResults) {
+    const title = dom.sResultWrap.querySelector('.style-section-title')
+    if (title) title.textContent = hasBatchResults ? `生成结果 · ${batchResults.length} 张` : '生成结果'
+    const imageWrap = dom.sResultWrap.querySelector('.style-result-img-wrap')
+    const actions = dom.sResultWrap.querySelector('.style-result-actions')
+    if (imageWrap) imageWrap.classList.toggle('hidden', hasBatchResults)
+    if (actions) actions.classList.toggle('hidden', hasBatchResults)
+    if (hasResult) dom.sResultImg.src = s.resultDataUrl
+    let grid = dom.sResultWrap.querySelector('.style-batch-results-grid')
+    if (!grid) {
+      grid = document.createElement('div')
+      grid.className = 'style-batch-results-grid'
+      dom.sResultWrap.append(grid)
+    }
+    grid.classList.toggle('hidden', !hasBatchResults)
+    if (hasBatchResults) {
+      grid.replaceChildren(...batchResults.map((entry, index) => createStyleResultCard(entry, {
+        index,
+        className: 'style-batch-result-card',
+      })))
+    } else {
+      grid.replaceChildren()
+    }
   }
 
   if (s.error) {
     dom.sError.textContent = s.error
   }
 
-  dom.sHistory.replaceChildren(...visibleHistory.slice().reverse().map((entry) => {
-    const card = document.createElement('div')
-    card.className = 'style-history-card'
-
-    const img = document.createElement('img')
-    img.src = entry.resultDataUrl
-    img.alt = entry.subject || '生成结果'
-    card.append(img)
-
-    const meta = document.createElement('div')
-    meta.className = 'style-history-meta'
-
-    const subj = document.createElement('div')
-    subj.className = 'style-history-subject'
-    subj.textContent = entry.subject || '（无主题）'
-    meta.append(subj)
-
-    const time = document.createElement('div')
-    time.className = 'style-history-time'
-    time.textContent = formatTimestamp(entry.timestamp)
-    meta.append(time)
-
-    card.append(meta)
-
-    card.addEventListener('click', () => {
-      openLightbox({
-        src: entry.resultDataUrl,
-        caption: `风格迁移 · ${entry.subject || ''}`,
-        downloadName: `style-transfer-${sanitizeFileName(entry.subject || 'result')}.png`,
-      })
-    })
-
-    return card
-  }))
+  dom.sHistory.replaceChildren(...visibleHistory.slice().reverse().map((entry, index) =>
+    createStyleResultCard(entry, { index, className: 'style-history-card' }),
+  ))
   renderJobList('style')
+}
+
+function createStyleResultCard(entry, { index = 0, className = 'style-history-card' } = {}) {
+  const card = document.createElement('button')
+  card.type = 'button'
+  card.className = className
+
+  const imgWrap = document.createElement('span')
+  imgWrap.className = 'style-result-thumb'
+  const img = document.createElement('img')
+  img.src = entry.resultDataUrl || assetResultUrl(entry.assetId)
+  img.alt = entry.subject || '生成结果'
+  img.loading = 'lazy'
+  imgWrap.append(img)
+  card.append(imgWrap)
+
+  const meta = document.createElement('span')
+  meta.className = 'style-history-meta'
+
+  const subj = document.createElement('span')
+  subj.className = 'style-history-subject'
+  subj.textContent = entry.subject || `结果 ${index + 1}`
+  meta.append(subj)
+
+  const time = document.createElement('span')
+  time.className = 'style-history-time'
+  time.textContent = formatTimestamp(entry.timestamp)
+  meta.append(time)
+
+  card.append(meta)
+
+  card.addEventListener('click', () => {
+    const src = entry.resultDataUrl || assetResultUrl(entry.assetId)
+    if (!src) return
+    openLightbox({
+      src,
+      caption: `风格迁移 · ${entry.subject || ''}`,
+      downloadName: `style-transfer-${sanitizeFileName(entry.subject || `result-${index + 1}`)}.png`,
+    })
+  })
+
+  return card
 }
 
 async function analyzeStyle() {
@@ -6508,6 +6581,7 @@ async function generateStyleTransfer() {
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
     state.style.resultDataUrl = data.resultDataUrl
+    state.style.batchResults = []
     state.style.generating = false
     const resultName = `style-transfer-${sanitizeFileName(state.style.subject || 'result')}.png`
     const storedResult = await uploadCanvasImageAsset(data.resultDataUrl, resultName, {
@@ -10041,8 +10115,8 @@ function applyStyleJobSnapshot(job, items) {
       byId.set(entry.id || entry.assetId, entry)
     }
     state.style.history = sanitizeStyleHistoryEntries(Array.from(byId.values()))
-    const latest = completed[completed.length - 1]
-    state.style.resultDataUrl = latest.resultDataUrl
+    state.style.batchResults = sanitizeStyleResultEntries(completed)
+    state.style.resultDataUrl = ''
     saveStyleHistory()
   }
   state.style.progress = formatBatchProgress(job)

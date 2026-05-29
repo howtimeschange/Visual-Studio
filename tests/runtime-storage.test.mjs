@@ -222,7 +222,9 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'serializeAiWorkflowItem',
     'serializeAiMessageRef',
     'sanitizeStyleHistoryEntries',
+    'sanitizeStyleResultEntries',
     'serializeStyleHistoryEntries',
+    'serializeStyleResultEntries',
     'loadResultsStore',
     'saveResultsStore',
     'pruneResultsStore',
@@ -533,6 +535,14 @@ test('runtime storage preserves style transfer draft and analyzed style', async 
       mime: 'image/png',
       dataUrl: 'data:image/png;base64,subject',
     }],
+    batchResults: [{
+      id: 'style-item-1',
+      subject: '主体 1',
+      assetId: 'style-result-1',
+      mime: 'image/png',
+      resultDataUrl: '/api/results/style-result-1',
+      timestamp: 1780056000000,
+    }],
     history: [],
   }
 
@@ -551,6 +561,7 @@ test('runtime storage preserves style transfer draft and analyzed style', async 
   assert.deepEqual(sanitized.style.colorPalette, [{ hex: '#F7F3EC', role: 'warm white' }])
   assert.deepEqual(sanitized.style.tags, ['catalog'])
   assert.equal(sanitized.style.subjectRefs[0].assetId, 'subject-asset')
+  assert.equal(sanitized.style.batchResults[0].assetId, 'style-result-1')
 })
 
 test('migrateLegacyRuntimeStorage skips already compact runtime storage', async () => {
