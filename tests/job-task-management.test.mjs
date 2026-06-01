@@ -46,6 +46,8 @@ async function createJobHarness() {
     'base64Bytes',
     'hasImageMagicBytes',
     'normalizeImageResultSrc',
+    'assetImageSrc',
+    'looksLikeBase64Blob',
     'isMachineImageName',
     'readableAssetLabel',
     'sanitizeJobTaskThumbs',
@@ -257,6 +259,22 @@ test('machine-generated image filenames use readable fallback labels', async () 
   assert.equal(harness.readableAssetLabel({ name: machineName }, '整套 1'), '整套 1')
   assert.equal(harness.readableAssetLabel({ name: machineName, label: '白色T恤' }, '整套 1'), '白色T恤')
   assert.equal(harness.readableAssetLabel({ name: 'white-shirt.png' }, '整套 1'), 'white-shirt')
+})
+
+test('asset image sources prefer valid inline data and fall back to streamed asset URLs', async () => {
+  const harness = await createJobHarness()
+  const validPng = TINY_PNG_BASE64
+  const garbageBlob = 'iwEcAqNwbmcDAQTRAQIF0QECBrBZiTPXA8j-YwnuNgMpxEYAB9IiVEZmCAAJomltCgAL0gAArBU'
+
+  assert.equal(
+    harness.assetImageSrc({ assetId: 'asset-streamed', dataUrl: garbageBlob, mime: 'image/png' }),
+    '/api/results/asset-streamed',
+  )
+  assert.equal(
+    harness.assetImageSrc({ assetId: 'asset-inline', dataUrl: validPng, mime: 'image/png' }),
+    `data:image/png;base64,${validPng}`,
+  )
+  assert.equal(harness.readableAssetLabel({ label: garbageBlob, name: `${garbageBlob}.png` }, '整套 1'), '整套 1')
 })
 
 test('style job tasks are isolated and use source plus subject thumbnails', async () => {

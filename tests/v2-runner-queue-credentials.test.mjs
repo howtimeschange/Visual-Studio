@@ -1025,7 +1025,7 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
   }
 })
 
-test('runOutfitBatchJob processes 10 queued items per queue invocation by default', async () => {
+test('runOutfitBatchJob processes 20 queued items per queue invocation by default', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
   const sent = []
@@ -1079,7 +1079,7 @@ test('runOutfitBatchJob processes 10 queued items per queue invocation by defaul
       filename: 'model.png',
     })
     const garments = []
-    for (let index = 0; index < 11; index += 1) {
+    for (let index = 0; index < 21; index += 1) {
       garments.push(await mod.createAsset(env, {
         sessionId: session.id,
         userId: null,
@@ -1110,9 +1110,9 @@ test('runOutfitBatchJob processes 10 queued items per queue invocation by defaul
     let job = await mod.getJob(env, submitted.jobId)
     let items = await mod.listJobItems(env, submitted.jobId)
     assert.equal(job.status, 'queued')
-    assert.equal(items.filter((item) => item.status === 'completed').length, 10)
+    assert.equal(items.filter((item) => item.status === 'completed').length, 20)
     assert.equal(items.filter((item) => item.status === 'queued').length, 1)
-    assert.equal(imageCalls, 10)
+    assert.equal(imageCalls, 20)
     assert.equal(sent.length, 2)
 
     await mod.runQueuedJob(env, submitted.jobId)
@@ -1120,9 +1120,9 @@ test('runOutfitBatchJob processes 10 queued items per queue invocation by defaul
     job = await mod.getJob(env, submitted.jobId)
     items = await mod.listJobItems(env, submitted.jobId)
     assert.equal(job.status, 'completed')
-    assert.equal(items.filter((item) => item.status === 'completed').length, 11)
-    assert.equal(imageCalls, 11)
-    assert.equal(visionCalls, 11)
+    assert.equal(items.filter((item) => item.status === 'completed').length, 21)
+    assert.equal(imageCalls, 21)
+    assert.equal(visionCalls, 21)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()

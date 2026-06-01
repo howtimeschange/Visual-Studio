@@ -111,6 +111,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         models: [],
         garments: [],
         results: {},
+        loadedLookIdOverrides: null,
         concurrency: 10,
       },
       style: {
@@ -140,6 +141,17 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
       dataUrl: item.dataUrl || '',
       results: item.results || {},
     })),
+    hydrateAssetRefs: async (items) => items.map((item) => ({
+      ...item,
+      id: item.assetId || item.id,
+      assetId: item.assetId || item.id,
+      dataUrl: `/api/results/${item.assetId || item.id}`,
+      base64: '',
+      results: item.results || {},
+    })),
+    assetResultUrl: (assetId) => `/api/results/${encodeURIComponent(assetId)}`,
+    formatBatchProgress: (job) => `${Number(job?.progressDone || 0)} / ${Number(job?.progressTotal || 0)}`,
+    renderOutfit: () => {},
     normalizeAspectRatio: (value, fallback = '1:1') => (
       ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(String(value || '').trim())
         ? String(value).trim()
@@ -268,6 +280,23 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'hydrateTranslateWorkspaceFromJob',
     'hydrateOutfitWorkspaceFromJob',
     'mapOutfitJobItem',
+    'applyOutfitJobSnapshot',
+    'assetResultUrl',
+    'formatBatchProgress',
+    'getOutfitSignatureFromJob',
+    'getOutfitSignature',
+    'getOutfitModelFingerprint',
+    'getOutfitGarmentFingerprint',
+    'pairKey',
+    'getAssetBackedId',
+    'getOutfitResultKey',
+    'buildOutfitLookIdOverrides',
+    'buildOutfitLooks',
+    'createLook',
+    'dedupeOutfitLooks',
+    'cartesianGarmentItems',
+    'expandOutfitLooks',
+    'garmentRoleOrder',
     'getTranslateSignature',
   ]
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
@@ -378,6 +407,60 @@ test('queued outfit items with upstream image tasks render as model processing',
   assert.equal(mapped.status, 'model_pending')
   assert.equal(mapped.taskStatus, 'running')
   assert.equal(mapped.attempt, 1)
+})
+
+test('outfit history hydration uses asset URLs and backend look ids for completed results', async () => {
+  const harness = await createRuntimeHarness()
+
+  await harness.hydrateOutfitWorkspaceFromJob({
+    configJson: {
+      modelId: 'nano-banana-2',
+      concurrency: 10,
+    },
+  }, [{
+    id: 'outfit-item-history',
+    inputJson: {
+      modelAssetId: 'model_1',
+      modelLabel: '成人女模 1',
+      modelInstructions: '',
+      lookAssetIds: ['garment_1'],
+      lookRoles: ['full_outfit'],
+      lookLabels: ['iwEcAqNwbmcDAQTRAQIF0QECBrAgeduInPURSAnuNgMvxO0AB9IiVEZmCAAJomltCgAL0gAAsYA'],
+      lookInstructions: [''],
+      lookId: 'server-look-1',
+    },
+  }])
+
+  const looks = harness.buildOutfitLooks({ lookIdOverrides: harness.state.outfit.loadedLookIdOverrides })
+
+  assert.equal(harness.state.outfit.models[0].dataUrl, '/api/results/model_1')
+  assert.equal(harness.state.outfit.garments[0].dataUrl, '/api/results/garment_1')
+  assert.equal(harness.state.outfit.garments[0].label, '整套 1')
+  assert.equal(looks[0].id, 'server-look-1')
+
+  harness.state.outfit.models[0].id = 'local-model-id'
+  harness.state.outfit.garments[0].id = 'local-garment-id'
+  harness.applyOutfitJobSnapshot({
+    configJson: { modelId: 'nano-banana-2' },
+    progressDone: 1,
+    progressTotal: 1,
+  }, [{
+    id: 'outfit-item-history',
+    status: 'completed',
+    attemptCount: 1,
+    inputJson: {
+      modelAssetId: 'model_1',
+      lookAssetIds: ['garment_1'],
+      lookId: 'server-look-1',
+    },
+    outputJson: {
+      resultAssetId: 'result_1',
+    },
+  }])
+
+  assert.equal(harness.getOutfitResultKey(harness.state.outfit.models[0], looks[0]), 'model_1::server-look-1')
+  assert.equal(harness.state.outfit.results['model_1::server-look-1'].status, 'done')
+  assert.equal(harness.state.outfit.results['model_1::server-look-1'].dataUrl, '/api/results/result_1')
 })
 
 test('sanitizeTranslatePrefs keeps uploaded font reference preferences and drops removed preset mode', async () => {

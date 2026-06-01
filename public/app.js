@@ -395,6 +395,7 @@ const state = {
     models: [],
     garments: [],
 	    results: {},
+    loadedLookIdOverrides: null,
 	    running: false,
 	    submittingJobId: '',
 	    pendingSignature: '',
@@ -1927,6 +1928,7 @@ function renderUploadQueue(container, uploads = [], options = {}) {
 function clearOutfitModels() {
   if (isOutfitBusy()) return
   state.outfit.models = []
+  state.outfit.loadedLookIdOverrides = null
   pruneOutfitResults()
   saveRuntimeState()
   renderOutfit()
@@ -1935,6 +1937,7 @@ function clearOutfitModels() {
 function clearOutfitGarments() {
   if (isOutfitBusy()) return
   state.outfit.garments = []
+  state.outfit.loadedLookIdOverrides = null
   pruneOutfitResults()
   saveRuntimeState()
   renderOutfit()
@@ -1942,12 +1945,14 @@ function clearOutfitGarments() {
 
 function appendOutfitModels(images = []) {
   if (!Array.isArray(images) || images.length === 0) return
+  state.outfit.loadedLookIdOverrides = null
   state.outfit.models.push(...images)
   pruneOutfitResults()
 }
 
 function appendOutfitGarments(images = [], garmentType = state.outfit.garmentType) {
   if (!Array.isArray(images) || images.length === 0) return
+  state.outfit.loadedLookIdOverrides = null
   state.outfit.garments.push(...images.map((item) => ({
     ...item,
     role: garmentType,
@@ -2659,6 +2664,13 @@ function isRenderableImageSrc(value) {
   return Boolean(normalizeImageResultSrc(value))
 }
 
+function assetImageSrc(item = {}, projectId = '') {
+  const dataUrl = normalizeImageResultSrc(item.dataUrl, item.mime || 'image/png')
+  if (dataUrl) return dataUrl
+  const assetId = String(item.assetId || item.id || '').trim()
+  return assetId ? assetResultUrl(assetId, projectId) : ''
+}
+
 function base64Bytes(value, maxBytes = 16) {
   const clean = String(value || '').replace(/\s+/g, '')
   if (!clean || !/^[A-Za-z0-9+/=]+$/.test(clean)) return []
@@ -2731,9 +2743,9 @@ function isMachineImageName(value) {
 
 function readableAssetLabel(item = {}, fallback = '图片') {
   const label = String(item.label || '').trim()
-  if (label && !isMachineImageName(label)) return label
+  if (label && !isMachineImageName(label) && !looksLikeBase64Blob(label)) return label
   const name = basename(item.name || '')
-  if (name && !isMachineImageName(name)) return name
+  if (name && !isMachineImageName(name) && !looksLikeBase64Blob(name)) return name
   return fallback
 }
 
@@ -8110,7 +8122,7 @@ function canDeleteProject(project) {
 function renderOutfit() {
   const busy = isOutfitBusy()
   const showLoadedWorkspace = shouldShowLoadedJobWorkspace('outfit')
-  const looks = buildOutfitLooks()
+  const looks = buildOutfitLooks({ lookIdOverrides: showLoadedWorkspace ? state.outfit.loadedLookIdOverrides : null })
   const runEstimate = formatOutfitRunEstimate(state.outfit.models.length, looks.length)
   dom.oModel.value = state.outfit.model
   dom.oGarmentType.value = state.outfit.garmentType
@@ -8344,8 +8356,10 @@ function renderLaneList(container, items, kind) {
     node.className = `lane-thumb${kind === 'garment' ? ' lane-thumb-garment' : ''}`
 
     const image = document.createElement('img')
-    image.src = item.dataUrl
-    image.alt = item.name
+    image.src = assetImageSrc(item)
+    image.alt = readableAssetLabel(item, kind === 'model' ? '模特' : getGarmentRoleLabel(item.role || 'full_outfit'))
+    image.loading = 'lazy'
+    image.decoding = 'async'
     node.append(image)
 
     const remove = document.createElement('button')
@@ -8361,6 +8375,7 @@ function renderLaneList(container, items, kind) {
       } else {
         state.outfit.garments = state.outfit.garments.filter((entry) => entry.id !== item.id)
       }
+      state.outfit.loadedLookIdOverrides = null
       pruneOutfitResults()
       saveRuntimeState()
       renderOutfit()
@@ -8380,6 +8395,7 @@ function renderLaneList(container, items, kind) {
       }
       roleSelect.addEventListener('change', () => {
         item.role = roleSelect.value
+        state.outfit.loadedLookIdOverrides = null
         pruneOutfitResults()
         saveRuntimeState()
         renderOutfit()
@@ -8401,6 +8417,7 @@ function renderLaneList(container, items, kind) {
       })
       instructionInput.addEventListener('change', () => {
         item.instructions = normalizeGarmentInstructions(instructionInput.value)
+        state.outfit.loadedLookIdOverrides = null
         saveRuntimeState()
         if (kind === 'model') pruneOutfitResults()
         renderOutfit()
@@ -8510,7 +8527,7 @@ async function runOutfitBatch() {
   }
   const needsWork = state.outfit.models.some((model) =>
     looks.some((look) => {
-      const existing = state.outfit.results[pairKey(model.id, look.id)]
+      const existing = state.outfit.results[getOutfitResultKey(model, look)]
       return !(existing?.status === 'done' && existing.signature === signature)
     }),
   )
@@ -8536,7 +8553,7 @@ async function runOutfitBatch() {
       garments: state.outfit.garments.map((item) => ({
         assetId: item.assetId || item.id,
         role: item.role || 'full_outfit',
-        label: basename(item.name),
+        label: readableAssetLabel(item, getGarmentRoleLabel(item.role || 'full_outfit')),
         instructions: normalizeGarmentInstructions(item.instructions),
       })),
       modelId: runConfig.modelId,
@@ -8729,9 +8746,9 @@ async function retryTranslateJob(itemId, language) {
 
 async function retryOutfitJob(modelId, lookId) {
   if (!canRetryOutfitItem()) return
-  const model = state.outfit.models.find((entry) => entry.id === modelId)
-  const look = buildOutfitLooks().find((entry) => entry.id === lookId)
-  const result = state.outfit.results[pairKey(modelId, lookId)]
+  const model = state.outfit.models.find((entry) => entry.id === modelId || entry.assetId === modelId)
+  const look = buildOutfitLooks({ lookIdOverrides: state.outfit.loadedLookIdOverrides }).find((entry) => entry.id === lookId)
+  const result = model && look ? state.outfit.results[getOutfitResultKey(model, look)] : null
   if (!model || !look) return
 
   if (!state.outfit.jobId || !result?.itemId) {
@@ -8784,6 +8801,8 @@ function createPreviewButton({
   const image = document.createElement('img')
   image.src = imageSrc || ''
   image.alt = alt || ''
+  image.loading = 'lazy'
+  image.decoding = 'async'
   if (imageClassName) {
     image.className = imageClassName
   }
@@ -8892,8 +8911,8 @@ function createVisualHeaderCell(item) {
   cell.className = 'matrix-head'
 
   cell.append(createPreviewButton({
-    src: item.dataUrl,
-    alt: item.name,
+    src: assetImageSrc(item),
+    alt: readableAssetLabel(item, '模特'),
     caption: readableAssetLabel(item, '模特'),
     downloadName: `${sanitizeFileName(readableAssetLabel(item, 'model'))}.png`,
     className: 'img-button',
@@ -8910,12 +8929,12 @@ function createVisualHeaderCell(item) {
 
 function getOutfitLookPreviewItems(look) {
   return (Array.isArray(look?.items) ? look.items : [])
-    .filter((item) => item?.dataUrl)
     .map((item) => ({
-      src: item.dataUrl,
-      alt: item.name || item.label || '',
+      src: assetImageSrc(item),
+      alt: readableAssetLabel(item, getGarmentRoleLabel(item.role || 'full_outfit')),
       label: readableAssetLabel(item, getGarmentRoleLabel(item.role || 'full_outfit')),
     }))
+    .filter((item) => item.src)
 }
 
 function createOutfitLookPreview(look) {
@@ -8943,6 +8962,8 @@ function createOutfitLookPreview(look) {
     image.className = 'matrix-thumb matrix-thumb-stack-item'
     image.src = item.src
     image.alt = item.alt || `${look.label} ${index + 1}`
+    image.loading = 'lazy'
+    image.decoding = 'async'
     image.style.setProperty('--stack-index', String(index))
     image.style.setProperty('--stack-total', String(Math.min(previewItems.length, 4)))
     stack.append(image)
@@ -8983,17 +9004,17 @@ function createImageLabelCell(item) {
   const cell = document.createElement('td')
 
   cell.append(createPreviewButton({
-    src: item.dataUrl,
-    alt: item.name,
-    caption: basename(item.name),
-    downloadName: `${sanitizeFileName(basename(item.name))}.png`,
+    src: assetImageSrc(item),
+    alt: readableAssetLabel(item, '图片'),
+    caption: readableAssetLabel(item, '图片'),
+    downloadName: `${sanitizeFileName(readableAssetLabel(item, 'image'))}.png`,
     className: 'img-button',
     imageClassName: 'thumb',
   }))
 
   const name = document.createElement('div')
   name.className = 'grid-meta'
-  name.textContent = basename(item.name)
+  name.textContent = readableAssetLabel(item, '图片')
   cell.append(name)
 
   return cell
@@ -9118,7 +9139,7 @@ function createTranslateResultCell(item, language, signature) {
 function createOutfitResultCell(model, look, signature) {
   const cell = document.createElement('td')
   cell.className = 'cell'
-  const result = state.outfit.results[pairKey(model.id, look.id)]
+  const result = state.outfit.results[getOutfitResultKey(model, look)]
 
   if (!result) {
     cell.append(createStatusLine('待生成'))
@@ -9162,7 +9183,7 @@ function createOutfitResultCell(model, look, signature) {
     retry.disabled = !canRetryOutfitItem()
     if (retry.disabled) retry.title = '当前批量任务结束后可重试'
     retry.addEventListener('click', () => {
-      retryOutfitJob(model.id, look.id)
+      retryOutfitJob(getAssetBackedId(model), look.id)
     })
     actions.append(retry)
 
@@ -9457,7 +9478,8 @@ async function hydrateAssetItems(items, projectId = '') {
     try {
       const projectParam = projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''
       const data = await getJson(`/api/assets/${encodeURIComponent(item.assetId || item.id)}?includeData=1${projectParam}`)
-      if (!data?.asset || !data?.dataUrl) return null
+      if (!data?.asset) return null
+      const dataUrl = normalizeImageResultSrc(data?.dataUrl, data.asset.mime || item.mime || 'image/png')
       return {
         ...item,
         id: data.asset.id,
@@ -9466,8 +9488,35 @@ async function hydrateAssetItems(items, projectId = '') {
         mime: data.asset.mime || item.mime || 'image/png',
         width: data.asset.width || item.width || null,
         height: data.asset.height || item.height || null,
-        dataUrl: data.dataUrl,
-        base64: splitDataUrl(data.dataUrl)?.base64 || '',
+        dataUrl: dataUrl || assetResultUrl(data.asset.id, projectId),
+        base64: dataUrl ? (splitDataUrl(dataUrl)?.base64 || '') : '',
+      }
+    } catch {
+      return null
+    }
+  }))
+
+  return hydrated.filter(Boolean)
+}
+
+async function hydrateAssetRefs(items, projectId = '') {
+  const hydrated = await Promise.all(items.map(async (item) => {
+    const assetId = String(item.assetId || item.id || '').trim()
+    if (!assetId) return null
+    try {
+      const projectParam = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+      const data = await getJson(`/api/assets/${encodeURIComponent(assetId)}${projectParam}`)
+      if (!data?.asset) return null
+      return {
+        ...item,
+        id: data.asset.id,
+        assetId: data.asset.id,
+        name: item.name || data.asset.filename || data.asset.id,
+        mime: data.asset.mime || item.mime || 'image/png',
+        width: data.asset.width || item.width || null,
+        height: data.asset.height || item.height || null,
+        dataUrl: assetResultUrl(data.asset.id, projectId),
+        base64: '',
       }
     } catch {
       return null
@@ -10222,8 +10271,8 @@ async function restoreRuntimeState() {
 
   const [translateItems, outfitModels, outfitGarments] = await Promise.all([
     hydrateAssetItems(runtime.translate.items),
-    hydrateAssetItems(runtime.outfit.models),
-    hydrateAssetItems(runtime.outfit.garments),
+    hydrateAssetRefs(runtime.outfit.models),
+    hydrateAssetRefs(runtime.outfit.garments),
   ])
 
   state.translate.items = translateItems.map((item) => ({ ...item, results: {} }))
@@ -10655,8 +10704,8 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
     })
 
   const [hydratedModels, hydratedGarments] = await Promise.all([
-    hydrateAssetItems(missingModels),
-    hydrateAssetItems(missingGarments),
+    hydrateAssetRefs(missingModels),
+    hydrateAssetRefs(missingGarments),
   ])
   state.outfit.models = [
     ...state.outfit.models.filter((item) => modelIds.includes(item.assetId || item.id)).map((item) => ({
@@ -10687,6 +10736,7 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
     ...item,
     label: readableAssetLabel(item, `${getGarmentRoleLabel(item.role || 'full_outfit')} ${index + 1}`),
   }))
+  state.outfit.loadedLookIdOverrides = buildOutfitLookIdOverrides(items)
   state.outfit.model = getModel(job?.configJson?.modelId)?.id || state.outfit.model
   state.outfit.concurrency = clamp(
     Number(job?.configJson?.concurrency) || state.outfit.concurrency,
@@ -11247,8 +11297,8 @@ async function copyTextToClipboard(text) {
 }
 
 function pruneOutfitResults() {
-  const validModelIds = new Set(state.outfit.models.map((item) => item.id))
-  const validLookIds = new Set(buildOutfitLooks().map((look) => look.id))
+  const validModelIds = new Set(state.outfit.models.flatMap((item) => [item.id, item.assetId]).filter(Boolean))
+  const validLookIds = new Set(buildOutfitLooks({ lookIdOverrides: state.outfit.loadedLookIdOverrides }).map((look) => look.id))
   const next = {}
 
   for (const [key, value] of Object.entries(state.outfit.results)) {
@@ -11417,6 +11467,28 @@ function pairKey(modelId, garmentId) {
   return `${modelId}::${garmentId}`
 }
 
+function getAssetBackedId(item = {}) {
+  return String(item?.assetId || item?.id || '').trim()
+}
+
+function getOutfitResultKey(model, look) {
+  return pairKey(getAssetBackedId(model), String(look?.id || '').trim())
+}
+
+function buildOutfitLookIdOverrides(items = []) {
+  const overrides = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const lookId = String(item?.inputJson?.lookId || '').trim()
+    const assetIds = Array.isArray(item?.inputJson?.lookAssetIds)
+      ? item.inputJson.lookAssetIds.map(String).filter(Boolean)
+      : []
+    if (!lookId || assetIds.length === 0) continue
+    const key = [...assetIds].sort().join('+')
+    if (key && !overrides.has(key)) overrides.set(key, lookId)
+  }
+  return overrides
+}
+
 function getTranslateSignature(config) {
   return JSON.stringify({
     sourceLanguage: config.sourceLanguage,
@@ -11463,7 +11535,7 @@ function normalizeOutfitGarmentInstructions() {
   }
 }
 
-function buildOutfitLooks() {
+function buildOutfitLooks({ lookIdOverrides = null } = {}) {
   const groups = {
     full_outfit: state.outfit.garments.filter((item) => (item.role || 'full_outfit') === 'full_outfit'),
     dress: state.outfit.garments.filter((item) => item.role === 'dress'),
@@ -11524,7 +11596,7 @@ function buildOutfitLooks() {
     looks = expandOutfitLooks(looks, optionalAccessory)
   }
 
-  return dedupeOutfitLooks(looks)
+  return dedupeOutfitLooks(looks, lookIdOverrides)
 }
 
 function cartesianGarmentItems(groups) {
@@ -11552,10 +11624,10 @@ function expandOutfitLooks(looks, items) {
   return next
 }
 
-function dedupeOutfitLooks(looks) {
+function dedupeOutfitLooks(looks, lookIdOverrides = null) {
   const map = new Map()
   for (const items of looks) {
-    const look = createLook(items)
+    const look = createLook(items, lookIdOverrides)
     if (!map.has(look.id)) {
       map.set(look.id, look)
     }
@@ -11563,13 +11635,14 @@ function dedupeOutfitLooks(looks) {
   return [...map.values()]
 }
 
-function createLook(items) {
+function createLook(items, lookIdOverrides = null) {
   const orderedItems = [...items].sort((a, b) => garmentRoleOrder(a.role) - garmentRoleOrder(b.role))
+  const assetKey = orderedItems.map((item) => item.assetId || item.id).sort().join('+')
   const labels = orderedItems.map((item, index) =>
     readableAssetLabel(item, `${getGarmentRoleLabel(item.role || 'full_outfit')} ${index + 1}`),
   )
   return {
-    id: orderedItems.map((item) => item.id).join('+'),
+    id: lookIdOverrides?.get(assetKey) || orderedItems.map((item) => item.assetId || item.id).join('+'),
     items: orderedItems,
     roles: orderedItems.map((item) => item.role || 'full_outfit'),
     label: labels.join(' + '),

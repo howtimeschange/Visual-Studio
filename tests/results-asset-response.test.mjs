@@ -86,7 +86,8 @@ test('results route streams R2 object bytes without data-url rehydration', async
 
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('content-type'), 'image/png')
-    assert.equal(response.headers.get('cache-control'), 'private, max-age=3600')
+    assert.equal(response.headers.get('cache-control'), 'private, max-age=86400, immutable')
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
     assert.equal(resultStats.get, 1)
     assert.equal(resultStats.arrayBuffer, 0)
     assert.deepEqual(Array.from(new Uint8Array(await response.arrayBuffer())), [137, 80, 78, 71, 13, 10, 26, 10])

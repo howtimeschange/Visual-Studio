@@ -20,7 +20,8 @@ function resultHeaders(mime: string, filename: string) {
     'Content-Type': mime,
     'Content-Disposition': `inline; filename="${filename}"`,
     'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'private, max-age=3600',
+    'Cache-Control': 'private, max-age=86400, immutable',
+    'X-Content-Type-Options': 'nosniff',
   }
 }
 

@@ -52,13 +52,14 @@ type RunQueuedJobResult = { jobId: string; status: string; skipped?: boolean; re
 const DEFAULT_TRANSLATE_MODEL_ID = 'gpt-image-2'
 const DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const MAX_ASYNC_IMAGE_JOB_CONCURRENCY = 10
+const MAX_JOB_ITEMS_PER_RUN = 20
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 5 * 60_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
-const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 1
+const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
-const DEFAULT_OUTFIT_ITEMS_PER_RUN = 10
+const DEFAULT_OUTFIT_ITEMS_PER_RUN = 20
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -376,7 +377,7 @@ function countPendingItems(items: JobItemRecord[]): number {
 }
 
 function resolveItemsPerRun(value: unknown, fallback: number): number {
-  return clampInt(value, 1, MAX_ASYNC_IMAGE_JOB_CONCURRENCY, fallback)
+  return clampInt(value, 1, MAX_JOB_ITEMS_PER_RUN, fallback)
 }
 
 function isRetryableError(error: any): boolean {
