@@ -2004,7 +2004,7 @@ function getJobTaskThumbsFromItems(kind, items = []) {
 
 function addJobTaskThumbFromItem(thumbs, seen, item, label) {
   if (!item) return
-  const src = String(item.dataUrl || '').trim() || assetResultUrl(item.assetId || item.id)
+  const src = normalizeImageResultSrc(item.dataUrl, item.mime || 'image/png') || assetResultUrl(item.assetId || item.id)
   const key = String(item.assetId || item.id || src).trim()
   if (!src || !key || seen.has(key) || thumbs.length >= 3) return
   seen.add(key)
@@ -2194,7 +2194,14 @@ async function loadJobIntoWorkspace(kind, jobId) {
       else renderOutfit()
       return
     }
-    task.error = trimError(error)
+    if (status === 401) {
+      task.error = '请先登录后查看这个云端任务'
+      showAuthView({ returnTo: window.location.pathname + window.location.search })
+    } else if (status === 429) {
+      task.error = '云端读取太频繁，请稍后再试'
+    } else {
+      task.error = trimError(error)
+    }
     clearJobTaskLoaded(kind)
     saveRuntimeState()
     if (kind === 'translate') renderTranslate()
@@ -2633,17 +2640,101 @@ function shouldInlineHistoryDataUrl(value) {
 function normalizeImageResultSrc(value, mime = 'image/png') {
   const text = String(value || '').trim()
   if (!text) return ''
-  if (/^(data:image\/|https?:\/\/|\/api\/results\/)/i.test(text)) return text
-  if (/^[A-Za-z0-9+/=]+$/.test(text) && text.length > 80) {
+  const dataUrlMatch = text.match(/^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (dataUrlMatch) {
+    const base64 = dataUrlMatch[2].replace(/\s+/g, '')
+    return hasImageMagicBytes(base64) ? `data:${dataUrlMatch[1]};base64,${base64}` : ''
+  }
+  if (/^(https?:\/\/|\/api\/results\/)/i.test(text)) return text
+  if (/^[A-Za-z0-9+/=\s]+$/.test(text) && text.replace(/\s+/g, '').length > 80) {
+    const base64 = text.replace(/\s+/g, '')
+    if (!hasImageMagicBytes(base64)) return ''
     const safeMime = /^image\/[\w.+-]+$/i.test(String(mime || '')) ? mime : 'image/png'
-    return `data:${safeMime};base64,${text}`
+    return `data:${safeMime};base64,${base64}`
   }
   return ''
+}
+
+function isRenderableImageSrc(value) {
+  return Boolean(normalizeImageResultSrc(value))
+}
+
+function base64Bytes(value, maxBytes = 16) {
+  const clean = String(value || '').replace(/\s+/g, '')
+  if (!clean || !/^[A-Za-z0-9+/=]+$/.test(clean)) return []
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  const bytes = []
+  let buffer = 0
+  let bits = 0
+  for (const char of clean) {
+    if (char === '=') break
+    const code = alphabet.indexOf(char)
+    if (code < 0) return []
+    buffer = (buffer << 6) | code
+    bits += 6
+    while (bits >= 8) {
+      bits -= 8
+      bytes.push((buffer >> bits) & 0xff)
+      if (bytes.length >= maxBytes) return bytes
+      buffer &= (1 << bits) - 1
+    }
+  }
+  return bytes
+}
+
+function hasImageMagicBytes(value) {
+  const bytes = base64Bytes(value, 16)
+  if (bytes.length < 3) return false
+  const isPng = bytes.length >= 8
+    && bytes[0] === 0x89
+    && bytes[1] === 0x50
+    && bytes[2] === 0x4e
+    && bytes[3] === 0x47
+    && bytes[4] === 0x0d
+    && bytes[5] === 0x0a
+    && bytes[6] === 0x1a
+    && bytes[7] === 0x0a
+  const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  const isGif = bytes.length >= 6
+    && bytes[0] === 0x47
+    && bytes[1] === 0x49
+    && bytes[2] === 0x46
+    && bytes[3] === 0x38
+    && (bytes[4] === 0x37 || bytes[4] === 0x39)
+    && bytes[5] === 0x61
+  const isWebp = bytes.length >= 12
+    && bytes[0] === 0x52
+    && bytes[1] === 0x49
+    && bytes[2] === 0x46
+    && bytes[3] === 0x46
+    && bytes[8] === 0x57
+    && bytes[9] === 0x45
+    && bytes[10] === 0x42
+    && bytes[11] === 0x50
+  return isPng || isJpeg || isGif || isWebp
 }
 
 function looksLikeBase64Blob(value) {
   const text = String(value || '').trim()
   return text.length > 32 && /^[A-Za-z0-9+/=]+$/.test(text)
+}
+
+function isMachineImageName(value) {
+  const text = basename(String(value || '').trim())
+  if (!text || text.length < 28) return false
+  return /^[A-Za-z0-9_-]+$/.test(text)
+    && /[A-Z]/.test(text)
+    && /[a-z]/.test(text)
+    && /[0-9]/.test(text)
+    && !/[\s\u4e00-\u9fff]/.test(text)
+}
+
+function readableAssetLabel(item = {}, fallback = '图片') {
+  const label = String(item.label || '').trim()
+  if (label && !isMachineImageName(label)) return label
+  const name = basename(item.name || '')
+  if (name && !isMachineImageName(name)) return name
+  return fallback
 }
 
 function normalizeStyleResultEntry(entry = {}) {
@@ -2718,7 +2809,7 @@ function sanitizeJobTaskThumbs(value) {
   const seen = new Set()
   return value
     .map((thumb) => ({
-      src: String(thumb?.src || '').trim(),
+      src: normalizeImageResultSrc(thumb?.src),
       label: String(thumb?.label || '').trim(),
     }))
     .filter((thumb) => {
@@ -8303,7 +8394,7 @@ function renderLaneList(container, items, kind) {
       instructionInput.placeholder = kind === 'model' ? '这个模特的特殊要求…' : '这个款的特殊要求…'
       instructionInput.value = item.instructions || ''
       instructionInput.disabled = busy
-      instructionInput.setAttribute('aria-label', `${item.label || basename(item.name)} 的额外要求`)
+      instructionInput.setAttribute('aria-label', `${readableAssetLabel(item, kind === 'model' ? '模特' : getGarmentRoleLabel(item.role || 'full_outfit'))} 的额外要求`)
       instructionInput.addEventListener('input', () => {
         item.instructions = instructionInput.value.slice(0, 800)
         saveRuntimeState()
@@ -8319,7 +8410,7 @@ function renderLaneList(container, items, kind) {
 
     const caption = document.createElement('div')
     caption.className = 'lane-name'
-    caption.textContent = item.label || basename(item.name)
+    caption.textContent = readableAssetLabel(item, kind === 'model' ? '模特' : getGarmentRoleLabel(item.role || 'full_outfit'))
     node.append(caption)
 
     return node
@@ -8684,13 +8775,14 @@ function createPreviewButton({
   className = 'img-button',
   imageClassName = '',
 }) {
+  const imageSrc = normalizeImageResultSrc(src)
   const button = document.createElement('button')
   button.type = 'button'
   button.className = className
-  button.disabled = !src
+  button.disabled = !imageSrc
 
   const image = document.createElement('img')
-  image.src = src || ''
+  image.src = imageSrc || ''
   image.alt = alt || ''
   if (imageClassName) {
     image.className = imageClassName
@@ -8698,7 +8790,7 @@ function createPreviewButton({
   button.append(image)
 
   button.addEventListener('click', () => {
-    openLightbox({ src, caption, downloadName })
+    openLightbox({ src: imageSrc, caption, downloadName })
   })
 
   return button
@@ -8802,15 +8894,15 @@ function createVisualHeaderCell(item) {
   cell.append(createPreviewButton({
     src: item.dataUrl,
     alt: item.name,
-    caption: basename(item.name),
-    downloadName: `${sanitizeFileName(basename(item.name))}.png`,
+    caption: readableAssetLabel(item, '模特'),
+    downloadName: `${sanitizeFileName(readableAssetLabel(item, 'model'))}.png`,
     className: 'img-button',
     imageClassName: 'matrix-thumb',
   }))
 
   const label = document.createElement('div')
   label.className = 'matrix-label'
-  label.textContent = basename(item.name)
+  label.textContent = readableAssetLabel(item, '模特')
   cell.append(label)
 
   return cell
@@ -8822,7 +8914,7 @@ function getOutfitLookPreviewItems(look) {
     .map((item) => ({
       src: item.dataUrl,
       alt: item.name || item.label || '',
-      label: basename(item.name || item.label || ''),
+      label: readableAssetLabel(item, getGarmentRoleLabel(item.role || 'full_outfit')),
     }))
 }
 
@@ -8959,8 +9051,13 @@ function createTranslateResultCell(item, language, signature) {
 
   const wrap = document.createElement('div')
   wrap.className = 'img-wrap'
+  const resultSrc = normalizeImageResultSrc(result.dataUrl)
+  if (!resultSrc) {
+    cell.append(createStatusLine('结果图片读取失败', 'err'))
+    return cell
+  }
   wrap.append(createPreviewButton({
-    src: result.dataUrl,
+    src: resultSrc,
     alt: `${item.name}-${language}`,
     caption: `${basename(item.name)} · ${getLanguage(language)?.label || language}`,
     downloadName: `${sanitizeFileName(basename(item.name))}.${language}.png`,
@@ -8994,7 +9091,7 @@ function createTranslateResultCell(item, language, signature) {
   preview.textContent = '放大查看'
   preview.addEventListener('click', () => {
     openLightbox({
-      src: result.dataUrl,
+      src: resultSrc,
       caption: `${basename(item.name)} · ${getLanguage(language)?.label || language}`,
       downloadName: `${sanitizeFileName(basename(item.name))}.${language}.png`,
     })
@@ -9007,7 +9104,7 @@ function createTranslateResultCell(item, language, signature) {
   download.textContent = '下载'
   download.addEventListener('click', () => {
     downloadAsset(
-      result.dataUrl,
+      resultSrc,
       `${sanitizeFileName(basename(item.name))}.${language}.png`,
     )
   })
@@ -9075,8 +9172,13 @@ function createOutfitResultCell(model, look, signature) {
 
   const wrap = document.createElement('div')
   wrap.className = 'img-wrap'
+  const resultSrc = normalizeImageResultSrc(result.dataUrl)
+  if (!resultSrc) {
+    cell.append(createStatusLine('结果图片读取失败', 'err'))
+    return cell
+  }
   wrap.append(createPreviewButton({
-    src: result.dataUrl,
+    src: resultSrc,
     alt: `${model.name}-${look.label}`,
     caption: `${basename(model.name)} · ${look.label}`,
     downloadName: `${sanitizeFileName(basename(model.name))}__${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
@@ -9098,7 +9200,7 @@ function createOutfitResultCell(model, look, signature) {
   preview.textContent = '放大查看'
   preview.addEventListener('click', () => {
     openLightbox({
-      src: result.dataUrl,
+      src: resultSrc,
       caption: `${basename(model.name)} · ${look.label}`,
       downloadName: `${sanitizeFileName(basename(model.name))}__${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
     })
@@ -9111,7 +9213,7 @@ function createOutfitResultCell(model, look, signature) {
   download.textContent = '下载'
   download.addEventListener('click', () => {
     downloadAsset(
-      result.dataUrl,
+      resultSrc,
       `${sanitizeFileName(basename(model.name))}__${sanitizeFileName(getOutfitLookFileLabel(look))}.png`,
     )
   })
@@ -10436,9 +10538,18 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
         return
       }
 
-      const task = upsertJobTask('translate', jobId, { error: trimError(error) })
+      const message = status === 401
+        ? '请先登录后查看这个云端任务'
+        : status === 429
+          ? '云端读取太频繁，请稍后再试'
+          : trimError(error)
+      const task = upsertJobTask('translate', jobId, { error: message })
       if (getLoadedJobId('translate') === jobId) state.translate.progress = task.error
+      if (status === 401) {
+        translateJobWatchers.delete(jobId)
+      }
       renderTranslate()
+      if (status === 401) return
       await wait(1200)
     }
   }
@@ -10568,6 +10679,14 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
       instructions: normalizeGarmentInstructions(item.instructions || garmentMeta.get(item.assetId || item.id)?.instructions),
     })),
   ]
+  state.outfit.models = state.outfit.models.map((item, index) => ({
+    ...item,
+    label: readableAssetLabel(item, `模特 ${index + 1}`),
+  }))
+  state.outfit.garments = state.outfit.garments.map((item, index) => ({
+    ...item,
+    label: readableAssetLabel(item, `${getGarmentRoleLabel(item.role || 'full_outfit')} ${index + 1}`),
+  }))
   state.outfit.model = getModel(job?.configJson?.modelId)?.id || state.outfit.model
   state.outfit.concurrency = clamp(
     Number(job?.configJson?.concurrency) || state.outfit.concurrency,
@@ -10723,9 +10842,18 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
         return
       }
 
-      const task = upsertJobTask('style', jobId, { error: trimError(error) })
+      const message = status === 401
+        ? '请先登录后查看这个云端任务'
+        : status === 429
+          ? '云端读取太频繁，请稍后再试'
+          : trimError(error)
+      const task = upsertJobTask('style', jobId, { error: message })
       if (getLoadedJobId('style') === jobId) state.style.progress = task.error
+      if (status === 401) {
+        styleJobWatchers.delete(jobId)
+      }
       renderStyle()
+      if (status === 401) return
       await wait(1200)
     }
   }
@@ -10790,9 +10918,18 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
         return
       }
 
-      const task = upsertJobTask('outfit', jobId, { error: trimError(error) })
+      const message = status === 401
+        ? '请先登录后查看这个云端任务'
+        : status === 429
+          ? '云端读取太频繁，请稍后再试'
+          : trimError(error)
+      const task = upsertJobTask('outfit', jobId, { error: message })
       if (getLoadedJobId('outfit') === jobId) state.outfit.progress = task.error
+      if (status === 401) {
+        outfitJobWatchers.delete(jobId)
+      }
       renderOutfit()
+      if (status === 401) return
       await wait(1200)
     }
   }
@@ -11428,11 +11565,14 @@ function dedupeOutfitLooks(looks) {
 
 function createLook(items) {
   const orderedItems = [...items].sort((a, b) => garmentRoleOrder(a.role) - garmentRoleOrder(b.role))
+  const labels = orderedItems.map((item, index) =>
+    readableAssetLabel(item, `${getGarmentRoleLabel(item.role || 'full_outfit')} ${index + 1}`),
+  )
   return {
     id: orderedItems.map((item) => item.id).join('+'),
     items: orderedItems,
     roles: orderedItems.map((item) => item.role || 'full_outfit'),
-    label: orderedItems.map((item) => basename(item.name)).join(' + '),
+    label: labels.join(' + '),
   }
 }
 
@@ -11442,7 +11582,9 @@ function garmentRoleOrder(role) {
 }
 
 function getOutfitLookFileLabel(look) {
-  return look.items.map((item) => basename(item.name)).join('__')
+  return look.items.map((item, index) =>
+    readableAssetLabel(item, `${getGarmentRoleLabel(item.role || 'full_outfit')}-${index + 1}`),
+  ).join('__')
 }
 
 function loadResultsStore() {
@@ -11520,11 +11662,13 @@ async function hydrateStyleHistory(entries) {
 }
 
 function saveTranslateResult(itemAssetId, language, result) {
+  const dataUrl = normalizeImageResultSrc(result.dataUrl)
+  if (!dataUrl) return
   const store = loadResultsStore()
   if (!store.translate) store.translate = {}
   const key = `${itemAssetId}::${language}`
   store.translate[key] = {
-    dataUrl: result.dataUrl || '',
+    dataUrl,
     ocr: result.ocr || null,
     signature: result.signature || '',
   }
@@ -11532,11 +11676,13 @@ function saveTranslateResult(itemAssetId, language, result) {
 }
 
 function saveOutfitResult(modelId, lookId, result) {
+  const dataUrl = normalizeImageResultSrc(result.dataUrl)
+  if (!dataUrl) return
   const store = loadResultsStore()
   if (!store.outfit) store.outfit = {}
   const key = `${modelId}::${lookId}`
   store.outfit[key] = {
-    dataUrl: result.dataUrl || '',
+    dataUrl,
     signature: result.signature || '',
   }
   saveResultsStore(store)
@@ -11548,10 +11694,11 @@ function restoreTranslateResults(store) {
     for (const lang of state.translate.targets) {
       const key = `${item.assetId || item.id}::${lang}`
       const saved = store.translate[key]
-      if (saved?.dataUrl && !item.results[lang]) {
+      const dataUrl = normalizeImageResultSrc(saved?.dataUrl)
+      if (dataUrl && !item.results[lang]) {
         item.results[lang] = {
           status: 'done',
-          dataUrl: saved.dataUrl,
+          dataUrl,
           ocr: saved.ocr || null,
           signature: saved.signature || '',
           attempts: 1,
@@ -11564,10 +11711,11 @@ function restoreTranslateResults(store) {
 function restoreOutfitResults(store) {
   if (!store?.outfit) return
   for (const [key, saved] of Object.entries(store.outfit)) {
-    if (saved?.dataUrl && !state.outfit.results[key]) {
+    const dataUrl = normalizeImageResultSrc(saved?.dataUrl)
+    if (dataUrl && !state.outfit.results[key]) {
       state.outfit.results[key] = {
         status: 'done',
-        dataUrl: saved.dataUrl,
+        dataUrl,
         signature: saved.signature || '',
         attempts: 1,
       }

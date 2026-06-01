@@ -102,3 +102,56 @@ test('local queue bridge accepts queue messages and runs the consumer path in wa
     await cleanup()
   }
 })
+
+test('queue consumer retries active running jobs instead of acknowledging them', async () => {
+  const { mod, cleanup } = await importConsumer()
+  const env = { VS_LOCAL_QUEUE_BRIDGE: '1', VS_JOB_ITEM_TIMEOUT_MS: '60000' }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_consumer_running_retry', null)
+    const job = await mod.createJob(env, {
+      id: 'job_consumer_running_retry',
+      sessionId: session.id,
+      userId: null,
+      type: 'outfit_batch',
+      status: 'running',
+      configJson: {
+        modelId: 'nano-banana-2',
+        concurrency: 1,
+      },
+      summaryJson: {},
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'outfit_cell',
+      status: 'running',
+      inputJson: {},
+      outputJson: {},
+      attemptCount: 1,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+    }])
+
+    const response = await mod.default.fetch(new Request('http://local.test/__queue/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'run_job', jobId: job.id, jobType: job.type, reason: 'recover' }),
+    }), env)
+    const payload = await response.json()
+    const stillRunning = await mod.getJob(env, job.id)
+
+    assert.equal(response.status, 502)
+    assert.equal(payload.ok, false)
+    assert.equal(payload.accepted, 1)
+    assert.equal(payload.acked, 0)
+    assert.equal(payload.retried, 1)
+    assert.equal(stillRunning.status, 'running')
+  } finally {
+    await cleanup()
+  }
+})

@@ -746,6 +746,16 @@ export async function getAssetDataUrl(env: any, assetId: string): Promise<string
   return arrayBufferToDataUrl(await object.arrayBuffer(), object.httpMetadata?.contentType || record.mime || 'image/png')
 }
 
+export async function getAssetR2Object(env: any, assetOrId: AssetRecord | string): Promise<any | null> {
+  const record = typeof assetOrId === 'string' ? await getAsset(env, assetOrId) : assetOrId
+  if (!record?.r2Key) return null
+  const bucket = record.kind === 'result' || record.kind === 'generated'
+    ? bucketFor(env, 'result')
+    : bucketFor(env, 'input')
+  if (!bucket) return null
+  return await bucket.get(record.r2Key)
+}
+
 export async function createJob(env: any, input: Omit<JobRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): Promise<JobRecord> {
   const now = nowIso()
   const record: JobRecord = {

@@ -1,7 +1,7 @@
 import { Env, corsPreflight } from '../../_shared'
 import { getAuthContext } from '../../_lib/auth'
 import { assertCanReadProject } from '../../_lib/permissions'
-import { getAsset, getAssetDataUrl, listCanvasProjectElements } from '../../_lib/v2-store'
+import { getAsset, getAssetDataUrl, getAssetR2Object, listCanvasProjectElements } from '../../_lib/v2-store'
 
 function dataUrlToResponse(dataUrl: string, mime: string, filename: string) {
   const payload = dataUrl.split(',', 2)[1] || ''
@@ -11,12 +11,17 @@ function dataUrlToResponse(dataUrl: string, mime: string, filename: string) {
     bytes[index] = binary.charCodeAt(index)
   }
   return new Response(bytes, {
-    headers: {
-      'Content-Type': mime,
-      'Content-Disposition': `inline; filename="${filename}"`,
-      'Access-Control-Allow-Origin': '*',
-    },
+    headers: resultHeaders(mime, filename),
   })
+}
+
+function resultHeaders(mime: string, filename: string) {
+  return {
+    'Content-Type': mime,
+    'Content-Disposition': `inline; filename="${filename}"`,
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'private, max-age=3600',
+  }
 }
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
@@ -40,9 +45,18 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, params, request })
       return new Response(String(error?.message || 'No access to this asset'), { status: error?.status || 403 })
     }
   }
+  const mime = asset.mime || 'image/png'
+  const filename = asset.filename || `${asset.id}.png`
+  const object = await getAssetR2Object(env, asset)
+  if (object?.body) {
+    return new Response(object.body, {
+      headers: resultHeaders(object.httpMetadata?.contentType || mime, filename),
+    })
+  }
+
   const dataUrl = await getAssetDataUrl(env, assetId)
   if (!dataUrl) {
     return new Response('Asset data not found', { status: 404 })
   }
-  return dataUrlToResponse(dataUrl, asset.mime || 'image/png', asset.filename || `${asset.id}.png`)
+  return dataUrlToResponse(dataUrl, mime, filename)
 }

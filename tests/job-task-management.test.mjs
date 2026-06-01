@@ -4,6 +4,7 @@ import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
+const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
 
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`)
@@ -31,6 +32,7 @@ async function createJobHarness() {
     JOB_TASKS_PER_PAGE: 5,
     clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
     sanitizeFileName: (value) => String(value || '').replace(/[\\/:*?"<>|]+/g, '-'),
+    basename: (value) => String(value || '').replace(/\.[^.]+$/, ''),
     state: {
       translate: { jobs: [], jobId: '', jobTab: 'current' },
       outfit: { jobs: [], jobId: '', jobTab: 'current' },
@@ -41,6 +43,11 @@ async function createJobHarness() {
     styleJobWatchers: new Map(),
   }
   const functionNames = [
+    'base64Bytes',
+    'hasImageMagicBytes',
+    'normalizeImageResultSrc',
+    'isMachineImageName',
+    'readableAssetLabel',
     'sanitizeJobTaskThumbs',
     'serializeJobTask',
     'sanitizeStoredJobTasks',
@@ -222,6 +229,34 @@ test('outfit job task thumbnails mix model and garment references without duplic
     { src: '/api/results/dress-1', label: '服装 1' },
     { src: '/api/results/shoe-1', label: '服装 2' },
   ])
+})
+
+test('job task thumbnails reject cached non-image base64 garbage', async () => {
+  const harness = await createJobHarness()
+  const validPng = TINY_PNG_BASE64
+  const internalBlob = 'iWEcAqNwbmcDAQTRAQ'.repeat(8)
+
+  const thumbs = harness.sanitizeJobTaskThumbs([
+    { src: internalBlob, label: 'bad cached blob' },
+    { src: '/api/results/asset-ok', label: 'cloud asset' },
+    { src: validPng, label: 'valid inline image' },
+    { src: `data:image/png;base64,${internalBlob}`, label: 'bad data url' },
+  ])
+
+  assert.deepEqual(JSON.parse(JSON.stringify(thumbs)), [
+    { src: '/api/results/asset-ok', label: 'cloud asset' },
+    { src: `data:image/png;base64,${validPng}`, label: 'valid inline image' },
+  ])
+})
+
+test('machine-generated image filenames use readable fallback labels', async () => {
+  const harness = await createJobHarness()
+  const machineName = 'iwEcAqNwbmcDAQTRAQIF0QECBrBZiTPXA8j-YwnuNgMpxEYAB9IiVEZmCAAJomltCgAL0gAArBU.png'
+
+  assert.equal(harness.isMachineImageName(machineName), true)
+  assert.equal(harness.readableAssetLabel({ name: machineName }, '整套 1'), '整套 1')
+  assert.equal(harness.readableAssetLabel({ name: machineName, label: '白色T恤' }, '整套 1'), '白色T恤')
+  assert.equal(harness.readableAssetLabel({ name: 'white-shirt.png' }, '整套 1'), 'white-shirt')
 })
 
 test('style job tasks are isolated and use source plus subject thumbnails', async () => {

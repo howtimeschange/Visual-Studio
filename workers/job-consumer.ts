@@ -10,7 +10,7 @@ type QueueMessageBody = {
 type QueueMessageLike = {
   body?: QueueMessageBody
   ack: () => void
-  retry: () => void
+  retry: (options?: { delaySeconds?: number }) => void
 }
 
 function isLocalBridgeEnabled(env: Env): boolean {
@@ -26,7 +26,11 @@ async function processQueueMessages(messages: QueueMessageLike[], env: Env) {
     }
 
     try {
-      await runQueuedJob(env, String(body.jobId), body.clientKeys || {})
+      const result = await runQueuedJob(env, String(body.jobId), body.clientKeys || {})
+      if (result.retryAfterMs) {
+        message.retry({ delaySeconds: Math.ceil(result.retryAfterMs / 1000) })
+        continue
+      }
       message.ack()
     } catch (error) {
       console.error('visual-studio queue job failed', body.jobId, error)

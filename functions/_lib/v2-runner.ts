@@ -48,14 +48,15 @@ type WaitUntil = (promise: Promise<unknown>) => void
 type ClientKeys = Record<string, unknown>
 type TranslateFontMode = 'match_original' | 'reference'
 type TranslateTextColorMode = 'match_original' | 'custom'
+type RunQueuedJobResult = { jobId: string; status: string; skipped?: boolean; retryAfterMs?: number }
 const DEFAULT_TRANSLATE_MODEL_ID = 'gpt-image-2'
 const DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const MAX_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
-const DEFAULT_STALE_JOB_ITEM_MS = 30 * 60_000
+const DEFAULT_STALE_JOB_ITEM_MS = 5 * 60_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
-const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
+const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 1
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
 const DEFAULT_OUTFIT_ITEMS_PER_RUN = 10
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
@@ -364,6 +365,16 @@ function createJobSummary(items: JobItemRecord[]): Record<string, unknown> {
   }
 }
 
+function getPendingJobStatus(items: JobItemRecord[]): 'queued' | 'running' | '' {
+  if (items.some((item) => item.status === 'queued')) return 'queued'
+  if (items.some((item) => item.status === 'running')) return 'running'
+  return ''
+}
+
+function countPendingItems(items: JobItemRecord[]): number {
+  return items.filter((item) => item.status === 'queued' || item.status === 'running').length
+}
+
 function resolveItemsPerRun(value: unknown, fallback: number): number {
   return clampInt(value, 1, MAX_ASYNC_IMAGE_JOB_CONCURRENCY, fallback)
 }
@@ -415,6 +426,17 @@ async function requeueItems(env: Env, jobId: string, items: JobItemRecord[]): Pr
     startedAt: null,
     finishedAt: null,
   })))
+}
+
+function hasRecoverableImageTask(item: JobItemRecord): boolean {
+  const task = item.outputJson?.imageTask
+  return Boolean(task && typeof task === 'object' && (
+    String(task.id || '').trim()
+    || String(task.task_id || '').trim()
+    || String(task.taskId || '').trim()
+    || String(task.poll_url || '').trim()
+    || String(task.pollUrl || '').trim()
+  ))
 }
 
 async function scheduleJobExecution(
@@ -520,7 +542,6 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  if (items.length === 0) return
   const maxItemsPerRun = resolveItemsPerRun(env.VS_TRANSLATE_ITEMS_PER_RUN, DEFAULT_TRANSLATE_ITEMS_PER_RUN)
   const runItems = items.slice(0, maxItemsPerRun)
   const concurrency = clampInt(
@@ -643,19 +664,20 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
   const finalItems = await listJobItems(env, jobId)
   const failed = finalItems.filter((item) => item.status === 'failed').length
   const completed = finalItems.filter((item) => item.status === 'completed').length
-  const queued = finalItems.filter((item) => item.status === 'queued').length
-  if (queued > 0) {
+  const pendingStatus = getPendingJobStatus(finalItems)
+  if (pendingStatus) {
+    const pending = countPendingItems(finalItems)
     const nextJob = await updateJob(env, jobId, {
-      status: 'queued',
+      status: pendingStatus,
       progressDone: completed,
       progressFailed: failed,
       summaryJson: {
         ...createJobSummary(finalItems),
-        pending: queued,
+        pending,
       },
     })
     if (nextJob) await publishJobProgress(env, nextJob)
-    await scheduleJobExecution(env, { ...(nextJob || initialJob), status: 'queued' }, undefined, 'recover')
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover')
     return
   }
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
@@ -781,7 +803,6 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  if (items.length === 0) return
   const maxItemsPerRun = resolveItemsPerRun(env.VS_OUTFIT_ITEMS_PER_RUN, DEFAULT_OUTFIT_ITEMS_PER_RUN)
   const runItems = items.slice(0, maxItemsPerRun)
   const concurrency = Math.min(
@@ -983,20 +1004,21 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   const finalItems = await listJobItems(env, jobId)
   const failed = finalItems.filter((item) => item.status === 'failed').length
   const completed = finalItems.filter((item) => item.status === 'completed').length
-  const queued = finalItems.filter((item) => item.status === 'queued').length
-  if (queued > 0) {
+  const pendingStatus = getPendingJobStatus(finalItems)
+  if (pendingStatus) {
+    const pending = countPendingItems(finalItems)
     const nextJob = await updateJob(env, jobId, {
-      status: 'queued',
+      status: pendingStatus,
       progressDone: completed,
       progressFailed: failed,
       summaryJson: {
         ...initialJob.summaryJson,
         ...createJobSummary(finalItems),
-        pending: queued,
+        pending,
       },
     })
     if (nextJob) await publishJobProgress(env, nextJob)
-    await scheduleJobExecution(env, { ...(nextJob || initialJob), status: 'queued' }, undefined, 'recover')
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover')
     return
   }
 
@@ -1207,6 +1229,22 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
   const finalItems = await listJobItems(env, jobId)
   const failed = finalItems.filter((item) => item.status === 'failed').length
   const completed = finalItems.filter((item) => item.status === 'completed').length
+  const pendingStatus = getPendingJobStatus(finalItems)
+  if (pendingStatus) {
+    const nextJob = await updateJob(env, jobId, {
+      status: pendingStatus,
+      progressDone: completed,
+      progressFailed: failed,
+      summaryJson: {
+        ...initialJob.summaryJson,
+        ...createJobSummary(finalItems),
+        pending: countPendingItems(finalItems),
+      },
+    })
+    if (nextJob) await publishJobProgress(env, nextJob)
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover')
+    return
+  }
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
   const finalJob = await updateJob(env, jobId, {
     status,
@@ -1699,11 +1737,29 @@ async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
   await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
 }
 
-export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: ClientKeys) {
-  const job = await getJob(env, jobId)
+export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: ClientKeys): Promise<RunQueuedJobResult> {
+  let job = await getJob(env, jobId)
   if (!job) return { jobId, status: 'missing' }
-  if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused' || job.status === 'running') {
+  if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
     return { jobId: job.id, status: job.status, skipped: true }
+  }
+
+  if (job.status === 'running') {
+    const staleAfterMs = clampMs((env as Env & { VS_JOB_ITEM_TIMEOUT_MS?: string }).VS_JOB_ITEM_TIMEOUT_MS, DEFAULT_STALE_JOB_ITEM_MS)
+    const recovered = await recoverRunningJob(env, job, staleAfterMs)
+    job = await getJob(env, job.id)
+    if (!job) return { jobId, status: 'missing' }
+    if (!recovered.shouldSchedule) {
+      return {
+        jobId: job.id,
+        status: job.status,
+        skipped: true,
+        retryAfterMs: getRunningJobRetryAfterMs(job, staleAfterMs),
+      }
+    }
+    if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+      return { jobId: job.id, status: job.status, skipped: !recovered.shouldSchedule }
+    }
   }
 
   if (inlineClientKeys && Object.keys(inlineClientKeys).length > 0) {
@@ -1778,7 +1834,9 @@ async function recoverRunningJob(env: Env, job: JobRecord, staleAfterMs: number)
   }
 
   for (const item of staleItems) {
-    if (item.attemptCount >= MAX_JOB_ITEM_ATTEMPTS) {
+    if (hasRecoverableImageTask(item)) {
+      await requeueItems(env, job.id, [item])
+    } else if (item.attemptCount >= MAX_JOB_ITEM_ATTEMPTS) {
       await updateJobItem(env, job.id, item.id, {
         status: 'failed',
         errorCode: 'job_item_timeout',
@@ -1835,6 +1893,13 @@ function isStaleItem(item: JobItemRecord, job: JobRecord, staleAfterMs: number):
   const reference = Number.isFinite(startedAt) ? startedAt : fallbackAt
   if (!Number.isFinite(reference)) return true
   return Date.now() - reference >= staleAfterMs
+}
+
+function getRunningJobRetryAfterMs(job: JobRecord, staleAfterMs: number): number {
+  const updatedAt = Date.parse(String(job.updatedAt || job.createdAt || ''))
+  if (!Number.isFinite(updatedAt)) return Math.min(staleAfterMs, 5 * 60_000)
+  const remainingMs = staleAfterMs - (Date.now() - updatedAt)
+  return Math.min(staleAfterMs, Math.max(30_000, remainingMs))
 }
 
 export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {

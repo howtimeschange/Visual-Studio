@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
 const INDEX_PATH = new URL('../public/index.html', import.meta.url)
+const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
 
 function extractStateInitializer(source) {
   const start = source.indexOf('const state = {')
@@ -109,6 +110,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         jobs: [],
         models: [],
         garments: [],
+        results: {},
         concurrency: 10,
       },
       style: {
@@ -163,6 +165,16 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     serializeAiSessions: (value) => value || [],
     getSerializedAiHistory: () => [],
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+    basename: (value) => String(value || '').replace(/\.[^.]+$/, ''),
+    getGarmentRoleLabel: (role) => ({
+      full_outfit: '整套',
+      top: '上衣',
+      bottom: '下装',
+      dress: '连衣裙',
+      outerwear: '外套',
+      shoes: '鞋品',
+      accessory: '配饰',
+    }[role] || role),
     crypto: {
       randomUUID: () => `test-id-${++idCounter}`,
     },
@@ -218,6 +230,10 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'sanitizeAiWorkflowItems',
     'shouldInlineHistoryDataUrl',
     'serializeStoredAiSessions',
+    'base64Bytes',
+    'hasImageMagicBytes',
+    'isMachineImageName',
+    'readableAssetLabel',
     'serializeAiMessage',
     'serializeAiMessageImage',
     'serializeAiWorkflowItem',
@@ -232,6 +248,10 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'loadResultsStore',
     'saveResultsStore',
     'pruneResultsStore',
+    'saveTranslateResult',
+    'saveOutfitResult',
+    'restoreTranslateResults',
+    'restoreOutfitResults',
     'normalizeTranslateFontMode',
     'normalizeTranslateFontFamily',
     'normalizeTranslateFontPrompt',
@@ -478,7 +498,7 @@ test('writeRuntimeStorageSnapshot keeps the full snapshot when storage accepts i
 
 test('migrateLegacyRuntimeStorage moves heavy legacy runtime fields out of runtime storage', async () => {
   const harness = await createRuntimeHarness()
-  const legacyDataUrl = `data:image/png;base64,${'a'.repeat(5000)}`
+  const legacyDataUrl = `data:image/png;base64,${TINY_PNG_BASE64}`
   harness.storage.set('img-translator:runtime:v2', JSON.stringify({
     sessionId: 'session-legacy',
     translate: { jobs: [], items: [] },
@@ -594,7 +614,8 @@ test('runtime storage preserves style transfer draft and analyzed style', async 
 
 test('style result sanitizers normalize bare base64 images before rendering', async () => {
   const harness = await createRuntimeHarness()
-  const bareBase64 = Buffer.from('style-image-bytes').toString('base64').repeat(8)
+  const bareBase64 = TINY_PNG_BASE64
+  const internalBlob = 'iWEcAqNwbmcDAQTRAQ'.repeat(8)
 
   const [result] = harness.sanitizeStyleResultEntries([{
     id: 'style-item-b64',
@@ -614,9 +635,45 @@ test('style result sanitizers normalize bare base64 images before rendering', as
   assert.equal(result.resultDataUrl, `data:image/png;base64,${bareBase64}`)
   assert.equal(result.subject, '')
   assert.equal(history.resultDataUrl, `data:image/jpeg;base64,${bareBase64}`)
-  assert.equal(harness.normalizeImageResultSrc('iWEcAqNwbmcDAQTRAQ', 'image/png'), '')
-  assert.equal(harness.normalizeStyleResultEntry({ resultDataUrl: 'iWEcAqNwbmcDAQTRAQ' }), null)
+  assert.equal(harness.normalizeImageResultSrc(internalBlob, 'image/png'), '')
+  assert.equal(harness.normalizeStyleResultEntry({ resultDataUrl: internalBlob }), null)
   assert.equal(harness.looksLikeBase64Blob(bareBase64), true)
+})
+
+test('cached translate and outfit results reject non-image base64 blobs', async () => {
+  const harness = await createRuntimeHarness()
+  const invalidBlob = 'iWEcAqNwbmcDAQTRAQ'.repeat(8)
+  const validPng = TINY_PNG_BASE64
+
+  harness.state.translate.targets = ['ja']
+  harness.state.translate.items = [{
+    id: 'source-1',
+    assetId: 'source-1',
+    results: {},
+  }]
+  harness.state.outfit.results = {}
+
+  harness.restoreTranslateResults({
+    translate: {
+      'source-1::ja': { dataUrl: invalidBlob, signature: 'bad' },
+    },
+  })
+  harness.restoreOutfitResults({
+    outfit: {
+      'model-1::look-1': { dataUrl: invalidBlob, signature: 'bad' },
+    },
+  })
+
+  assert.equal(harness.state.translate.items[0].results.ja, undefined)
+  assert.equal(harness.state.outfit.results['model-1::look-1'], undefined)
+
+  harness.saveTranslateResult('source-1', 'ja', { dataUrl: invalidBlob, signature: 'bad' })
+  harness.saveOutfitResult('model-1', 'look-1', { dataUrl: invalidBlob, signature: 'bad' })
+  assert.equal(harness.storage.get('img-translator:results:v1'), undefined)
+
+  harness.saveTranslateResult('source-1', 'ja', { dataUrl: validPng, signature: 'ok' })
+  const stored = JSON.parse(harness.storage.get('img-translator:results:v1'))
+  assert.equal(stored.translate['source-1::ja'].dataUrl, `data:image/png;base64,${validPng}`)
 })
 
 test('migrateLegacyRuntimeStorage skips already compact runtime storage', async () => {
