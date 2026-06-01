@@ -56,6 +56,18 @@ export async function executeOutfitSwapTaskStep(
   imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
   if (!genKey) throw createOutfitError(`Missing API key for ${modelId}`, 400)
 
+  if (stepOptions.existingTask) {
+    const result = await callImageModelTaskStep(
+      baseUrl, genKey, MODEL_MAP[modelId],
+      [],
+      '',
+      imageModelOptions,
+    )
+    if (result.pending) return result
+    if (!result.ok) throw createOutfitError(result.error, result.status || 502)
+    return { pending: false, dataUrl: result.dataUrl }
+  }
+
   const analysis = stepOptions.existingTask
     ? body?.analysis || null
     : body?.analysis || await prepareOutfitAnalysis({

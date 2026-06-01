@@ -1766,6 +1766,15 @@ test('runOutfitBatchJob preserves created task when polling hits worker subreque
     assert.equal(item.status, 'completed')
     assert.equal(item.attemptCount, 1)
     assert.equal(taskCreates, 1)
+    assert.equal(calls.filter((call) => {
+      const body = call.init?.body
+      if (!body) return false
+      try {
+        return JSON.parse(String(body)).model === 'gemini-3-flash-preview'
+      } catch {
+        return false
+      }
+    }).length, 1)
     assert.equal(
       await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
       'data:image/png;base64,c3VicmVxdWVzdC1saW1pdC1yZXN1bHQ=',
