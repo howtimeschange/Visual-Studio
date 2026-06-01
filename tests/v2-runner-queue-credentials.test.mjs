@@ -360,6 +360,129 @@ test('runStyleTransferBatchJob stores completed style transfer results', async (
   }
 })
 
+test('runStyleTransferBatchJob resumes a pending image task across queue invocations', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const inputStats = {}
+  const env = {
+    VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_style_resume_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_style_resume_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (calls.filter((call) => String(call.input).includes('task_style_resume_1')).length === 1) {
+      return new Response(JSON.stringify({
+        id: 'task_style_resume_1',
+        status: 'running',
+        poll_url: 'https://relay.example/v1/images/tasks/task_style_resume_1',
+        poll_after: 0,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_style_resume_1',
+      status: 'succeeded',
+      data: [{ b64_json: 'c3R5bGUtcmVzdW1lZA==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_style_pending_resume', null)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3R5bGUtc291cmNl',
+      filename: 'style.png',
+    })
+    const subject = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'reference',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3ViamVjdA==',
+      filename: 'subject.png',
+    })
+    const submitted = await mod.submitStyleTransferBatch(env, {
+      sessionId: session.id,
+      sourceAssetId: source.id,
+      visualStyle: {
+        overall_concept: { theme: 'Soft catalog' },
+        reproduction_prompt: { style_essence_en: 'soft catalog lighting' },
+      },
+      subjects: [{ subject: '手袋', subjectAssetIds: [subject.id], label: 'subject.png' }],
+      modelId: 'nano-banana-2',
+      clientKeys: { banana2ApiKey: 'style-key' },
+    })
+
+    assert.equal(sent.length, 1)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(sent.length, 2)
+    assert.equal(inputStats.get, 2)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('/images/tasks/task_style_resume_1')).length, 0)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(item.attemptCount, 1)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('/images/tasks/task_style_resume_1')).length, 2)
+    assert.equal(inputStats.get, 2)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,c3R5bGUtcmVzdW1lZA==',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped prompt instructions', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch

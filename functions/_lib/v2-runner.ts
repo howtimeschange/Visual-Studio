@@ -1178,8 +1178,9 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
+    const queuedExistingTask = queuedItem.outputJson?.imageTask
     const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
-      attemptCount: queuedItem.attemptCount + 1,
+      attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
       startedAt: nowIso(),
       errorCode: null,
       errorMessage: null,
@@ -1881,7 +1882,15 @@ export async function recoverJobs(env: Env, waitUntil?: WaitUntil) {
       continue
     }
 
-    const dispatchMode = await scheduleJobExecution(env, { ...job, status: 'queued' }, waitUntil, 'recover')
+    const latestItems = await listJobItems(env, job.id)
+    const dispatchMode = await scheduleJobExecution(
+      env,
+      { ...job, status: 'queued' },
+      waitUntil,
+      'recover',
+      {},
+      getNextPendingPollDelayMs(latestItems),
+    )
     scheduled.push({
       jobId: job.id,
       type: job.type,

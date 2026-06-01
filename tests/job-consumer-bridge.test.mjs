@@ -207,3 +207,66 @@ test('queue consumer scheduled handler recovers stale queued jobs', async () => 
     await cleanup()
   }
 })
+
+test('queue consumer scheduled handler preserves pending task poll delay', async () => {
+  const { mod, cleanup } = await importConsumer()
+  const sent = []
+  const options = []
+  const env = {
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async (message, opts) => {
+        sent.push(message)
+        options.push(opts || {})
+      },
+    },
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_consumer_scheduled_delay', null)
+    const job = await mod.createJob(env, {
+      id: 'job_consumer_scheduled_delay',
+      sessionId: session.id,
+      userId: null,
+      type: 'outfit_batch',
+      status: 'queued',
+      configJson: {
+        modelId: 'nano-banana-2',
+        concurrency: 1,
+      },
+      summaryJson: {},
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'outfit_cell',
+      status: 'queued',
+      inputJson: {},
+      outputJson: {
+        imageTask: {
+          id: 'task_delayed_watchdog',
+          status: 'running',
+          poll_url: 'https://relay.example/v1/images/tasks/task_delayed_watchdog',
+        },
+        imageTaskStatus: 'running',
+        nextPollAfterMs: 45_000,
+      },
+      attemptCount: 1,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+    }])
+
+    await mod.default.scheduled({}, env)
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].jobId, job.id)
+    assert.equal(sent[0].reason, 'recover')
+    assert.equal(sent[0].delaySeconds, 45)
+    assert.deepEqual(options[0], { delaySeconds: 45 })
+  } finally {
+    await cleanup()
+  }
+})
