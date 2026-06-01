@@ -58,6 +58,7 @@ const MAX_JOB_ITEMS_PER_RUN = 20
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 5 * 60_000
+const MIN_RUNNING_JOB_RETRY_AFTER_MS = 5_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
@@ -1854,7 +1855,7 @@ export async function recoverJobs(env: Env, waitUntil?: WaitUntil) {
 async function recoverRunningJob(env: Env, job: JobRecord, staleAfterMs: number): Promise<{ shouldSchedule: boolean; previousStatus: string }> {
   const items = await listJobItems(env, job.id)
   const runningItems = items.filter((item) => item.status === 'running')
-  const staleItems = runningItems.filter((item) => isStaleItem(item, job, staleAfterMs))
+  const staleItems = runningItems.filter((item) => isRecoverableRunningItemReady(item) || isStaleItem(item, job, staleAfterMs))
 
   if (runningItems.length && staleItems.length === 0) {
     return { shouldSchedule: false, previousStatus: job.status }
@@ -1922,11 +1923,25 @@ function isStaleItem(item: JobItemRecord, job: JobRecord, staleAfterMs: number):
   return Date.now() - reference >= staleAfterMs
 }
 
+function isRecoverableRunningItemReady(item: JobItemRecord): boolean {
+  if (!hasRecoverableImageTask(item)) return false
+  const startedAt = Date.parse(String(item.startedAt || ''))
+  if (!Number.isFinite(startedAt)) return true
+  const nextPollAfterMs = clampPollWindowMs(item.outputJson?.nextPollAfterMs)
+  return Date.now() - startedAt >= nextPollAfterMs
+}
+
+function clampPollWindowMs(value: unknown): number {
+  const numeric = Math.floor(Number(value))
+  if (!Number.isFinite(numeric) || numeric < 0) return 15_000
+  return Math.min(60_000, Math.max(MIN_RUNNING_JOB_RETRY_AFTER_MS, numeric))
+}
+
 function getRunningJobRetryAfterMs(job: JobRecord, staleAfterMs: number): number {
   const updatedAt = Date.parse(String(job.updatedAt || job.createdAt || ''))
   if (!Number.isFinite(updatedAt)) return Math.min(staleAfterMs, 5 * 60_000)
   const remainingMs = staleAfterMs - (Date.now() - updatedAt)
-  return Math.min(staleAfterMs, Math.max(30_000, remainingMs))
+  return Math.min(staleAfterMs, Math.max(MIN_RUNNING_JOB_RETRY_AFTER_MS, remainingMs))
 }
 
 export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {

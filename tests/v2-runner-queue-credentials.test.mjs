@@ -1508,6 +1508,94 @@ test('runQueuedJob recovers a stale running outfit image task on duplicate deliv
   }
 })
 
+test('runQueuedJob recovers a running outfit image task after its poll window', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    VS_JOB_ITEM_TIMEOUT_MS: '600000',
+    BANANA2_API_KEY: 'image-key',
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+  const pollableStartedAt = new Date(Date.now() - 31_000).toISOString()
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    return new Response(JSON.stringify({
+      id: 'task_outfit_pollable_1',
+      status: 'succeeded',
+      data: [{ b64_json: 'cG9sbGFibGUtb3V0Zml0LXJlc3VsdA==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_pollable_resume', null)
+    const job = await mod.createJob(env, {
+      id: 'job_outfit_pollable_running',
+      sessionId: session.id,
+      userId: null,
+      type: 'outfit_batch',
+      status: 'running',
+      configJson: {
+        modelId: 'nano-banana-2',
+        concurrency: 1,
+      },
+      summaryJson: { lookCount: 1 },
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'outfit_cell',
+      status: 'running',
+      inputJson: {
+        modelAssetId: 'asset_model_pollable',
+        modelLabel: 'model.png',
+        lookId: 'look_pollable',
+      },
+      outputJson: {
+        imageTask: {
+          id: 'task_outfit_pollable_1',
+          status: 'running',
+          poll_url: 'https://relay.example/v1/images/tasks/task_outfit_pollable_1',
+          poll_after: 5,
+        },
+        imageTaskStatus: 'running',
+        nextPollAfterMs: 5_000,
+      },
+      attemptCount: 1,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: pollableStartedAt,
+      finishedAt: null,
+    }])
+
+    const result = await mod.runQueuedJob(env, job.id)
+    const nextJob = await mod.getJob(env, job.id)
+    const [nextItem] = await mod.listJobItems(env, job.id)
+
+    assert.equal(result.status, 'completed')
+    assert.equal(nextJob.status, 'completed')
+    assert.equal(nextItem.status, 'completed')
+    assert.equal(nextItem.attemptCount, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('task_outfit_pollable_1')).length, 1)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(nextItem.outputJson.resultAssetId)),
+      'data:image/png;base64,cG9sbGFibGUtb3V0Zml0LXJlc3VsdA==',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runOutfitBatchJob retries a failed upstream image task with a fresh task id', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
