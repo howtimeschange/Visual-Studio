@@ -1652,6 +1652,130 @@ test('runOutfitBatchJob retries a failed upstream image task with a fresh task i
   }
 })
 
+test('runOutfitBatchJob preserves created task when polling hits worker subrequest limit', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '5',
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  let taskCreates = 0
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    const payload = init.body ? JSON.parse(String(init.body || '{}')) : {}
+    if (payload.model === 'gemini-3-flash-preview') {
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              model: { framing: 'full-body', pose: 'standing' },
+              garments: [{ index: 2, role: 'top', category: 'shirt' }],
+            }),
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      taskCreates += 1
+      return new Response(JSON.stringify({
+        id: 'task_outfit_subrequest_limit',
+        status: 'running',
+        poll_url: 'https://relay.example/v1/images/tasks/task_outfit_subrequest_limit',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).includes('task_outfit_subrequest_limit')) {
+      if (calls.filter((call) => String(call.input).includes('task_outfit_subrequest_limit')).length === 1) {
+        throw new Error('Too many subrequests by single Worker invocation. To configure this limit, refer to https://developers.cloudflare.com/workers/wrangler/configuration/#limits')
+      }
+      return new Response(JSON.stringify({
+        id: 'task_outfit_subrequest_limit',
+        status: 'succeeded',
+        data: [{ b64_json: 'c3VicmVxdWVzdC1saW1pdC1yZXN1bHQ=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    throw new Error(`Unexpected fetch: ${String(input)}`)
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_subrequest_limit', null)
+    const model = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,bW9kZWw=',
+      filename: 'model.png',
+    })
+    const top = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,dG9w',
+      filename: 'top.png',
+    })
+
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: session.id,
+      modelAssetIds: [model.id],
+      modelId: 'nano-banana-2',
+      garments: [{ assetId: top.id, role: 'top', label: 'top.png' }],
+      concurrency: 1,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+        visionApiKey: 'vision-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTask.id, 'task_outfit_subrequest_limit')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.match(item.outputJson.lastImageTaskError, /Too many subrequests/)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(taskCreates, 1)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,c3VicmVxdWVzdC1saW1pdC1yZXN1bHQ=',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runOutfitBatchJob fails item when image task result is empty', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch

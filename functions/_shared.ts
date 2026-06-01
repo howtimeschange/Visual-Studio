@@ -169,7 +169,7 @@ type ImageSourceResult =
 
 export type ImageTaskStepResult =
   | { ok: true; pending?: false; dataUrl: string; task: any }
-  | { ok: false; pending: true; task: any; pollTarget: string; pollUrl: string; taskStatus: string; nextPollAfterMs: number }
+  | { ok: false; pending: true; task: any; pollTarget: string; pollUrl: string; taskStatus: string; nextPollAfterMs: number; error?: string }
   | { ok: false; pending?: false; error: string; status: number }
 
 export async function callImageModel(
@@ -345,20 +345,70 @@ async function waitForAsyncImageTask(
 
     const elapsedMs = Date.now() - opts.startedAt
     const remainingMs = opts.timeoutMs - elapsedMs
-    if (remainingMs <= 0) throw createTimeoutError(opts.timeoutMs)
+    if (remainingMs <= 0) {
+      return {
+        ok: false,
+        pending: true,
+        task,
+        pollTarget,
+        pollUrl,
+        taskStatus: status || 'queued',
+        nextPollAfterMs,
+        error: `Upstream image task timed out after ${formatDuration(opts.timeoutMs)}.`,
+      }
+    }
 
     await sleep(Math.min(nextPollAfterMs, remainingMs))
-    if (Date.now() - opts.startedAt >= opts.timeoutMs) throw createTimeoutError(opts.timeoutMs)
+    if (Date.now() - opts.startedAt >= opts.timeoutMs) {
+      return {
+        ok: false,
+        pending: true,
+        task,
+        pollTarget,
+        pollUrl,
+        taskStatus: status || 'queued',
+        nextPollAfterMs,
+        error: `Upstream image task timed out after ${formatDuration(opts.timeoutMs)}.`,
+      }
+    }
 
-    const pollRes = await fetchImageModelWithRetry(pollUrl, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }, {
-      ...requestOpts,
-      timeoutMs: Math.min(opts.taskHttpTimeoutMs, Math.max(MIN_TIMEOUT_MS, opts.timeoutMs - (Date.now() - opts.startedAt))),
-    }, opts.startedAt + opts.timeoutMs)
+    let pollRes: Response
+    try {
+      pollRes = await fetchImageModelWithRetry(pollUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey}` },
+      }, {
+        ...requestOpts,
+        timeoutMs: Math.min(opts.taskHttpTimeoutMs, Math.max(MIN_TIMEOUT_MS, opts.timeoutMs - (Date.now() - opts.startedAt))),
+      }, opts.startedAt + opts.timeoutMs)
+    } catch (error: any) {
+      return {
+        ok: false,
+        pending: true,
+        task,
+        pollTarget,
+        pollUrl,
+        taskStatus: status || 'queued',
+        nextPollAfterMs,
+        error: isTimeoutError(error)
+          ? `Upstream image task timed out after ${formatDuration(error.timeoutMs)}.`
+          : String(error?.message || 'Image task poll failed').slice(0, 500),
+      }
+    }
     const pollData = await readJsonResponse(pollRes)
     if (!pollRes.ok) {
+      if (TRANSIENT_IMAGE_STATUSES.has(pollRes.status) || pollRes.status === 408 || pollRes.status === 409 || pollRes.status === 425 || pollRes.status === 429) {
+        return {
+          ok: false,
+          pending: true,
+          task,
+          pollTarget,
+          pollUrl,
+          taskStatus: status || 'queued',
+          nextPollAfterMs,
+          error: `Upstream ${pollRes.status}: ${formatUpstreamError(pollData)}`,
+        }
+      }
       return { ok: false, error: `Upstream ${pollRes.status}: ${formatUpstreamError(pollData)}`, status: pollRes.status }
     }
     task = pollData

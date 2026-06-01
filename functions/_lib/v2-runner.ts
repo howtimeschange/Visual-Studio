@@ -397,6 +397,20 @@ function clearImageTaskOutput(
   return next
 }
 
+function preserveImageTaskOutputForRetry(
+  outputJson: Record<string, unknown> | null | undefined,
+  extras: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { ...(outputJson || {}), ...extras }
+}
+
+function shouldPreserveImageTaskForRetry(item: JobItemRecord, message: string): boolean {
+  if (!hasRecoverableImageTask(item)) return false
+  const text = String(message || '').toLowerCase()
+  if (/image task\s+(failed|error|canceled|cancelled)/i.test(message)) return false
+  return /too many subrequests|timed out|fetch failed|network|connection|socket|econnreset|etimedout|upstream (408|409|425|429|5\d\d)/i.test(text)
+}
+
 async function runWithAutoRetry<T>(task: () => Promise<T>): Promise<{ result: T; attempts: number }> {
   let attempt = 1
   let lastError: any = null
@@ -898,6 +912,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
             imageTaskPollUrl: result.pollUrl,
             imageTaskStatus: result.taskStatus,
             nextPollAfterMs: result.nextPollAfterMs,
+            lastImageTaskError: result.error ? String(result.error).slice(0, 500) : item.outputJson?.lastImageTaskError,
           },
           errorCode: null,
           errorMessage: null,
@@ -946,10 +961,11 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     } catch (error: any) {
       const message = String(error?.message || 'Outfit failed')
       if (isRetryableError(error) && item.attemptCount < MAX_JOB_ITEM_ATTEMPTS) {
+        const preserveExistingTask = shouldPreserveImageTaskForRetry(item, message)
         await updateJobItem(env, jobId, item.id, {
           status: 'queued',
           attemptCount: item.attemptCount,
-          outputJson: clearImageTaskOutput(item.outputJson, {
+          outputJson: (preserveExistingTask ? preserveImageTaskOutputForRetry : clearImageTaskOutput)(item.outputJson, {
             outfitAnalysis: outfitAnalysisForRetry || item.outputJson?.outfitAnalysis || undefined,
             imageTaskStatus: 'retrying',
             lastImageTaskError: message.slice(0, 500),
