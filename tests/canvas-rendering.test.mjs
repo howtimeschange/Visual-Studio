@@ -202,7 +202,27 @@ test('outfit signature changes when per-model instructions change', async () => 
 })
 
 test('outfit look previews include every garment in a combined look', async () => {
-  const harness = await loadHarness(['getOutfitLookPreviewItems'])
+  const harness = await loadHarness([
+    'base64Bytes',
+    'hasImageMagicBytes',
+    'looksLikeBase64Blob',
+    'isMachineImageName',
+    'readableAssetLabel',
+    'normalizeImageResultSrc',
+    'assetResultUrl',
+    'assetImageSrc',
+    'getOutfitLookPreviewItems',
+  ], {
+    getGarmentRoleLabel: (role) => ({
+      full_outfit: '整套',
+      top: '上衣',
+      bottom: '下装',
+      dress: '连衣裙',
+      outerwear: '外套',
+      shoes: '鞋品',
+      accessory: '配饰',
+    }[role] || role),
+  })
   const look = {
     label: '上衣 + 下装',
     items: [
@@ -212,8 +232,8 @@ test('outfit look previews include every garment in a combined look', async () =
   }
 
   assert.deepEqual(JSON.parse(JSON.stringify(harness.getOutfitLookPreviewItems(look))), [
-    { src: 'data:image/png;base64,top', alt: 'top.png', label: 'top' },
-    { src: 'data:image/png;base64,bottom', alt: 'bottom.png', label: 'bottom' },
+    { src: '/api/results/top-1', alt: 'top', label: 'top' },
+    { src: '/api/results/bottom-1', alt: 'bottom', label: 'bottom' },
   ])
 })
 

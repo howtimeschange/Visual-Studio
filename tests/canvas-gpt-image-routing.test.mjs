@@ -38,9 +38,9 @@ test('canvas routes every GPT Image 2 generation through async jobs', async () =
   assert.equal(harness.shouldUseAsyncCanvasGenerate('gpt-image-2'), true)
 })
 
-test('canvas keeps non-GPT models on the existing direct path unless they need async behavior', async () => {
+test('canvas routes nano banana models through async jobs too', async () => {
   const harness = await loadRoutingHarness()
 
-  assert.equal(harness.shouldUseAsyncCanvasGenerate('nano-banana-2'), false)
-  assert.equal(harness.shouldUseAsyncCanvasGenerate('nano-banana-pro'), false)
+  assert.equal(harness.shouldUseAsyncCanvasGenerate('nano-banana-2'), true)
+  assert.equal(harness.shouldUseAsyncCanvasGenerate('nano-banana-pro'), true)
 })

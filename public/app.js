@@ -240,6 +240,8 @@ const ACTIVE_JOB_STATUSES = new Set(['queued', 'running'])
 const CURRENT_TASK_JOB_STATUSES = new Set(['queued', 'running', 'paused', 'partial_failed', 'failed'])
 const KNOWN_JOB_STATUSES = new Set(['', 'queued', 'running', 'paused', 'completed', 'partial_failed', 'failed', 'cancelled'])
 const JOB_TASKS_PER_PAGE = 5
+const JOB_SNAPSHOT_SETTLE_RETRIES = 4
+const JOB_SNAPSHOT_SETTLE_DELAY_MS = 700
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
 let styleWatcherToken = 0
@@ -10504,18 +10506,80 @@ function applyTranslateJobSnapshot(job, items) {
   renderTranslate()
 }
 
+function getJobItemStatusCounts(items = []) {
+  const counts = {
+    total: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    active: 0,
+    completedMissingResult: 0,
+  }
+  for (const item of Array.isArray(items) ? items : []) {
+    counts.total += 1
+    const status = String(item?.status || '')
+    if (status === 'completed') {
+      counts.completed += 1
+      if (!String(item?.outputJson?.resultAssetId || '').trim()) counts.completedMissingResult += 1
+    } else if (status === 'failed') {
+      counts.failed += 1
+    } else if (status === 'cancelled') {
+      counts.cancelled += 1
+    } else if (status === 'queued' || status === 'running') {
+      counts.active += 1
+    }
+  }
+  return counts
+}
+
+function isTerminalJobItemSnapshotReady(job, items = []) {
+  if (!TERMINAL_JOB_STATUSES.has(String(job?.status || ''))) return true
+  const total = Math.max(0, Number(job?.progressTotal || 0))
+  const done = Math.max(0, Number(job?.progressDone || 0))
+  const failed = Math.max(0, Number(job?.progressFailed || 0))
+  const counts = getJobItemStatusCounts(items)
+
+  if (total > 0 && counts.total < total) return false
+  if (counts.active > 0) return false
+  if (done > counts.completed) return false
+  if (failed > counts.failed) return false
+  if (counts.completedMissingResult > 0) return false
+  if (job?.status === 'completed' && total > 0 && counts.completed < total) return false
+  if ((job?.status === 'failed' || job?.status === 'partial_failed') && total > 0 && counts.completed + counts.failed + counts.cancelled < total) return false
+
+  return true
+}
+
+function shouldStopPollingJobSnapshot(job, items = []) {
+  if (job?.status === 'paused') return true
+  if (!TERMINAL_JOB_STATUSES.has(String(job?.status || ''))) return false
+  return isTerminalJobItemSnapshotReady(job, items)
+}
+
 async function fetchJobSnapshot(jobId) {
   const [{ job }, { items }] = await Promise.all([
     getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
     getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
   ])
-  return { job, items }
+  if (!TERMINAL_JOB_STATUSES.has(String(job?.status || '')) || isTerminalJobItemSnapshotReady(job, items)) {
+    return { job, items }
+  }
+
+  let settledItems = items
+  for (let attempt = 0; attempt < JOB_SNAPSHOT_SETTLE_RETRIES; attempt += 1) {
+    await wait(JOB_SNAPSHOT_SETTLE_DELAY_MS * (attempt + 1))
+    const data = await getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`)
+    settledItems = Array.isArray(data?.items) ? data.items : []
+    if (isTerminalJobItemSnapshotReady(job, settledItems)) break
+  }
+  return { job, items: settledItems }
 }
 
 function watchStoredJobTasks(kind) {
   for (const task of getJobTasks(kind)) {
     if (!task.jobId) continue
-    if (task.status && !ACTIVE_JOB_STATUSES.has(task.status)) {
+    const loadedTerminalTask = task.loaded && getLoadedJobId(kind) === task.jobId
+    if (task.status && !ACTIVE_JOB_STATUSES.has(task.status) && !loadedTerminalTask) {
       continue
     }
     if (kind === 'translate') {
@@ -10554,7 +10618,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
         if (getLoadedJobId('translate') !== jobId) {
           renderJobList('translate')
           saveRuntimeState()
-          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+          if (shouldStopPollingJobSnapshot(job, items)) {
             translateJobWatchers.delete(jobId)
             break
           }
@@ -10567,7 +10631,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
       }
       saveRuntimeState()
 
-      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+      if (shouldStopPollingJobSnapshot(job, items)) {
         translateJobWatchers.delete(jobId)
         break
       }
@@ -10858,7 +10922,7 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
         if (getLoadedJobId('style') !== jobId) {
           renderJobList('style')
           saveRuntimeState()
-          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+          if (shouldStopPollingJobSnapshot(job, items)) {
             styleJobWatchers.delete(jobId)
             break
           }
@@ -10872,7 +10936,7 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
       }
       saveRuntimeState()
 
-      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+      if (shouldStopPollingJobSnapshot(job, items)) {
         styleJobWatchers.delete(jobId)
         break
       }
@@ -10935,7 +10999,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
         if (getLoadedJobId('outfit') !== jobId) {
           renderJobList('outfit')
           saveRuntimeState()
-          if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+          if (shouldStopPollingJobSnapshot(job, items)) {
             outfitJobWatchers.delete(jobId)
             break
           }
@@ -10948,7 +11012,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
       }
       saveRuntimeState()
 
-      if (TERMINAL_JOB_STATUSES.has(job.status) || job.status === 'paused') {
+      if (shouldStopPollingJobSnapshot(job, items)) {
         outfitJobWatchers.delete(jobId)
         break
       }

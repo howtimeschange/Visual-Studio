@@ -67,8 +67,11 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     MAX_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     TRANSLATE_TEXT_COLOR_MODES: new Set(['match_original', 'custom']),
+    TERMINAL_JOB_STATUSES: new Set(['completed', 'partial_failed', 'failed', 'cancelled']),
     KNOWN_JOB_STATUSES: new Set(['', 'queued', 'running', 'paused', 'completed', 'partial_failed', 'failed', 'cancelled']),
     ACTIVE_JOB_STATUSES: new Set(['queued', 'running']),
+    JOB_SNAPSHOT_SETTLE_RETRIES: 4,
+    JOB_SNAPSHOT_SETTLE_DELAY_MS: 1,
     DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
     DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
     GARMENT_ROLE_OPTIONS: [
@@ -152,6 +155,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     assetResultUrl: (assetId) => `/api/results/${encodeURIComponent(assetId)}`,
     formatBatchProgress: (job) => `${Number(job?.progressDone || 0)} / ${Number(job?.progressTotal || 0)}`,
     renderOutfit: () => {},
+    wait: async () => {},
     normalizeAspectRatio: (value, fallback = '1:1') => (
       ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(String(value || '').trim())
         ? String(value).trim()
@@ -280,6 +284,9 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'hydrateTranslateWorkspaceFromJob',
     'hydrateOutfitWorkspaceFromJob',
     'mapOutfitJobItem',
+    'getJobItemStatusCounts',
+    'isTerminalJobItemSnapshotReady',
+    'shouldStopPollingJobSnapshot',
     'applyOutfitJobSnapshot',
     'assetResultUrl',
     'formatBatchProgress',
@@ -407,6 +414,34 @@ test('queued outfit items with upstream image tasks render as model processing',
   assert.equal(mapped.status, 'model_pending')
   assert.equal(mapped.taskStatus, 'running')
   assert.equal(mapped.attempt, 1)
+})
+
+test('terminal job polling waits until item snapshots include final result assets', async () => {
+  const harness = await createRuntimeHarness()
+  const completedJob = {
+    status: 'completed',
+    progressTotal: 3,
+    progressDone: 3,
+    progressFailed: 0,
+  }
+
+  assert.equal(harness.shouldStopPollingJobSnapshot(completedJob, [
+    { status: 'completed', outputJson: { resultAssetId: 'result_1' } },
+    { status: 'running', outputJson: {} },
+    { status: 'completed', outputJson: { resultAssetId: 'result_3' } },
+  ]), false)
+
+  assert.equal(harness.shouldStopPollingJobSnapshot(completedJob, [
+    { status: 'completed', outputJson: { resultAssetId: 'result_1' } },
+    { status: 'completed', outputJson: {} },
+    { status: 'completed', outputJson: { resultAssetId: 'result_3' } },
+  ]), false)
+
+  assert.equal(harness.shouldStopPollingJobSnapshot(completedJob, [
+    { status: 'completed', outputJson: { resultAssetId: 'result_1' } },
+    { status: 'completed', outputJson: { resultAssetId: 'result_2' } },
+    { status: 'completed', outputJson: { resultAssetId: 'result_3' } },
+  ]), true)
 })
 
 test('outfit history hydration uses asset URLs and backend look ids for completed results', async () => {
