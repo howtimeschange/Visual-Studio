@@ -26,6 +26,7 @@ export interface Env {
   VS_OUTFIT_TASK_MAX_POLLS_PER_RUN?: string
   VS_TRANSLATE_ITEMS_PER_RUN?: string
   VS_OUTFIT_ITEMS_PER_RUN?: string
+  VS_OUTFIT_EXISTING_TASK_ITEMS_PER_RUN?: string
   VS_DB?: D1Database
   VS_INPUTS_BUCKET?: R2Bucket
   VS_RESULTS_BUCKET?: R2Bucket

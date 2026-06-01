@@ -63,6 +63,7 @@ const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 1
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
 const DEFAULT_OUTFIT_ITEMS_PER_RUN = 2
+const DEFAULT_OUTFIT_EXISTING_TASK_ITEMS_PER_RUN = 20
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -453,15 +454,51 @@ async function requeueItems(env: Env, jobId: string, items: JobItemRecord[]): Pr
   })))
 }
 
+async function requeueImageTaskItems(env: Env, jobId: string, items: JobItemRecord[]): Promise<void> {
+  await Promise.all(items.map((item) => updateJobItem(env, jobId, item.id, {
+    status: 'queued',
+    outputJson: {
+      ...item.outputJson,
+      imageTask: getRecoverableImageTask(item),
+      nextPollAfterMs: 0,
+    },
+    errorCode: null,
+    errorMessage: null,
+    startedAt: null,
+    finishedAt: null,
+  })))
+}
+
+function getRecoverableImageTask(item: JobItemRecord): Record<string, unknown> | null {
+  const output = item.outputJson || {}
+  const task = output.imageTask
+  if (task && typeof task === 'object') {
+    const record = task as Record<string, unknown>
+    if (
+      String(record.id || '').trim()
+      || String(record.task_id || '').trim()
+      || String(record.taskId || '').trim()
+      || String(record.poll_url || '').trim()
+      || String(record.pollUrl || '').trim()
+    ) {
+      return record
+    }
+  }
+
+  const pollTarget = String(output.imageTaskPollTarget || '').trim()
+  const pollUrl = String(output.imageTaskPollUrl || '').trim()
+  if (!pollTarget && !pollUrl) return null
+  const nextPollAfterMs = Number(output.nextPollAfterMs)
+  return {
+    id: pollTarget || undefined,
+    status: String(output.imageTaskStatus || 'running'),
+    poll_url: pollUrl || pollTarget,
+    poll_after: Number.isFinite(nextPollAfterMs) ? Math.max(0, nextPollAfterMs / 1000) : undefined,
+  }
+}
+
 function hasRecoverableImageTask(item: JobItemRecord): boolean {
-  const task = item.outputJson?.imageTask
-  return Boolean(task && typeof task === 'object' && (
-    String(task.id || '').trim()
-    || String(task.task_id || '').trim()
-    || String(task.taskId || '').trim()
-    || String(task.poll_url || '').trim()
-    || String(task.pollUrl || '').trim()
-  ))
+  return Boolean(getRecoverableImageTask(item))
 }
 
 async function scheduleJobExecution(
@@ -585,7 +622,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
-    const queuedExistingTask = queuedItem.outputJson?.imageTask
+    const queuedExistingTask = getRecoverableImageTask(queuedItem)
     const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
       attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
       startedAt: nowIso(),
@@ -831,8 +868,17 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
   await publishEvent(env, 'job', jobId, 'status', { status: 'running' })
 
   const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
-  const maxItemsPerRun = resolveItemsPerRun(env.VS_OUTFIT_ITEMS_PER_RUN, DEFAULT_OUTFIT_ITEMS_PER_RUN)
-  const runItems = items.slice(0, maxItemsPerRun)
+  const existingTaskItems = items.filter(hasRecoverableImageTask)
+  const newTaskItems = items.filter((item) => !hasRecoverableImageTask(item))
+  const maxExistingTaskItemsPerRun = resolveItemsPerRun(
+    env.VS_OUTFIT_EXISTING_TASK_ITEMS_PER_RUN,
+    DEFAULT_OUTFIT_EXISTING_TASK_ITEMS_PER_RUN,
+  )
+  const maxNewTaskItemsPerRun = resolveItemsPerRun(env.VS_OUTFIT_ITEMS_PER_RUN, DEFAULT_OUTFIT_ITEMS_PER_RUN)
+  const runItems = [
+    ...existingTaskItems.slice(0, maxExistingTaskItemsPerRun),
+    ...newTaskItems.slice(0, maxNewTaskItemsPerRun),
+  ].slice(0, MAX_JOB_ITEMS_PER_RUN)
   const concurrency = Math.min(
     runItems.length || 1,
     clampInt(
@@ -855,7 +901,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
-    const queuedExistingTask = queuedItem.outputJson?.imageTask
+    const queuedExistingTask = getRecoverableImageTask(queuedItem)
     const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
       attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
       startedAt: nowIso(),
@@ -867,7 +913,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
 
     let outfitAnalysisForRetry = item.outputJson?.outfitAnalysis || null
     try {
-      const existingTask = item.outputJson?.imageTask
+      const existingTask = getRecoverableImageTask(item)
       let analysis = item.outputJson?.outfitAnalysis || null
       let result
       if (existingTask) {
@@ -1913,7 +1959,7 @@ async function recoverRunningJob(env: Env, job: JobRecord, staleAfterMs: number)
 
   for (const item of staleItems) {
     if (hasRecoverableImageTask(item)) {
-      await requeueItems(env, job.id, [item])
+      await requeueImageTaskItems(env, job.id, [item])
     } else if (item.attemptCount >= MAX_JOB_ITEM_ATTEMPTS) {
       await updateJobItem(env, job.id, item.id, {
         status: 'failed',
@@ -1974,12 +2020,16 @@ function isStaleItem(item: JobItemRecord, job: JobRecord, staleAfterMs: number):
 }
 
 function isRecoverableRunningItemReady(item: JobItemRecord): boolean {
-  return false
+  if (!hasRecoverableImageTask(item)) return false
+  const startedAt = Date.parse(String(item.startedAt || ''))
+  if (!Number.isFinite(startedAt)) return true
+  return Date.now() - startedAt >= clampPollWindowMs(item.outputJson?.nextPollAfterMs)
 }
 
 function clampPollWindowMs(value: unknown): number {
   const numeric = Math.floor(Number(value))
   if (!Number.isFinite(numeric) || numeric < 0) return 15_000
+  if (numeric === 0) return 0
   return Math.min(60_000, Math.max(MIN_RUNNING_JOB_RETRY_AFTER_MS, numeric))
 }
 
