@@ -1605,7 +1605,7 @@ function sanitizeStoredJobTasks(rawJobs, legacyJobId = '', fallbackType = '') {
         ...task,
         status,
         type,
-        loaded: task.loaded && !ACTIVE_JOB_STATUSES.has(status) && status !== '',
+        loaded: Boolean(task.loaded),
       } : null
     })
     .filter(Boolean)
@@ -1632,7 +1632,7 @@ function sanitizeStoredJobTasks(rawJobs, legacyJobId = '', fallbackType = '') {
 }
 
 function getLoadedStoredJobId(tasks = []) {
-  return tasks.find((task) => task.loaded && !ACTIVE_JOB_STATUSES.has(task.status) && task.status !== '')?.jobId || ''
+  return tasks.find((task) => task.loaded)?.jobId || ''
 }
 
 function getJobTasks(kind) {

@@ -161,6 +161,8 @@ type ImageModelOptions = {
   pollIntervalMs?: number
   maxPollAttempts?: number
   existingTask?: any
+  returnAfterCreate?: boolean
+  skipInitialPollDelay?: boolean
 }
 
 type ImageSourceResult =
@@ -217,11 +219,17 @@ export async function callImageModelTaskStep(
       : await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs, deadlineAt)
     if (!task.ok) return task
 
+    const maxPollAttempts = normalizeMaxPollAttempts(opts.maxPollAttempts)
+    if (!opts.existingTask && opts.returnAfterCreate && maxPollAttempts > 0) {
+      const pendingTask = buildPendingImageTaskResult(baseUrl, task.data, opts)
+      if (pendingTask) return pendingTask
+    }
+
     const finalTask = await waitForAsyncImageTask(baseUrl, apiKey, task.data, opts, {
       timeoutMs,
       taskHttpTimeoutMs,
       startedAt,
-      maxPollAttempts: normalizeMaxPollAttempts(opts.maxPollAttempts),
+      maxPollAttempts,
     })
     if (!finalTask.ok) return finalTask
 
@@ -243,6 +251,32 @@ export async function callImageModelTaskStep(
       return { ok: false, error: `Upstream image task timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
     }
     return { ok: false, error: e?.message ?? 'fetch failed', status: 502 }
+  }
+}
+
+function buildPendingImageTaskResult(
+  baseUrl: string,
+  task: any,
+  requestOpts: ImageModelOptions,
+): Extract<ImageTaskStepResult, { pending: true }> | null {
+  const status = normalizeTaskStatus(task?.status)
+  if (SUCCEEDED_IMAGE_TASK_STATUSES.has(status) || FAILED_IMAGE_TASK_STATUSES.has(status) || extractImageFromResponse(task)) {
+    return null
+  }
+  const pollTarget = String(task?.poll_url || task?.pollUrl || task?.id || task?.task_id || task?.taskId || '').trim()
+  if (!pollTarget) return null
+  const nextPollAfterMs = normalizePollAfterMs(
+    task?.poll_after ?? task?.pollAfter,
+    requestOpts.pollIntervalMs,
+  )
+  return {
+    ok: false,
+    pending: true,
+    task,
+    pollTarget,
+    pollUrl: buildImageTaskPollUrl(baseUrl, pollTarget),
+    taskStatus: status || 'queued',
+    nextPollAfterMs,
   }
 }
 
@@ -358,7 +392,9 @@ async function waitForAsyncImageTask(
       }
     }
 
-    await sleep(Math.min(nextPollAfterMs, remainingMs))
+    if (!(requestOpts.skipInitialPollDelay && pollAttempts === 0)) {
+      await sleep(Math.min(nextPollAfterMs, remainingMs))
+    }
     if (Date.now() - opts.startedAt >= opts.timeoutMs) {
       return {
         ok: false,

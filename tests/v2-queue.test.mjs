@@ -23,14 +23,16 @@ async function importQueue() {
 test('dispatchQueuedJob uses a bound queue by default', async () => {
   const { mod, cleanup } = await importQueue()
   const sent = []
+  const options = []
   let fallbackCalled = false
 
   try {
     const mode = await mod.dispatchQueuedJob(
       {
         VS_OUTFIT_JOBS_QUEUE: {
-          send: async (message) => {
+          send: async (message, sendOptions) => {
             sent.push(message)
+            options.push(sendOptions)
           },
         },
       },
@@ -50,7 +52,41 @@ test('dispatchQueuedJob uses a bound queue by default', async () => {
     assert.equal(mode, 'queue')
     assert.equal(sent.length, 1)
     assert.equal(sent[0].jobId, 'job_test')
+    assert.equal(options[0], undefined)
     assert.equal(fallbackCalled, false)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('dispatchQueuedJob forwards delayed queue messages', async () => {
+  const { mod, cleanup } = await importQueue()
+  const sent = []
+  const options = []
+
+  try {
+    const mode = await mod.dispatchQueuedJob(
+      {
+        VS_OUTFIT_JOBS_QUEUE: {
+          send: async (message, sendOptions) => {
+            sent.push(message)
+            options.push(sendOptions)
+          },
+        },
+      },
+      undefined,
+      mod.createJobQueueMessage({
+        jobId: 'job_delayed',
+        jobType: 'outfit_batch',
+        reason: 'recover',
+        delaySeconds: 30,
+      }),
+      async () => {},
+    )
+
+    assert.equal(mode, 'queue')
+    assert.equal(sent[0].jobId, 'job_delayed')
+    assert.deepEqual(options[0], { delaySeconds: 30 })
   } finally {
     await cleanup()
   }

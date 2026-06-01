@@ -138,6 +138,8 @@ export async function executeStyleTransferGenerate(env: Env, body: any) {
   const subjectAssetIds = Array.isArray(body?.subjectAssetIds) ? body.subjectAssetIds.filter(Boolean) : []
   const existingTask = body?.existingTask || null
   const maxPollAttempts = normalizeStyleMaxPollAttempts(body?.maxPollAttempts)
+  const returnAfterCreate = Boolean(body?.returnAfterCreate)
+  const skipInitialPollDelay = Boolean(body?.skipInitialPollDelay)
 
   if (!subject && subjectAssetIds.length === 0) throw createError('subject or subjectAssetIds required', 400)
   if (!visualStyle) throw createError('visualStyle required', 400)
@@ -214,6 +216,8 @@ ${styleJson}`
       ...imageModelOptions,
       existingTask,
       maxPollAttempts,
+      returnAfterCreate,
+      skipInitialPollDelay,
     },
   )
 

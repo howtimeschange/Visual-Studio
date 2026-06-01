@@ -53,6 +53,7 @@ async function createJobHarness() {
     'sanitizeJobTaskThumbs',
     'serializeJobTask',
     'sanitizeStoredJobTasks',
+    'getLoadedStoredJobId',
     'getJobTasks',
     'getLoadedJobId',
     'getJobTab',
@@ -90,6 +91,25 @@ test('sanitizeStoredJobTasks keeps only tasks matching the current view type', a
   ], '', 'outfit_batch')
 
   assert.deepEqual(Array.from(result).map((task) => task.jobId), ['job-outfit'])
+})
+
+test('sanitizeStoredJobTasks preserves loaded active outfit jobs after refresh', async () => {
+  const harness = await createJobHarness()
+  const result = harness.sanitizeStoredJobTasks([
+    { jobId: 'job-active-outfit', type: 'outfit_batch', status: 'running', loaded: true, label: 'outfit' },
+  ], '', 'outfit_batch')
+
+  assert.equal(result[0].jobId, 'job-active-outfit')
+  assert.equal(result[0].loaded, true)
+})
+
+test('getLoadedStoredJobId restores loaded active jobs after refresh', async () => {
+  const harness = await createJobHarness()
+  const tasks = [
+    { jobId: 'job-active-outfit', type: 'outfit_batch', status: 'running', loaded: true },
+  ]
+
+  assert.equal(harness.getLoadedStoredJobId(tasks), 'job-active-outfit')
 })
 
 test('filterJobTasksForTab separates current work from generated history', async () => {

@@ -784,8 +784,16 @@ test('runGenerateBatchJob resumes a pending image task across queue invocations'
     let [item] = await mod.listJobItems(env, submitted.jobId)
     assert.equal(job.status, 'queued')
     assert.equal(item.status, 'queued')
-    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
     assert.equal(sent.length, 2)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
 
     await mod.runQueuedJob(env, submitted.jobId)
 
@@ -1237,11 +1245,20 @@ test('runOutfitBatchJob resumes a pending outfit image task across queue invocat
     let [item] = await mod.listJobItems(env, submitted.jobId)
     assert.equal(job.status, 'queued')
     assert.equal(item.status, 'queued')
-    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
     assert.equal(item.attemptCount, 1)
     assert.equal(sent.length, 2)
     assert.equal(inputStats.get, 2)
     assert.equal(visionCalls, 1)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(item.attemptCount, 1)
 
     await mod.runQueuedJob(env, submitted.jobId)
 
@@ -1508,7 +1525,204 @@ test('runQueuedJob recovers a stale running outfit image task on duplicate deliv
   }
 })
 
-test('runQueuedJob recovers a running outfit image task after its poll window', async () => {
+test('runOutfitBatchJob stores a newly created outfit image task before polling', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const inputStats = {}
+  let visionCalls = 0
+  const env = {
+    VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '5',
+    VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    const payload = init.body ? JSON.parse(String(init.body || '{}')) : {}
+    if (payload.model === 'gemini-3-flash-preview') {
+      visionCalls += 1
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              model: { framing: 'full-body', pose: 'standing' },
+              garments: [{ index: 2, role: 'top', category: 'shirt' }],
+            }),
+          },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_outfit_create_only',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_outfit_create_only',
+        poll_after: 30,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_outfit_create_only',
+      status: 'succeeded',
+      data: [{ b64_json: 'dW5leHBlY3RlZA==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_create_then_poll', null)
+    const model = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,bW9kZWw=',
+      filename: 'model.png',
+    })
+    const top = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,dG9w',
+      filename: 'top.png',
+    })
+
+    const submitted = await mod.submitOutfitBatch(env, {
+      sessionId: session.id,
+      modelAssetIds: [model.id],
+      modelId: 'nano-banana-2',
+      garments: [{ assetId: top.id, role: 'top', label: 'top.png' }],
+      concurrency: 1,
+      clientKeys: {
+        banana2ApiKey: 'image-key',
+        visionApiKey: 'vision-key',
+      },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTask.id, 'task_outfit_create_only')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
+    assert.equal(item.outputJson.nextPollAfterMs, 30_000)
+    assert.equal(item.attemptCount, 1)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('task_outfit_create_only')).length, 0)
+    assert.equal(sent.length, 2)
+    assert.equal(visionCalls, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runOutfitBatchJob polls an existing outfit image task immediately after queue delay', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    BANANA2_API_KEY: 'image-key',
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init, at: Date.now() })
+    return new Response(JSON.stringify({
+      id: 'task_outfit_immediate_poll',
+      status: 'succeeded',
+      data: [{ b64_json: 'aW1tZWRpYXRlLXBvbGwtb3V0Zml0' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_outfit_immediate_poll', null)
+    const job = await mod.createJob(env, {
+      id: 'job_outfit_immediate_poll',
+      sessionId: session.id,
+      userId: null,
+      type: 'outfit_batch',
+      status: 'queued',
+      configJson: {
+        modelId: 'nano-banana-2',
+        concurrency: 1,
+      },
+      summaryJson: { lookCount: 1 },
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'outfit_cell',
+      status: 'queued',
+      inputJson: {
+        modelAssetId: 'asset_model_immediate_poll',
+        modelLabel: 'model.png',
+        lookId: 'look_immediate_poll',
+      },
+      outputJson: {
+        imageTask: {
+          id: 'task_outfit_immediate_poll',
+          status: 'running',
+          poll_url: 'https://relay.example/v1/images/tasks/task_outfit_immediate_poll',
+          poll_after: 30,
+        },
+        imageTaskStatus: 'running',
+        nextPollAfterMs: 30_000,
+      },
+      attemptCount: 1,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+    }])
+
+    const started = Date.now()
+    const result = await mod.runQueuedJob(env, job.id)
+    const elapsed = Date.now() - started
+    const nextJob = await mod.getJob(env, job.id)
+    const [nextItem] = await mod.listJobItems(env, job.id)
+
+    assert.equal(result.status, 'completed')
+    assert.equal(nextJob.status, 'completed')
+    assert.equal(nextItem.status, 'completed')
+    assert.equal(calls.filter((call) => String(call.input).includes('task_outfit_immediate_poll')).length, 1)
+    assert.ok(elapsed < 1000)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(nextItem.outputJson.resultAssetId)),
+      'data:image/png;base64,aW1tZWRpYXRlLXBvbGwtb3V0Zml0',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runQueuedJob leaves an active running outfit image task alone before the stale timeout', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
   const calls = []
@@ -1581,15 +1795,12 @@ test('runQueuedJob recovers a running outfit image task after its poll window', 
     const nextJob = await mod.getJob(env, job.id)
     const [nextItem] = await mod.listJobItems(env, job.id)
 
-    assert.equal(result.status, 'completed')
-    assert.equal(nextJob.status, 'completed')
-    assert.equal(nextItem.status, 'completed')
+    assert.equal(result.status, 'running')
+    assert.equal(result.skipped, true)
+    assert.equal(nextJob.status, 'running')
+    assert.equal(nextItem.status, 'running')
     assert.equal(nextItem.attemptCount, 1)
-    assert.equal(calls.filter((call) => String(call.input).includes('task_outfit_pollable_1')).length, 1)
-    assert.equal(
-      await mod.getAssetDataUrl(env, String(nextItem.outputJson.resultAssetId)),
-      'data:image/png;base64,cG9sbGFibGUtb3V0Zml0LXJlc3VsdA==',
-    )
+    assert.equal(calls.length, 0)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -1716,8 +1927,17 @@ test('runOutfitBatchJob retries a failed upstream image task with a fresh task i
     assert.equal(job.status, 'queued')
     assert.equal(item.status, 'queued')
     assert.equal(item.attemptCount, 1)
-    assert.equal(item.outputJson.imageTaskStatus, 'running')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
     assert.equal(sent.length, 2)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
 
     await mod.runQueuedJob(env, submitted.jobId)
 
@@ -1729,6 +1949,16 @@ test('runOutfitBatchJob retries a failed upstream image task with a fresh task i
     assert.equal(item.outputJson.imageTaskStatus, 'retrying')
     assert.match(item.outputJson.lastImageTaskError, /system memory overloaded/)
     assert.equal(Boolean(item.outputJson.imageTask), false)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 2)
+    assert.equal(item.outputJson.imageTask.id, 'task_outfit_retry_2')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
 
     await mod.runQueuedJob(env, submitted.jobId)
 
@@ -1852,6 +2082,15 @@ test('runOutfitBatchJob preserves created task when polling hits worker subreque
     assert.equal(item.attemptCount, 1)
     assert.equal(item.outputJson.imageTask.id, 'task_outfit_subrequest_limit')
     assert.equal(item.outputJson.imageTaskStatus, 'running')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTask.id, 'task_outfit_subrequest_limit')
     assert.match(item.outputJson.lastImageTaskError, /Too many subrequests/)
 
     await mod.runQueuedJob(env, submitted.jobId)

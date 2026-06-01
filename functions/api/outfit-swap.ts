@@ -30,7 +30,7 @@ export async function executeOutfitSwap(body: any, env: Env) {
 export async function executeOutfitSwapTaskStep(
   body: any,
   env: Env,
-  stepOptions: { existingTask?: any; maxPollAttempts?: number } = {},
+  stepOptions: { existingTask?: any; maxPollAttempts?: number; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
 ): Promise<
   | { pending: false; dataUrl: string }
   | Extract<ImageTaskStepResult, { pending: true }>
@@ -50,6 +50,8 @@ export async function executeOutfitSwapTaskStep(
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
   imageModelOptions.existingTask = stepOptions.existingTask
   imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
+  imageModelOptions.returnAfterCreate = stepOptions.returnAfterCreate
+  imageModelOptions.skipInitialPollDelay = stepOptions.skipInitialPollDelay
   if (!genKey) throw createOutfitError(`Missing API key for ${modelId}`, 400)
 
   if (stepOptions.existingTask) {

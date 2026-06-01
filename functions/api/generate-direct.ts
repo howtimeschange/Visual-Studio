@@ -192,7 +192,7 @@ export async function executeDirectGenerateTaskStep(
   env: Env,
   request: ReturnType<typeof normalizeDirectGenerateRequest>,
   clientKeys: any = {},
-  stepOptions: { existingTask?: any; maxPollAttempts?: number; finalPrompt?: string } = {},
+  stepOptions: { existingTask?: any; maxPollAttempts?: number; finalPrompt?: string; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
 ): Promise<
   | { pending: false; dataUrl: string; finalPrompt: string; width: number | null; height: number | null }
   | (Extract<ImageTaskStepResult, { pending: true }> & { finalPrompt: string })
@@ -204,6 +204,8 @@ export async function executeDirectGenerateTaskStep(
   imageModelOptions.resolution = request.resolution
   imageModelOptions.existingTask = stepOptions.existingTask
   imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
+  imageModelOptions.returnAfterCreate = stepOptions.returnAfterCreate
+  imageModelOptions.skipInitialPollDelay = stepOptions.skipInitialPollDelay
 
   if (!request.prompt) throw createError('prompt required', 400)
   if (!MODEL_MAP[request.modelId]) throw createError(`Unknown modelId: ${request.modelId}`, 400)

@@ -16,6 +16,7 @@ export interface JobQueueMessage {
   reason: 'submit' | 'retry' | 'recover'
   createdAt: string
   clientKeys?: Record<string, string>
+  delaySeconds?: number
 }
 
 async function postLocalQueueMessage(endpoint: string, message: JobQueueMessage): Promise<void> {
@@ -58,7 +59,8 @@ export async function dispatchQueuedJob(
 
   const queue = resolveQueue(env, message.jobType)
   if (mode !== 'waituntil' && queue?.send) {
-    await queue.send(message)
+    const delaySeconds = clampQueueDelaySeconds(message.delaySeconds)
+    await queue.send(message, delaySeconds > 0 ? { delaySeconds } : undefined)
     return 'queue'
   }
 
@@ -70,4 +72,10 @@ export async function dispatchQueuedJob(
 
   await task
   return 'inline'
+}
+
+function clampQueueDelaySeconds(value: unknown): number {
+  const numeric = Math.ceil(Number(value))
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0
+  return Math.min(900, numeric)
 }

@@ -1,5 +1,5 @@
 import type { Env } from '../functions/_shared'
-import { runQueuedJob } from '../functions/_lib/v2-runner'
+import { recoverJobs, runQueuedJob } from '../functions/_lib/v2-runner'
 
 type QueueMessageBody = {
   kind?: string
@@ -49,6 +49,15 @@ function json(data: unknown, status = 200) {
 export default {
   async queue(batch: MessageBatch<QueueMessageBody>, env: Env) {
     await processQueueMessages(batch.messages, env)
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx?: { waitUntil?: (promise: Promise<unknown>) => void }) {
+    const task = recoverJobs(env)
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(task)
+      return
+    }
+    await task
   },
 
   async fetch(request: Request, env: Env, ctx?: { waitUntil?: (promise: Promise<unknown>) => void }) {

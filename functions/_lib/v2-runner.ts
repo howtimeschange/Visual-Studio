@@ -60,7 +60,7 @@ const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 5 * 60_000
 const MIN_RUNNING_JOB_RETRY_AFTER_MS = 5_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
-const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
+const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 1
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
 const DEFAULT_OUTFIT_ITEMS_PER_RUN = 2
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
@@ -379,6 +379,13 @@ function countPendingItems(items: JobItemRecord[]): number {
   return items.filter((item) => item.status === 'queued' || item.status === 'running').length
 }
 
+function getNextPendingPollDelayMs(items: JobItemRecord[]): number {
+  const delays = items
+    .filter((item) => item.status === 'queued' && hasRecoverableImageTask(item))
+    .map((item) => clampPollWindowMs(item.outputJson?.nextPollAfterMs))
+  return delays.length ? Math.min(...delays) : 0
+}
+
 function resolveItemsPerRun(value: unknown, fallback: number): number {
   return clampInt(value, 1, MAX_JOB_ITEMS_PER_RUN, fallback)
 }
@@ -463,6 +470,7 @@ async function scheduleJobExecution(
   waitUntil: WaitUntil | undefined,
   reason: 'submit' | 'retry' | 'recover',
   clientKeys: ClientKeys = {},
+  delayMs = 0,
 ) {
   return dispatchQueuedJob(
     env,
@@ -472,6 +480,7 @@ async function scheduleJobExecution(
       jobType: job.type,
       reason,
       clientKeys: Object.keys(clientKeys || {}).length ? sanitizeClientKeys(clientKeys) : undefined,
+      delaySeconds: Math.max(0, Math.ceil(delayMs / 1000)) || undefined,
     }),
     () => runQueuedJob(env, job.id),
   )
@@ -576,8 +585,9 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
     const job = await getJob(env, jobId)
     if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
 
+    const queuedExistingTask = queuedItem.outputJson?.imageTask
     const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
-      attemptCount: queuedItem.attemptCount + 1,
+      attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
       startedAt: nowIso(),
       errorCode: null,
       errorMessage: null,
@@ -695,7 +705,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
       },
     })
     if (nextJob) await publishJobProgress(env, nextJob)
-    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover')
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover', {}, getNextPendingPollDelayMs(finalItems))
     return
   }
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
@@ -867,6 +877,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
         }, env, {
           existingTask,
           maxPollAttempts,
+          skipInitialPollDelay: true,
         })
       } else {
         const modelDataUrl = await getCachedAssetDataUrl(String(item.inputJson.modelAssetId || ''))
@@ -908,6 +919,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
           clientKeys,
         }, env, {
           maxPollAttempts,
+          returnAfterCreate: true,
         })
       }
       outfitAnalysisForRetry = analysis || outfitAnalysisForRetry
@@ -1046,7 +1058,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
       },
     })
     if (nextJob) await publishJobProgress(env, nextJob)
-    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover')
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover', {}, getNextPendingPollDelayMs(finalItems))
     return
   }
 
@@ -1188,7 +1200,34 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
         subjectAssetIds,
         modelId: job.configJson.modelId,
         clientKeys,
+        existingTask: item.outputJson?.imageTask,
+        maxPollAttempts: DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN,
+        returnAfterCreate: true,
+        skipInitialPollDelay: Boolean(item.outputJson?.imageTask),
       }))
+
+      if ((result as any).pending) {
+        await updateJobItem(env, jobId, item.id, {
+          status: 'queued',
+          outputJson: {
+            ...item.outputJson,
+            imageTask: (result as any).task,
+            imageTaskPollTarget: (result as any).pollTarget,
+            imageTaskPollUrl: (result as any).pollUrl,
+            imageTaskStatus: (result as any).taskStatus,
+            nextPollAfterMs: (result as any).nextPollAfterMs,
+          },
+          errorCode: null,
+          errorMessage: null,
+          startedAt: null,
+          finishedAt: null,
+        })
+        await publishEvent(env, 'item', item.id, 'progress', {
+          jobId,
+          imageTaskStatus: (result as any).taskStatus,
+        })
+        return
+      }
 
       const safeLabel = String(item.inputJson.label || item.inputJson.subject || item.id || 'style-transfer')
         .replace(/[^\w.-]+/g, '_')
@@ -1270,7 +1309,7 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
       },
     })
     if (nextJob) await publishJobProgress(env, nextJob)
-    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover')
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover', {}, getNextPendingPollDelayMs(finalItems))
     return
   }
   const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
@@ -1612,6 +1651,8 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       existingTask,
       finalPrompt: String(claimedItem.outputJson?.finalPrompt || ''),
       maxPollAttempts,
+      returnAfterCreate: true,
+      skipInitialPollDelay: Boolean(existingTask),
     })
     if (result.pending) {
       await updateJobItem(env, jobId, claimedItem.id, {
@@ -1643,7 +1684,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
         type: initialJob.type,
         imageTaskStatus: result.taskStatus,
       })
-      await scheduleJobExecution(env, { ...initialJob, status: 'queued' }, undefined, 'recover')
+      await scheduleJobExecution(env, { ...initialJob, status: 'queued' }, undefined, 'recover', {}, result.nextPollAfterMs)
       return
     }
     const resultAsset = await createAsset(env, {
@@ -1924,11 +1965,7 @@ function isStaleItem(item: JobItemRecord, job: JobRecord, staleAfterMs: number):
 }
 
 function isRecoverableRunningItemReady(item: JobItemRecord): boolean {
-  if (!hasRecoverableImageTask(item)) return false
-  const startedAt = Date.parse(String(item.startedAt || ''))
-  if (!Number.isFinite(startedAt)) return true
-  const nextPollAfterMs = clampPollWindowMs(item.outputJson?.nextPollAfterMs)
-  return Date.now() - startedAt >= nextPollAfterMs
+  return false
 }
 
 function clampPollWindowMs(value: unknown): number {

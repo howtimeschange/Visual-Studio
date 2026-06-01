@@ -155,3 +155,55 @@ test('queue consumer retries active running jobs instead of acknowledging them',
     await cleanup()
   }
 })
+
+test('queue consumer scheduled handler recovers stale queued jobs', async () => {
+  const { mod, cleanup } = await importConsumer()
+  const sent = []
+  const env = {
+    VS_OUTFIT_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_consumer_scheduled_recover', null)
+    const job = await mod.createJob(env, {
+      id: 'job_consumer_scheduled_recover',
+      sessionId: session.id,
+      userId: null,
+      type: 'outfit_batch',
+      status: 'queued',
+      configJson: {
+        modelId: 'nano-banana-2',
+        concurrency: 1,
+      },
+      summaryJson: {},
+      progressTotal: 1,
+      progressDone: 0,
+      progressFailed: 0,
+    })
+    await mod.createJobItems(env, job.id, [{
+      jobId: job.id,
+      itemType: 'outfit_cell',
+      status: 'queued',
+      inputJson: {},
+      outputJson: {},
+      attemptCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+    }])
+
+    assert.equal(typeof mod.default.scheduled, 'function')
+    await mod.default.scheduled({}, env)
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].jobId, job.id)
+    assert.equal(sent[0].reason, 'recover')
+  } finally {
+    await cleanup()
+  }
+})
