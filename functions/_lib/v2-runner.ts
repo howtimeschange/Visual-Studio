@@ -52,6 +52,8 @@ type RunQueuedJobResult = { jobId: string; status: string; skipped?: boolean; re
 const DEFAULT_TRANSLATE_MODEL_ID = 'gpt-image-2'
 const DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY = 10
 const MAX_ASYNC_IMAGE_JOB_CONCURRENCY = 10
+const DEFAULT_OUTFIT_IMAGE_JOB_CONCURRENCY = 2
+const MAX_OUTFIT_IMAGE_JOB_CONCURRENCY = 2
 const MAX_JOB_ITEMS_PER_RUN = 20
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
@@ -59,7 +61,7 @@ const DEFAULT_STALE_JOB_ITEM_MS = 5 * 60_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
-const DEFAULT_OUTFIT_ITEMS_PER_RUN = 20
+const DEFAULT_OUTFIT_ITEMS_PER_RUN = 2
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -825,8 +827,8 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     clampInt(
       initialJob.configJson?.concurrency,
       1,
-      MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
-      DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+      MAX_OUTFIT_IMAGE_JOB_CONCURRENCY,
+      DEFAULT_OUTFIT_IMAGE_JOB_CONCURRENCY,
     ),
   )
   const maxPollAttempts = clampNonNegativeInt(
@@ -854,52 +856,60 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
 
     let outfitAnalysisForRetry = item.outputJson?.outfitAnalysis || null
     try {
-      const modelDataUrl = await getCachedAssetDataUrl(String(item.inputJson.modelAssetId || ''))
-      if (!modelDataUrl) throw createRunnerError(`Model asset not found: ${item.inputJson.modelAssetId}`, 404)
-      const garmentUrls = await Promise.all(
-        (Array.isArray(item.inputJson.lookAssetIds) ? item.inputJson.lookAssetIds : [])
-          .map((assetId) => getCachedAssetDataUrl(String(assetId))),
-      )
-      if (garmentUrls.some((value) => !value)) {
-        throw createRunnerError('One or more garment assets are missing', 404)
-      }
-
-      const modelImage = splitDataUrl(modelDataUrl)
-      const garments = garmentUrls.map((dataUrl, index) => {
-        const image = splitDataUrl(String(dataUrl))
-        return {
-          base64: image.base64,
-          mime: image.mime,
-          role: Array.isArray(item.inputJson.lookRoles) ? item.inputJson.lookRoles[index] : 'full_outfit',
-          label: Array.isArray(item.inputJson.lookLabels)
-            ? String(item.inputJson.lookLabels[index] || '')
-            : (Array.isArray(item.inputJson.lookAssetIds) ? String(item.inputJson.lookAssetIds[index]) : ''),
-          instructions: Array.isArray(item.inputJson.lookInstructions)
-            ? cleanInstruction(item.inputJson.lookInstructions[index])
-            : '',
-        }
-      })
       const existingTask = item.outputJson?.imageTask
-      const analysis = existingTask
-        ? item.outputJson?.outfitAnalysis || null
-        : await getCachedOutfitAnalysis(getOutfitAnalysisCacheKey(item), modelImage, garments)
-      outfitAnalysisForRetry = analysis || outfitAnalysisForRetry
+      let analysis = item.outputJson?.outfitAnalysis || null
+      let result
+      if (existingTask) {
+        result = await executeOutfitSwapTaskStep({
+          modelId: job.configJson.modelId,
+          clientKeys,
+        }, env, {
+          existingTask,
+          maxPollAttempts,
+        })
+      } else {
+        const modelDataUrl = await getCachedAssetDataUrl(String(item.inputJson.modelAssetId || ''))
+        if (!modelDataUrl) throw createRunnerError(`Model asset not found: ${item.inputJson.modelAssetId}`, 404)
+        const garmentUrls = await Promise.all(
+          (Array.isArray(item.inputJson.lookAssetIds) ? item.inputJson.lookAssetIds : [])
+            .map((assetId) => getCachedAssetDataUrl(String(assetId))),
+        )
+        if (garmentUrls.some((value) => !value)) {
+          throw createRunnerError('One or more garment assets are missing', 404)
+        }
 
-      const result = await executeOutfitSwapTaskStep({
-        modelId: job.configJson.modelId,
-        model: {
-          ...modelImage,
-          label: String(item.inputJson.modelLabel || item.inputJson.modelAssetId || ''),
-          instructions: cleanInstruction(item.inputJson.modelInstructions),
-        },
-        garments,
-        instructions: job.configJson.instructions,
-        analysis,
-        clientKeys,
-      }, env, {
-        existingTask,
-        maxPollAttempts,
-      })
+        const modelImage = splitDataUrl(modelDataUrl)
+        const garments = garmentUrls.map((dataUrl, index) => {
+          const image = splitDataUrl(String(dataUrl))
+          return {
+            base64: image.base64,
+            mime: image.mime,
+            role: Array.isArray(item.inputJson.lookRoles) ? item.inputJson.lookRoles[index] : 'full_outfit',
+            label: Array.isArray(item.inputJson.lookLabels)
+              ? String(item.inputJson.lookLabels[index] || '')
+              : (Array.isArray(item.inputJson.lookAssetIds) ? String(item.inputJson.lookAssetIds[index]) : ''),
+            instructions: Array.isArray(item.inputJson.lookInstructions)
+              ? cleanInstruction(item.inputJson.lookInstructions[index])
+              : '',
+          }
+        })
+        analysis = await getCachedOutfitAnalysis(getOutfitAnalysisCacheKey(item), modelImage, garments)
+        result = await executeOutfitSwapTaskStep({
+          modelId: job.configJson.modelId,
+          model: {
+            ...modelImage,
+            label: String(item.inputJson.modelLabel || item.inputJson.modelAssetId || ''),
+            instructions: cleanInstruction(item.inputJson.modelInstructions),
+          },
+          garments,
+          instructions: job.configJson.instructions,
+          analysis,
+          clientKeys,
+        }, env, {
+          maxPollAttempts,
+        })
+      }
+      outfitAnalysisForRetry = analysis || outfitAnalysisForRetry
 
       if (result.pending) {
         await updateJobItem(env, jobId, item.id, {

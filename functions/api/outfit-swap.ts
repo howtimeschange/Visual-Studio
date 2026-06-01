@@ -43,11 +43,7 @@ export async function executeOutfitSwapTaskStep(
     clientKeys = {},
   } = body ?? {}
 
-  if (!model?.base64) throw createOutfitError('model image required', 400)
   if (!MODEL_MAP[modelId]) throw createOutfitError(`Unknown modelId: ${modelId}`, 400)
-
-  const garmentItems = normalizeGarments(garments, garment, garmentType)
-  if (garmentItems.length === 0) throw createOutfitError('at least one garment image required', 400)
 
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const { genKey } = resolveKeys(modelId, env, clientKeys)
@@ -68,9 +64,12 @@ export async function executeOutfitSwapTaskStep(
     return { pending: false, dataUrl: result.dataUrl }
   }
 
-  const analysis = stepOptions.existingTask
-    ? body?.analysis || null
-    : body?.analysis || await prepareOutfitAnalysis({
+  if (!model?.base64) throw createOutfitError('model image required', 400)
+
+  const garmentItems = normalizeGarments(garments, garment, garmentType)
+  if (garmentItems.length === 0) throw createOutfitError('at least one garment image required', 400)
+
+  const analysis = body?.analysis || await prepareOutfitAnalysis({
       modelId,
       model,
       garments: garmentItems,

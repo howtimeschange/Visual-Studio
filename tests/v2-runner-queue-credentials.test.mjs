@@ -1025,7 +1025,7 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
   }
 })
 
-test('runOutfitBatchJob processes 20 queued items per queue invocation by default', async () => {
+test('runOutfitBatchJob processes 2 queued outfit items per queue invocation by default', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
   const sent = []
@@ -1110,19 +1110,20 @@ test('runOutfitBatchJob processes 20 queued items per queue invocation by defaul
     let job = await mod.getJob(env, submitted.jobId)
     let items = await mod.listJobItems(env, submitted.jobId)
     assert.equal(job.status, 'queued')
-    assert.equal(items.filter((item) => item.status === 'completed').length, 20)
-    assert.equal(items.filter((item) => item.status === 'queued').length, 1)
-    assert.equal(imageCalls, 20)
+    assert.equal(items.filter((item) => item.status === 'completed').length, 2)
+    assert.equal(items.filter((item) => item.status === 'queued').length, 19)
+    assert.equal(imageCalls, 2)
     assert.equal(sent.length, 2)
 
     await mod.runQueuedJob(env, submitted.jobId)
 
     job = await mod.getJob(env, submitted.jobId)
     items = await mod.listJobItems(env, submitted.jobId)
-    assert.equal(job.status, 'completed')
-    assert.equal(items.filter((item) => item.status === 'completed').length, 21)
-    assert.equal(imageCalls, 21)
-    assert.equal(visionCalls, 21)
+    assert.equal(job.status, 'queued')
+    assert.equal(items.filter((item) => item.status === 'completed').length, 4)
+    assert.equal(items.filter((item) => item.status === 'queued').length, 17)
+    assert.equal(imageCalls, 4)
+    assert.equal(visionCalls, 4)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()
@@ -1134,9 +1135,11 @@ test('runOutfitBatchJob resumes a pending outfit image task across queue invocat
   const originalFetch = globalThis.fetch
   const sent = []
   const calls = []
+  const inputStats = {}
+  let visionCalls = 0
   const env = {
     VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '1',
-    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_OUTFIT_JOBS_QUEUE: {
       send: async (message) => {
@@ -1149,6 +1152,7 @@ test('runOutfitBatchJob resumes a pending outfit image task across queue invocat
     calls.push({ input: String(input), init })
     const payload = init.body ? JSON.parse(String(init.body || '{}')) : {}
     if (payload.model === 'gemini-3-flash-preview') {
+      visionCalls += 1
       return new Response(JSON.stringify({
         choices: [{
           message: {
@@ -1236,6 +1240,8 @@ test('runOutfitBatchJob resumes a pending outfit image task across queue invocat
     assert.equal(item.outputJson.imageTaskStatus, 'running')
     assert.equal(item.attemptCount, 1)
     assert.equal(sent.length, 2)
+    assert.equal(inputStats.get, 2)
+    assert.equal(visionCalls, 1)
 
     await mod.runQueuedJob(env, submitted.jobId)
 
@@ -1245,6 +1251,8 @@ test('runOutfitBatchJob resumes a pending outfit image task across queue invocat
     assert.equal(item.status, 'completed')
     assert.equal(item.attemptCount, 1)
     assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(inputStats.get, 2)
+    assert.equal(visionCalls, 1)
     assert.equal(
       await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
       'data:image/png;base64,b3V0Zml0LXJlc3VtZWQ=',
