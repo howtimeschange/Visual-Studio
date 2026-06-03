@@ -58,6 +58,49 @@ async function createUploadHarness() {
   return { ...context, uploads }
 }
 
+async function createImageCompressionHarness({ compressedBase64Length = 1024 } = {}) {
+  const source = await readFile(APP_PATH, 'utf8')
+  const drawCalls = []
+  const context = {
+    UPSTREAM_IMAGE_INPUT_MAX_BYTES: 20 * 1024 * 1024,
+    UPLOAD_IMAGE_SAFE_MAX_BYTES: 18 * 1024 * 1024,
+    UPLOAD_IMAGE_MAX_EDGE: 2048,
+    splitDataUrl: (dataUrl) => {
+      const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/)
+      return match ? { mime: match[1], base64: match[2] } : null
+    },
+    document: {
+      createElement: (tag) => {
+        assert.equal(tag, 'canvas')
+        return {
+          width: 0,
+          height: 0,
+          getContext: () => ({
+            drawImage: (...args) => drawCalls.push(args),
+          }),
+          toDataURL: () => `data:image/jpeg;base64,${'c'.repeat(compressedBase64Length)}`,
+        }
+      },
+    },
+    loadCanvasImage: async () => ({
+      width: 6000,
+      height: 3000,
+      naturalWidth: 6000,
+      naturalHeight: 3000,
+    }),
+  }
+
+  const harnessSource = [
+    extractFunction(source, 'estimateDataUrlBytes'),
+    extractFunction(source, 'normalizeUploadImageDataUrl'),
+    extractFunction(source, 'compressImageDataUrlForUpload'),
+  ].join('\n')
+
+  vm.createContext(context)
+  vm.runInContext(harnessSource, context)
+  return { ...context, drawCalls }
+}
+
 async function createTranslateRunConfigHarness() {
   const source = await readFile(APP_PATH, 'utf8')
   const uploads = []
@@ -206,6 +249,51 @@ test('prepareAssetItems reports upload progress for each file', async () => {
   assert.equal(harness.uploads[1].body.width, 20)
   assert.equal(harness.uploads[1].body.height, 20)
   assert.equal(harness.state.runtime.sessionId, 'sess_uploaded')
+})
+
+test('large upload images are compressed before they hit upstream limits', async () => {
+  const harness = await createImageCompressionHarness()
+  const largeDataUrl = `data:image/png;base64,${'a'.repeat(26_000_000)}`
+
+  const compressed = await harness.normalizeUploadImageDataUrl(largeDataUrl, {
+    name: 'oversized.png',
+    type: 'image/png',
+  })
+
+  assert.equal(compressed.mime, 'image/jpeg')
+  assert.equal(compressed.compressed, true)
+  assert.ok(compressed.sizeBytes <= harness.UPLOAD_IMAGE_SAFE_MAX_BYTES)
+  assert.ok(compressed.originalSizeBytes > harness.UPLOAD_IMAGE_SAFE_MAX_BYTES)
+  assert.equal(harness.drawCalls.length, 1)
+})
+
+test('small upload images keep their original data url', async () => {
+  const harness = await createImageCompressionHarness()
+  const smallDataUrl = 'data:image/png;base64,aaaa'
+
+  const normalized = await harness.normalizeUploadImageDataUrl(smallDataUrl, {
+    name: 'small.png',
+    type: 'image/png',
+  })
+
+  assert.equal(normalized.dataUrl, smallDataUrl)
+  assert.equal(normalized.mime, 'image/png')
+  assert.equal(normalized.compressed, false)
+  assert.equal(harness.drawCalls.length, 0)
+})
+
+test('oversized upload images fail locally when automatic compression cannot reach the safe limit', async () => {
+  const harness = await createImageCompressionHarness({ compressedBase64Length: 26_000_000 })
+  const largeDataUrl = `data:image/png;base64,${'a'.repeat(28_000_000)}`
+
+  await assert.rejects(
+    () => harness.normalizeUploadImageDataUrl(largeDataUrl, {
+      name: 'still-too-large.png',
+      type: 'image/png',
+    }),
+    /图片超过上游 20MB 限制，且自动压缩失败：still-too-large\.png/,
+  )
+  assert.equal(harness.drawCalls.length, 10)
 })
 
 test('removed font preset mode does not generate or upload a font reference image', async () => {

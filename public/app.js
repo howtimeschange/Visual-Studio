@@ -242,6 +242,16 @@ const KNOWN_JOB_STATUSES = new Set(['', 'queued', 'running', 'paused', 'complete
 const JOB_TASKS_PER_PAGE = 5
 const JOB_SNAPSHOT_SETTLE_RETRIES = 4
 const JOB_SNAPSHOT_SETTLE_DELAY_MS = 700
+const JOB_POLL_INTERVAL_MS = {
+  translate: 1200,
+  outfit: 2200,
+  style: 1500,
+}
+const JOB_POLL_ERROR_INTERVAL_MS = 2500
+const JOB_DOWNLOAD_CONCURRENCY = 3
+const UPSTREAM_IMAGE_INPUT_MAX_BYTES = 20 * 1024 * 1024
+const UPLOAD_IMAGE_SAFE_MAX_BYTES = 18 * 1024 * 1024
+const UPLOAD_IMAGE_MAX_EDGE = 2048
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
 let styleWatcherToken = 0
@@ -1708,6 +1718,8 @@ function makeJobTask(jobId, type, extra = {}) {
     updatedAt: '',
     loaded: false,
     error: '',
+    downloadStatus: '',
+    failureSummary: '',
     itemCount: 0,
     progressTotal: 0,
     progressDone: 0,
@@ -2065,6 +2077,7 @@ function updateJobTaskFromJob(task, job, items = null) {
   task.progressDone = Number(job.progressDone || 0)
   task.progressFailed = Number(job.progressFailed || 0)
   task.itemCount = Array.isArray(items) ? items.length : Number(task.itemCount || job.progressTotal || 0)
+  task.failureSummary = Array.isArray(items) ? summarizeJobItemFailures(items) : ''
   if (Array.isArray(items)) {
     const kind = job.type === 'translate_batch' ? 'translate' : job.type === 'style_transfer_batch' ? 'style' : 'outfit'
     const thumbs = getJobTaskThumbsFromItems(kind, items)
@@ -2810,6 +2823,8 @@ function serializeJobTask(task = {}) {
     loaded: Boolean(task.loaded),
     holdInCurrent: Boolean(task.holdInCurrent),
     error: String(task.error || ''),
+    downloadStatus: String(task.downloadStatus || ''),
+    failureSummary: String(task.failureSummary || ''),
     itemCount: Number(task.itemCount || 0),
     progressTotal: Number(task.progressTotal || 0),
     progressDone: Number(task.progressDone || 0),
@@ -7931,6 +7946,18 @@ function createJobTaskCard(kind, task, tab = 'current') {
   }
 
   card.append(thumbs, meta, actions)
+  if (task.downloadStatus) {
+    const status = document.createElement('div')
+    status.className = 'job-card-note'
+    status.textContent = task.downloadStatus
+    card.append(status)
+  }
+  if (task.failureSummary) {
+    const failure = document.createElement('div')
+    failure.className = 'job-card-note warning'
+    failure.textContent = `失败原因：${task.failureSummary}`
+    card.append(failure)
+  }
   if (task.error) {
     const error = document.createElement('div')
     error.className = 'job-card-error'
@@ -7980,16 +8007,29 @@ function getJobTaskDownloadEntries(kind, items = []) {
 }
 
 async function downloadJobTaskResults(kind, jobId) {
-  const task = upsertJobTask(kind, jobId, { actioning: true, error: '' })
+  const task = upsertJobTask(kind, jobId, { actioning: true, error: '', downloadStatus: '正在准备下载…' })
   renderJobList(kind)
   try {
     const { items } = await getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`)
     const entries = getJobTaskDownloadEntries(kind, items)
     if (!entries.length) {
       task.error = '这个任务还没有可下载的完成结果'
+      task.downloadStatus = ''
       return
     }
-    await downloadAll(entries)
+    const result = await downloadAll(entries, {
+      concurrency: JOB_DOWNLOAD_CONCURRENCY,
+      onProgress: ({ done, total, failed }) => {
+        task.downloadStatus = `正在下载 ${done} / ${total}${failed ? ` · 失败 ${failed}` : ''}`
+        renderJobList(kind)
+      },
+    })
+    task.downloadStatus = result.failed
+      ? `下载完成 ${result.done} / ${result.total} · 失败 ${result.failed}`
+      : `下载完成 ${result.done} / ${result.total}`
+    state.notice.message = task.downloadStatus
+    state.notice.tone = result.failed ? '' : 'ok'
+    renderAppNotice()
   } catch (error) {
     task.error = trimError(error)
   } finally {
@@ -9385,16 +9425,20 @@ async function readImageFiles(fileList) {
   const files = Array.from(fileList).filter((file) => file.type.startsWith('image/'))
   const images = []
   for (const file of files) {
-    const data = await readAsDataUrl(file)
+    const original = await readAsDataUrl(file)
+    const data = await normalizeUploadImageDataUrl(original.dataUrl, file)
     const size = await getImageDimensions(data.dataUrl).catch(() => null)
     images.push({
       id: crypto.randomUUID(),
       name: file.name,
-      mime: file.type || 'image/jpeg',
+      mime: data.mime || file.type || 'image/jpeg',
       base64: data.base64,
       dataUrl: data.dataUrl,
       width: size?.width || 0,
       height: size?.height || 0,
+      originalSizeBytes: data.originalSizeBytes || original.sizeBytes || 0,
+      sizeBytes: data.sizeBytes || estimateDataUrlBytes(data.dataUrl),
+      compressed: Boolean(data.compressed),
     })
   }
   return images
@@ -9409,7 +9453,7 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
     onProgress?.({
       current: index + 1,
       total: images.length,
-      filename: image.name,
+      filename: image.compressed ? `${image.name} · 已自动压缩` : image.name,
     })
     const data = await uploadJson('/api/assets/upload', {
       sessionId: state.runtime.sessionId || undefined,
@@ -9425,7 +9469,7 @@ async function prepareAssetItems(fileList, { kind = 'upload', source = 'browser_
         onUploadProgress?.({
           current: index + 1,
           total: images.length,
-          filename: image.name,
+          filename: image.compressed ? `${image.name} · 已自动压缩` : image.name,
           loaded: event.loaded || 0,
           totalBytes: event.total || 0,
           percent: event.percent || 0,
@@ -10340,6 +10384,84 @@ function formatBatchProgress(job) {
   return ''
 }
 
+function getJobPollInterval(kind, job = null) {
+  const base = JOB_POLL_INTERVAL_MS[kind] || 1500
+  const total = Number(job?.progressTotal || 0)
+  const done = Number(job?.progressDone || 0)
+  const failed = Number(job?.progressFailed || 0)
+  const finished = done + failed
+  if (total > 0 && finished > 0 && finished < total) return Math.max(1000, Math.round(base * 0.8))
+  return base
+}
+
+function classifyJobItemFailure(item = {}) {
+  const code = String(item?.errorCode || '').trim()
+  const message = String(item?.errorMessage || item?.outputJson?.lastImageTaskError || '').trim()
+  const text = `${code} ${message}`.toLowerCase()
+  if (/missing api key/.test(text)) {
+    const modelMatch = message.match(/Missing API key for ([\w-]+)/i)
+    const model = modelMatch ? getModel(modelMatch[1])?.label || modelMatch[1] : '当前模型'
+    return { category: 'missing_key', label: `${model} 缺少 API Key`, detail: message }
+  }
+  if (/image task failed.*generation timed out|generation timed out/.test(text)) {
+    return { category: 'upstream_timeout', label: '上游生成超时', detail: message }
+  }
+  if (/job_item_timeout/.test(text) || /job item timed out/.test(text)) {
+    return { category: 'recover_timeout', label: '队列恢复超时', detail: message }
+  }
+  if (/too many subrequests/.test(text)) {
+    return { category: 'cloudflare_limit', label: 'Cloudflare 调用次数受限', detail: message }
+  }
+  if (/cancelled|canceled/.test(text)) {
+    return { category: 'cancelled', label: '任务已结束', detail: message }
+  }
+  return { category: code || 'failed', label: message || '生成失败', detail: message }
+}
+
+function formatJobItemFailureMessage(item = {}) {
+  const failure = classifyJobItemFailure(item)
+  if (!failure.detail || failure.detail === failure.label) return failure.label
+  return `${failure.label}：${failure.detail}`
+}
+
+function summarizeJobItemFailures(items = []) {
+  const failedItems = (Array.isArray(items) ? items : []).filter((item) => item?.status === 'failed')
+  if (!failedItems.length) return ''
+  const counts = new Map()
+  for (const item of failedItems) {
+    const failure = classifyJobItemFailure(item)
+    const current = counts.get(failure.label) || { ...failure, count: 0 }
+    current.count += 1
+    counts.set(failure.label, current)
+  }
+  return Array.from(counts.values())
+    .map((item) => `${item.label} ${item.count}`)
+    .join(' · ')
+}
+
+function createJobSnapshotSignature(job, items = []) {
+  const itemSignature = (Array.isArray(items) ? items : [])
+    .map((item) => [
+      item.id,
+      item.status,
+      item.attemptCount || 0,
+      item.errorCode || '',
+      item.errorMessage || '',
+      item.outputJson?.resultAssetId || '',
+      item.outputJson?.imageTaskStatus || '',
+      item.outputJson?.nextPollAfterMs || '',
+    ].join(':'))
+    .join('|')
+  return [
+    job?.id || '',
+    job?.status || '',
+    job?.progressDone || 0,
+    job?.progressFailed || 0,
+    job?.progressTotal || 0,
+    itemSignature,
+  ].join('::')
+}
+
 function getTranslateSignatureFromJob(job) {
   return getTranslateSignature({
     sourceLanguage: String(job?.configJson?.sourceLanguage || 'auto'),
@@ -10396,7 +10518,7 @@ function mapTranslateJobItem(item, signature) {
   if (item.status === 'failed') {
     return {
       status: 'error',
-      error: String(item.errorMessage || '翻译失败'),
+      error: formatJobItemFailureMessage(item),
       signature,
       attempts: Number(item.attemptCount || 1),
       itemId: item.id,
@@ -10622,7 +10744,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
             translateJobWatchers.delete(jobId)
             break
           }
-          await wait(900)
+          await wait(getJobPollInterval('translate', job))
           continue
         }
         applyTranslateJobSnapshot(job, items)
@@ -10636,7 +10758,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
         break
       }
 
-      await wait(900)
+      await wait(getJobPollInterval('translate', job))
     } catch (error) {
       const status = Number(error?.status || 0)
       if (status === 404 || status === 403) {
@@ -10663,7 +10785,7 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
       }
       renderTranslate()
       if (status === 401) return
-      await wait(1200)
+      await wait(JOB_POLL_ERROR_INTERVAL_MS)
     }
   }
 }
@@ -10683,7 +10805,7 @@ function mapOutfitJobItem(item, signature) {
   if (item.status === 'failed') {
     return {
       status: 'error',
-      error: String(item.errorMessage || '换装失败'),
+      error: formatJobItemFailureMessage(item),
       signature,
       attempts: Number(item.attemptCount || 1),
       itemId: item.id,
@@ -10811,9 +10933,13 @@ async function hydrateOutfitWorkspaceFromJob(job, items) {
 
 function applyOutfitJobSnapshot(job, items) {
   const signature = getOutfitSignatureFromJob(job)
+  const previousResults = state.outfit.results
+  const previousProgress = state.outfit.progress
+  const nextProgress = formatBatchProgress(job)
   const nextResults = {}
+  let changed = false
 
-  for (const [key, value] of Object.entries(state.outfit.results)) {
+  for (const [key, value] of Object.entries(previousResults)) {
     nextResults[key] = value
   }
 
@@ -10821,6 +10947,20 @@ function applyOutfitJobSnapshot(job, items) {
     const key = pairKey(String(item.inputJson?.modelAssetId || ''), String(item.inputJson?.lookId || ''))
     if (!key || !key.includes('::')) continue
     const mapped = mapOutfitJobItem(item, signature)
+    const previous = previousResults[key]
+    if (
+      !previous
+      || previous.status !== mapped.status
+      || previous.dataUrl !== mapped.dataUrl
+      || previous.error !== mapped.error
+      || previous.attempt !== mapped.attempt
+      || previous.attempts !== mapped.attempts
+      || previous.taskStatus !== mapped.taskStatus
+      || previous.assetId !== mapped.assetId
+      || previous.signature !== mapped.signature
+    ) {
+      changed = true
+    }
     nextResults[key] = mapped
     if (mapped.status === 'done' && mapped.dataUrl) {
       saveOutfitResult(String(item.inputJson?.modelAssetId || ''), String(item.inputJson?.lookId || ''), mapped)
@@ -10828,8 +10968,10 @@ function applyOutfitJobSnapshot(job, items) {
   }
 
   state.outfit.results = nextResults
-  state.outfit.progress = formatBatchProgress(job)
-  renderOutfit()
+  state.outfit.progress = nextProgress
+  if (changed || previousProgress !== nextProgress) {
+    renderOutfit()
+  }
 }
 
 function getStyleSignatureFromJob(job) {
@@ -10926,7 +11068,7 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
             styleJobWatchers.delete(jobId)
             break
           }
-          await wait(900)
+          await wait(getJobPollInterval('style', job))
           continue
         }
         await hydrateStyleWorkspaceFromJob(job, items)
@@ -10941,7 +11083,7 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
         break
       }
 
-      await wait(900)
+      await wait(getJobPollInterval('style', job))
     } catch (error) {
       const status = Number(error?.status || 0)
       if (status === 404 || status === 403) {
@@ -10968,7 +11110,7 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
       }
       renderStyle()
       if (status === 401) return
-      await wait(1200)
+      await wait(JOB_POLL_ERROR_INTERVAL_MS)
     }
   }
 }
@@ -10976,6 +11118,7 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
 async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
   const token = ++outfitWatcherToken
   outfitJobWatchers.set(jobId, token)
+  let lastSnapshotSignature = ''
 
   while (outfitJobWatchers.get(jobId) === token) {
     try {
@@ -10989,6 +11132,9 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
       }
 
       const shouldApply = applyToWorkspace || getLoadedJobId('outfit') === jobId
+      const snapshotSignature = createJobSnapshotSignature(job, items)
+      const snapshotChanged = snapshotSignature !== lastSnapshotSignature
+      lastSnapshotSignature = snapshotSignature
       upsertJobTask('outfit', jobId, { job, items, loaded: shouldApply })
       const task = getJobTasks('outfit').find((entry) => entry.jobId === jobId)
       if (shouldApply && task && job.status === 'completed') {
@@ -10997,27 +11143,31 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
       }
       if (shouldApply) {
         if (getLoadedJobId('outfit') !== jobId) {
-          renderJobList('outfit')
-          saveRuntimeState()
+          if (snapshotChanged) {
+            renderJobList('outfit')
+            saveRuntimeState()
+          }
           if (shouldStopPollingJobSnapshot(job, items)) {
             outfitJobWatchers.delete(jobId)
             break
           }
-          await wait(900)
+          await wait(getJobPollInterval('outfit', job))
           continue
         }
-        applyOutfitJobSnapshot(job, items)
+        if (snapshotChanged) {
+          applyOutfitJobSnapshot(job, items)
+        }
       } else {
-        renderOutfit()
+        if (snapshotChanged) renderOutfit()
       }
-      saveRuntimeState()
+      if (snapshotChanged) saveRuntimeState()
 
       if (shouldStopPollingJobSnapshot(job, items)) {
         outfitJobWatchers.delete(jobId)
         break
       }
 
-      await wait(900)
+      await wait(getJobPollInterval('outfit', job))
     } catch (error) {
       const status = Number(error?.status || 0)
       if (status === 404 || status === 403) {
@@ -11044,7 +11194,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
       }
       renderOutfit()
       if (status === 401) return
-      await wait(1200)
+      await wait(JOB_POLL_ERROR_INTERVAL_MS)
     }
   }
 }
@@ -11057,11 +11207,94 @@ function readAsDataUrl(file) {
       resolve({
         dataUrl,
         base64: dataUrl.split(',', 2)[1] || '',
+        mime: splitDataUrl(dataUrl)?.mime || file.type || 'image/png',
+        sizeBytes: estimateDataUrlBytes(dataUrl),
       })
     }
     reader.onerror = () => reject(reader.error || new Error('Failed to read file'))
     reader.readAsDataURL(file)
   })
+}
+
+function estimateDataUrlBytes(dataUrl) {
+  const base64 = String(dataUrl || '').split(',', 2)[1] || ''
+  if (!base64) return 0
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding)
+}
+
+async function normalizeUploadImageDataUrl(dataUrl, file = {}) {
+  const sizeBytes = estimateDataUrlBytes(dataUrl)
+  const mime = splitDataUrl(dataUrl)?.mime || file.type || 'image/png'
+  if (sizeBytes > 0 && sizeBytes <= UPLOAD_IMAGE_SAFE_MAX_BYTES) {
+    return {
+      dataUrl,
+      base64: dataUrl.split(',', 2)[1] || '',
+      mime,
+      sizeBytes,
+      originalSizeBytes: sizeBytes,
+      compressed: false,
+    }
+  }
+  if (typeof document === 'undefined') {
+    return {
+      dataUrl,
+      base64: dataUrl.split(',', 2)[1] || '',
+      mime,
+      sizeBytes,
+      originalSizeBytes: sizeBytes,
+      compressed: false,
+    }
+  }
+  return compressImageDataUrlForUpload(dataUrl, {
+    maxBytes: UPLOAD_IMAGE_SAFE_MAX_BYTES,
+    maxEdge: UPLOAD_IMAGE_MAX_EDGE,
+    fileName: file.name || '',
+    originalSizeBytes: sizeBytes,
+  })
+}
+
+async function compressImageDataUrlForUpload(dataUrl, {
+  maxBytes = UPLOAD_IMAGE_SAFE_MAX_BYTES,
+  maxEdge = UPLOAD_IMAGE_MAX_EDGE,
+  fileName = '',
+  originalSizeBytes = 0,
+} = {}) {
+  const image = await loadCanvasImage(dataUrl)
+  const sourceWidth = image.naturalWidth || image.width || 0
+  const sourceHeight = image.naturalHeight || image.height || 0
+  if (!sourceWidth || !sourceHeight) throw new Error(`图片尺寸读取失败：${fileName || 'image'}`)
+
+  let scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
+  let quality = 0.88
+  let best = null
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const width = Math.max(1, Math.round(sourceWidth * scale))
+    const height = Math.max(1, Math.round(sourceHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('图片压缩失败：浏览器不支持 Canvas')
+    ctx.drawImage(image, 0, 0, width, height)
+    const nextDataUrl = canvas.toDataURL('image/jpeg', quality)
+    const nextSizeBytes = estimateDataUrlBytes(nextDataUrl)
+    best = {
+      dataUrl: nextDataUrl,
+      base64: nextDataUrl.split(',', 2)[1] || '',
+      mime: 'image/jpeg',
+      sizeBytes: nextSizeBytes,
+      originalSizeBytes: originalSizeBytes || estimateDataUrlBytes(dataUrl),
+      compressed: true,
+    }
+    if (nextSizeBytes <= maxBytes) return best
+    if (quality > 0.62) {
+      quality = Math.max(0.62, quality - 0.08)
+    } else {
+      scale *= 0.82
+    }
+  }
+  throw new Error(`图片超过上游 ${Math.round(UPSTREAM_IMAGE_INPUT_MAX_BYTES / 1024 / 1024)}MB 限制，且自动压缩失败：${fileName || 'image'}`)
 }
 
 function getImageDimensions(src) {
@@ -11313,11 +11546,32 @@ async function streamGenerateRequest(url, body, { onEvent = null } = {}) {
   return result
 }
 
-async function downloadAll(entries) {
-  for (const entry of entries) {
-    await downloadAsset(entry.href, entry.name)
-    await wait(80)
+async function downloadAll(entries, { concurrency = JOB_DOWNLOAD_CONCURRENCY, onProgress = null } = {}) {
+  const total = Array.isArray(entries) ? entries.length : 0
+  const result = { total, done: 0, failed: 0, errors: [] }
+  let index = 0
+  const workerCount = Math.max(1, Math.min(Number(concurrency) || 1, total || 1))
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (index < total) {
+      const entry = entries[index]
+      index += 1
+      try {
+        await downloadAsset(entry.href, entry.name)
+      } catch (error) {
+        result.failed += 1
+        result.errors.push({ entry, error })
+      } finally {
+        result.done += 1
+        onProgress?.(result)
+        await wait(80)
+      }
+    }
+  })
+  await Promise.all(workers)
+  if (result.failed === total && total > 0) {
+    throw new Error(`下载失败 ${result.failed} / ${total}`)
   }
+  return result
 }
 
 async function downloadAsset(href, name) {

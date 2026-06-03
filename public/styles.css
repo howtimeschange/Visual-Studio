@@ -1930,6 +1930,7 @@ button.ghost:disabled,
 }
 
 .job-card-meta span,
+.job-card-note,
 .job-card-error {
   color: var(--muted);
   font-size: var(--text-xs);
@@ -1969,6 +1970,14 @@ button.ghost:disabled,
 .job-status.err,
 .job-card-error {
   color: var(--danger);
+}
+
+.job-card-note {
+  grid-column: 1 / -1;
+}
+
+.job-card-note.warning {
+  color: var(--warn);
 }
 
 .job-card-actions {

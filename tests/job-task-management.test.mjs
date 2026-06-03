@@ -33,6 +33,14 @@ async function createJobHarness() {
     clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
     sanitizeFileName: (value) => String(value || '').replace(/[\\/:*?"<>|]+/g, '-'),
     basename: (value) => String(value || '').replace(/\.[^.]+$/, ''),
+    getModel: (id) => ({
+      'nano-banana-2': { id: 'nano-banana-2', label: 'Nano Banana 2' },
+      'nano-banana-pro': { id: 'nano-banana-pro', label: 'Nano Banana Pro' },
+      'gpt-image-2': { id: 'gpt-image-2', label: 'GPT Image 2' },
+    })[id],
+    JOB_DOWNLOAD_CONCURRENCY: 3,
+    wait: async () => {},
+    downloadAsset: async () => {},
     state: {
       translate: { jobs: [], jobId: '', jobTab: 'current' },
       outfit: { jobs: [], jobId: '', jobTab: 'current' },
@@ -71,6 +79,10 @@ async function createJobHarness() {
     'getJobTaskPageCount',
     'clampJobTaskPage',
     'getJobTaskDownloadEntries',
+    'downloadAll',
+    'classifyJobItemFailure',
+    'formatJobItemFailureMessage',
+    'summarizeJobItemFailures',
     'shouldShowLoadedJobWorkspace',
     'assetResultUrl',
     'addJobTaskThumb',
@@ -80,6 +92,19 @@ async function createJobHarness() {
   vm.createContext(context)
   vm.runInContext(harnessSource, context)
   return context
+}
+
+async function flushMicrotasks(count = 4) {
+  for (let index = 0; index < count; index += 1) {
+    await Promise.resolve()
+  }
+}
+
+async function waitForCondition(predicate, attempts = 20) {
+  for (let index = 0; index < attempts; index += 1) {
+    if (predicate()) return
+    await flushMicrotasks()
+  }
 }
 
 test('sanitizeStoredJobTasks keeps only tasks matching the current view type', async () => {
@@ -435,4 +460,82 @@ test('job task downloads include completed outputs from task items', async () =>
   assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('style', styleItems))), [
     { href: '/api/results/style-a', name: 'style-transfer-红色手袋.png' },
   ])
+})
+
+test('job item failures are grouped into actionable user-facing reasons', async () => {
+  const harness = await createJobHarness()
+  const items = [
+    {
+      status: 'failed',
+      errorCode: 'job_setup_failed',
+      errorMessage: 'Missing API key for nano-banana-2',
+      outputJson: {},
+    },
+    {
+      status: 'failed',
+      errorCode: 'outfit_failed',
+      errorMessage: 'Image task failed: generation timed out',
+      outputJson: {},
+    },
+    {
+      status: 'failed',
+      errorCode: 'job_item_timeout',
+      errorMessage: 'Job item timed out after 3 attempts.',
+      outputJson: {},
+    },
+  ]
+
+  assert.equal(harness.classifyJobItemFailure(items[0]).label, 'Nano Banana 2 缺少 API Key')
+  assert.equal(harness.formatJobItemFailureMessage(items[1]), '上游生成超时：Image task failed: generation timed out')
+  assert.equal(
+    harness.summarizeJobItemFailures(items),
+    'Nano Banana 2 缺少 API Key 1 · 上游生成超时 1 · 队列恢复超时 1',
+  )
+})
+
+test('downloadAll downloads with bounded concurrency and reports progress', async () => {
+  const harness = await createJobHarness()
+  let active = 0
+  let peak = 0
+  const calls = []
+  const progress = []
+  let releaseNext = null
+  const releases = []
+  harness.downloadAsset = async (href, name) => {
+    calls.push({ href, name })
+    active += 1
+    peak = Math.max(peak, active)
+    await new Promise((resolve) => {
+      releaseNext = () => {
+        active -= 1
+        resolve()
+      }
+      releases.push(releaseNext)
+    })
+  }
+
+  const run = harness.downloadAll([
+    { href: '/api/results/a', name: 'a.png' },
+    { href: '/api/results/b', name: 'b.png' },
+    { href: '/api/results/c', name: 'c.png' },
+    { href: '/api/results/d', name: 'd.png' },
+  ], {
+    concurrency: 2,
+    onProgress: (result) => progress.push({ ...result }),
+  })
+
+  await flushMicrotasks()
+  assert.equal(calls.length, 2)
+  assert.equal(peak, 2)
+  releases.shift()()
+  releases.shift()()
+  await waitForCondition(() => calls.length === 4)
+  assert.equal(calls.length, 4)
+  releases.shift()()
+  releases.shift()()
+
+  const result = await run
+  assert.equal(result.done, 4)
+  assert.equal(result.failed, 0)
+  assert.deepEqual(progress.map((item) => item.done), [1, 2, 3, 4])
 })
