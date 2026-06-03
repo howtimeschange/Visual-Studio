@@ -50,5 +50,8 @@ max_batch_size = 1
 max_batch_timeout = 10
 max_retries = 3
 
+[vars]
+VS_IMAGE_TASK_POLL_INTERVAL_MS = "3000"
+
 [triggers]
 crons = ["*/1 * * * *"]

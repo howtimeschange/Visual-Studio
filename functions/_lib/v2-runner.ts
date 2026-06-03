@@ -58,6 +58,7 @@ const MAX_JOB_ITEMS_PER_RUN = 20
 const AUTO_RETRY_LIMIT = 2
 const AUTO_RETRY_DELAY_MS = 1200
 const DEFAULT_STALE_JOB_ITEM_MS = 5 * 60_000
+const MIN_IMAGE_TASK_POLL_WINDOW_MS = 1_000
 const MIN_RUNNING_JOB_RETRY_AFTER_MS = 5_000
 const DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN = 2
 const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 1
@@ -2030,7 +2031,7 @@ function clampPollWindowMs(value: unknown): number {
   const numeric = Math.floor(Number(value))
   if (!Number.isFinite(numeric) || numeric < 0) return 15_000
   if (numeric === 0) return 0
-  return Math.min(60_000, Math.max(MIN_RUNNING_JOB_RETRY_AFTER_MS, numeric))
+  return Math.min(60_000, Math.max(MIN_IMAGE_TASK_POLL_WINDOW_MS, numeric))
 }
 
 function getRunningJobRetryAfterMs(job: JobRecord, staleAfterMs: number): number {

@@ -139,6 +139,7 @@ export function resolveImageModelOptions(modelId: string, env: Env, clientKeys: 
     timeoutMs: normalizeTimeoutMs(env.VS_IMAGE_REQUEST_TIMEOUT_MS, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS),
     imageFetchTimeoutMs: normalizeTimeoutMs(env.VS_IMAGE_FETCH_TIMEOUT_MS, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
     pollIntervalMs: normalizePollIntervalMs(env.VS_IMAGE_TASK_POLL_INTERVAL_MS, DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS),
+    capPollAfterByPollInterval: isConfiguredPollIntervalMs(env.VS_IMAGE_TASK_POLL_INTERVAL_MS),
     retryCount: normalizeRetryCount(env.VS_IMAGE_RETRY_COUNT, DEFAULT_IMAGE_RETRY_COUNT),
     retryDelayMs: normalizeRetryDelayMs(env.VS_IMAGE_RETRY_DELAY_MS, DEFAULT_IMAGE_RETRY_DELAY_MS),
   }
@@ -160,6 +161,7 @@ type ImageModelOptions = {
   retryCount?: number
   retryDelayMs?: number
   pollIntervalMs?: number
+  capPollAfterByPollInterval?: boolean
   maxPollAttempts?: number
   existingTask?: any
   returnAfterCreate?: boolean
@@ -269,6 +271,7 @@ function buildPendingImageTaskResult(
   const nextPollAfterMs = normalizePollAfterMs(
     task?.poll_after ?? task?.pollAfter,
     requestOpts.pollIntervalMs,
+    requestOpts.capPollAfterByPollInterval,
   )
   return {
     ok: false,
@@ -365,6 +368,7 @@ async function waitForAsyncImageTask(
     const nextPollAfterMs = normalizePollAfterMs(
       task?.poll_after ?? task?.pollAfter,
       requestOpts.pollIntervalMs,
+      requestOpts.capPollAfterByPollInterval,
     )
     if (pollAttempts >= opts.maxPollAttempts) {
       return {
@@ -462,11 +466,20 @@ function normalizeTaskStatus(value: unknown): string {
   return String(value || '').trim().toLowerCase()
 }
 
-function normalizePollAfterMs(value: unknown, fallback = DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS): number {
+function normalizePollAfterMs(value: unknown, fallback = DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS, capByFallback = false): number {
+  const fallbackMs = normalizePollIntervalMs(fallback, DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS)
   const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric < 0) return normalizePollIntervalMs(fallback, DEFAULT_IMAGE_TASK_POLL_INTERVAL_MS)
+  if (!Number.isFinite(numeric) || numeric < 0) return fallbackMs
   if (numeric === 0) return 0
-  return Math.max(1_000, Math.min(60_000, numeric * 1_000))
+  const upstreamMs = Math.max(1_000, Math.min(60_000, numeric * 1_000))
+  return capByFallback ? Math.min(upstreamMs, fallbackMs) : upstreamMs
+}
+
+function isConfiguredPollIntervalMs(value: unknown): boolean {
+  const raw = String(value ?? '').trim()
+  if (!raw) return false
+  const numeric = Number(raw)
+  return Number.isFinite(numeric) && numeric >= 0
 }
 
 async function readJsonResponse(res: Response): Promise<any> {

@@ -352,6 +352,53 @@ test('async image tasks poll until a stable result URL is available', async () =
   }
 })
 
+test('configured async image poll interval caps upstream poll_after', async () => {
+  const { mod, cleanup } = await importShared()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    id: 'task_slow_poll_after',
+    status: 'queued',
+    poll_url: 'https://relay.example/v1/images/tasks/task_slow_poll_after',
+    poll_after: 30,
+  }), {
+    status: 202,
+    headers: { 'Content-Type': 'application/json' },
+  })
+
+  try {
+    const defaultResult = await mod.callImageModelTaskStep(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      { timeoutMs: 1000, maxPollAttempts: 1, returnAfterCreate: true, pollIntervalMs: 3000 },
+    )
+    const cappedResult = await mod.callImageModelTaskStep(
+      'https://relay.example/v1',
+      'test-key',
+      'gpt-image-2',
+      [],
+      'make a clean product poster',
+      {
+        timeoutMs: 1000,
+        maxPollAttempts: 1,
+        returnAfterCreate: true,
+        pollIntervalMs: 3000,
+        capPollAfterByPollInterval: true,
+      },
+    )
+
+    assert.equal(defaultResult.pending, true)
+    assert.equal(defaultResult.nextPollAfterMs, 30_000)
+    assert.equal(cappedResult.pending, true)
+    assert.equal(cappedResult.nextPollAfterMs, 3_000)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('async image task rejects empty fetched image results', async () => {
   const { mod, cleanup } = await importShared()
   const originalFetch = globalThis.fetch
