@@ -71,6 +71,54 @@ const TRANSLATE_TEXT_COLOR_SWATCHES = [
 ]
 const DEFAULT_TRANSLATE_HEADLINE_COLOR = '#111827'
 const DEFAULT_TRANSLATE_BODY_COLOR = '#374151'
+const DEFAULT_AI_TEST_MODEL = 'gpt-image-2'
+const DEFAULT_AI_TEST_COUNT = 6
+const AI_TEST_COUNT_LIMIT = 60
+const AI_TEST_TOTAL_ITEM_LIMIT = 120
+const AI_TEST_FIELD_LIMIT = 500
+const DEFAULT_AI_TEST_FIELDS = {
+  categoryKey: 'tshirt',
+  modelProfile: '',
+  pose: '',
+  background: '',
+  productColor: '',
+  sellingPoint: '',
+}
+const FALLBACK_AI_TEST_DIRECTIONS = [
+  { key: 'scene', label: '场景主导', weightText: '强化真实穿着场景、生活氛围和背景叙事，让环境成为第一点击理由。' },
+  { key: 'model', label: '模特主导', weightText: '强化模特气质、表情、年龄感和商品穿着状态。' },
+  { key: 'selling_point', label: '卖点主导', weightText: '强化商品卖点、材质细节和第一眼点击理由。' },
+  { key: 'pose', label: '姿势角度主导', weightText: '强化动作自然度、动态张力和商品关键部位可见度。' },
+  { key: 'color', label: '产品颜色主导', weightText: '强化主推色准确度、面料层次和缩略图第一眼吸睛度。' },
+  { key: 'composition', label: '构图主导', weightText: '强化拍摄构图、商品占比、留白节奏和缩略图识别度。' },
+]
+const FALLBACK_AI_TEST_CATEGORY_FACTORS = [
+  { categoryKey: 'tshirt', categoryLabel: 'T恤', factorText: '突出亲肤棉感、领口不勒脖、童趣图案、夏日清爽和日常百搭。' },
+  { categoryKey: 'pants', categoryLabel: '裤装', factorText: '突出弹力腰头、高腰护肚、膝部活动不束缚和校园运动感。' },
+  { categoryKey: 'dress', categoryLabel: '连衣裙', factorText: '突出裙摆层次、甜美廓形、舒适活动量和精致细节。' },
+]
+const FALLBACK_AI_TEST_TEMPLATE = {
+  templateId: 'ai_test_children_main_image',
+  versionId: 'ai_test_children_main_image_v1',
+  version: 1,
+  title: '童装电商主图 AI 测图默认模板',
+  promptBody: [
+    '你是一名资深童装电商主图视觉导演，请基于参考产品图生成一张高点击率 AI 测图。',
+    '【拍摄构图】电商主图构图，主体清晰完整，画面适合 {{aspectRatio}}。',
+    '【原图锁死】严格保持参考图里的服装款式、版型、结构、面料肌理和细节比例。',
+    '【模特锁定】{{modelProfile}}，童装模特表达自然健康，年龄感准确。',
+    '【动作姿态】{{pose}}，动作自然可信，能看清商品正面或关键卖点。',
+    '【背景环境】{{background}}，背景干净，服务商品表达。',
+    '【衣服选色】主推 {{productColor}}，颜色准确稳定，面料质感清晰。',
+    '【卖点文案】画面重点表达 {{sellingPoint}}，不生成真实文字。',
+    '【画质规格】{{resolution}} 清晰度，高清精修质感。',
+    '【加权倾斜】{{directionLabel}}：{{directionWeightText}}',
+    '【品类高点击因子】{{categoryLabel}}：{{categoryFactor}}',
+    '【测图组别】第 {{groupIndex}} / {{groupTotal}} 组，当前测试方向：{{directionLabel}}',
+  ].join('\n'),
+  negativePrompt: '不要改款，不要增删商品部件，不要生成促销文字、品牌水印、畸形手脚、成人化儿童形象。',
+  directions: FALLBACK_AI_TEST_DIRECTIONS,
+}
 
 const GARMENT_ROLE_OPTIONS = [
   { value: 'full_outfit', label: '整套' },
@@ -234,6 +282,7 @@ const VIEW_ROUTES = {
   projects: '/lovart/projects',
   outfit: '/?view=outfit',
   style: '/?view=style',
+  'ai-test': '/?view=ai-test',
 }
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running'])
@@ -246,6 +295,7 @@ const JOB_POLL_INTERVAL_MS = {
   translate: 1200,
   outfit: 2200,
   style: 1500,
+  aiTest: 1500,
 }
 const JOB_POLL_ERROR_INTERVAL_MS = 2500
 const JOB_DOWNLOAD_CONCURRENCY = 3
@@ -255,12 +305,15 @@ const UPLOAD_IMAGE_MAX_EDGE = 2048
 let translateWatcherToken = 0
 let outfitWatcherToken = 0
 let styleWatcherToken = 0
+let aiTestWatcherToken = 0
 const translateJobWatchers = new Map()
 const outfitJobWatchers = new Map()
 const styleJobWatchers = new Map()
+const aiTestJobWatchers = new Map()
 let translateWorkspaceLoadToken = 0
 let outfitWorkspaceLoadToken = 0
 let styleWorkspaceLoadToken = 0
+let aiTestWorkspaceLoadToken = 0
 let canvasSpaceHeld = false
 let canvasSaveTimer = 0
 let canvasSaveInFlight = null
@@ -441,6 +494,29 @@ const state = {
     batchResults: [],
     error: '',
     history: [],
+  },
+  aiTest: {
+    model: DEFAULT_AI_TEST_MODEL,
+    aspectRatio: '1:1',
+    resolution: '1k',
+    count: DEFAULT_AI_TEST_COUNT,
+    fields: { ...DEFAULT_AI_TEST_FIELDS },
+    images: [],
+    results: {},
+    templates: [],
+    categoryFactors: [],
+    templateVersionId: '',
+    templatesLoaded: false,
+    templateLoading: false,
+    templateError: '',
+    running: false,
+    submittingJobId: '',
+    pendingSignature: '',
+    progress: '',
+    jobId: '',
+    jobTab: 'current',
+    jobPage: 1,
+    jobs: [],
   },
 }
 
@@ -661,6 +737,30 @@ const dom = {
   sHistorySection: $('#s-history-section'),
   sHistory: $('#s-history'),
   sClearHistory: $('#s-clear-history'),
+  aiTestModel: $('#ai-test-model'),
+  aiTestAspect: $('#ai-test-aspect'),
+  aiTestResolution: $('#ai-test-resolution'),
+  aiTestDropzone: $('#ai-test-dropzone'),
+  aiTestFileInput: $('#ai-test-file-input'),
+  aiTestUpload: $('#ai-test-upload'),
+  aiTestImageList: $('#ai-test-image-list'),
+  aiTestCategory: $('#ai-test-category'),
+  aiTestCount: $('#ai-test-count'),
+  aiTestTemplate: $('#ai-test-template'),
+  aiTestTemplateStatus: $('#ai-test-template-status'),
+  aiTestModelProfile: $('#ai-test-model-profile'),
+  aiTestPose: $('#ai-test-pose'),
+  aiTestBackground: $('#ai-test-background'),
+  aiTestProductColor: $('#ai-test-product-color'),
+  aiTestSellingPoint: $('#ai-test-selling-point'),
+  aiTestRun: $('#ai-test-run'),
+  aiTestRefreshTemplate: $('#ai-test-refresh-template'),
+  aiTestProgress: $('#ai-test-progress'),
+  aiTestGrid: $('#ai-test-grid'),
+  aiTestEmpty: $('#ai-test-empty'),
+  aiTestJobList: $('#ai-test-job-list'),
+  aiTestJobEmpty: $('#ai-test-job-empty'),
+  aiTestJobTabs: $$('#ai-test-job-tabs [data-job-tab]'),
   lightbox: $('#image-lightbox'),
   lightboxImage: $('#lightbox-image'),
   lightboxCaption: $('#lightbox-caption'),
@@ -708,10 +808,16 @@ function init() {
   bindGenerate()
   bindOutfit()
   bindStyle()
+  bindAiTest()
   renderAll()
   renderAppNotice()
   void loadAccount()
   void restoreRuntimeState()
+  void loadAiTestTemplates()
+}
+
+function normalizeAppView(view) {
+  return String(view || '') === 'ai-test' ? 'ai-test' : normalizeView(view)
 }
 
 function viewFromLocation(fallback = 'home') {
@@ -721,9 +827,9 @@ function viewFromLocation(fallback = 'home') {
   if (path === '/lovart/projects') return 'projects'
   if (path === '/lovart') return 'home'
   const view = new URLSearchParams(window.location.search).get('view')
-  if (view) return normalizeView(view)
+  if (view) return normalizeAppView(view)
   if (path === '/') return 'home'
-  return normalizeView(fallback)
+  return normalizeAppView(fallback)
 }
 
 function canvasProjectIdFromLocation() {
@@ -829,16 +935,31 @@ function hydrateStoredState() {
   state.style.batchResults = runtime.style?.batchResults || []
   state.style.history = getStoredStyleHistory(storedResults, runtime.style?.history)
     .filter((entry) => entry.resultDataUrl)
+  state.aiTest.jobId = getLoadedStoredJobId(runtime.aiTest.jobs)
+  state.aiTest.jobTab = runtime.aiTest.jobTab
+  state.aiTest.jobPage = runtime.aiTest.jobPage
+  state.aiTest.jobs = runtime.aiTest.jobs
+  state.aiTest.images = runtime.aiTest.images
+  state.aiTest.results = runtime.aiTest.results
+  state.aiTest.fields = runtime.aiTest.fields
+  state.aiTest.model = runtime.aiTest.model
+  state.aiTest.aspectRatio = runtime.aiTest.aspectRatio
+  state.aiTest.resolution = runtime.aiTest.resolution
+  state.aiTest.count = runtime.aiTest.count
+  state.aiTest.templateVersionId = runtime.aiTest.templateVersionId
 
   const stored = readJson(PREF_STORAGE, null)
   if (stored) {
-    state.activeView = normalizeView(stored.activeView)
+    state.activeView = normalizeAppView(stored.activeView)
     state.theme = normalizeTheme(stored.theme || stored.appearance?.theme)
     Object.assign(state.translate, sanitizeTranslatePrefs(stored.translate))
     Object.assign(state.generate, sanitizeGeneratePrefs(stored.generate))
     Object.assign(state.outfit, sanitizeOutfitPrefs(stored.outfit))
     if (stored.style) {
       state.style.model = getModel(stored.style.model)?.id || state.style.model
+    }
+    if (stored.aiTest) {
+      Object.assign(state.aiTest, sanitizeAiTestPrefs(stored.aiTest))
     }
     return
   }
@@ -1020,6 +1141,195 @@ function sanitizeOutfitPrefs(raw = {}) {
   }
 }
 
+function sanitizeAiTestPrefs(raw = {}) {
+  return {
+    model: getModel(raw.model)?.id || state.aiTest.model,
+    aspectRatio: normalizeAspectRatio(raw.aspectRatio, state.aiTest.aspectRatio),
+    resolution: normalizeCanvasResolution(raw.resolution, state.aiTest.resolution),
+    count: clampAiTestCount(raw.count),
+    fields: sanitizeAiTestFields(raw.fields),
+    templateVersionId: sanitizeAiTestText(raw.templateVersionId, 120),
+  }
+}
+
+function sanitizeAiTestText(value, limit = AI_TEST_FIELD_LIMIT) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit)
+}
+
+function clampAiTestCount(value) {
+  return clamp(Math.trunc(Number(value) || DEFAULT_AI_TEST_COUNT), 1, AI_TEST_COUNT_LIMIT)
+}
+
+function sanitizeAiTestFields(raw = {}) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  return {
+    categoryKey: sanitizeAiTestText(source.categoryKey, 80) || DEFAULT_AI_TEST_FIELDS.categoryKey,
+    modelProfile: sanitizeAiTestText(source.modelProfile),
+    pose: sanitizeAiTestText(source.pose),
+    background: sanitizeAiTestText(source.background),
+    productColor: sanitizeAiTestText(source.productColor),
+    sellingPoint: sanitizeAiTestText(source.sellingPoint),
+  }
+}
+
+function sanitizeAiTestDirection(raw = {}, index = 0) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const fallback = FALLBACK_AI_TEST_DIRECTIONS[index % FALLBACK_AI_TEST_DIRECTIONS.length]
+  return {
+    key: sanitizeAiTestText(source.key, 80) || fallback.key,
+    label: sanitizeAiTestText(source.label, 120) || fallback.label,
+    weightText: sanitizeAiTestText(source.weightText || source.weight || source.description, 500) || fallback.weightText,
+  }
+}
+
+function sanitizeAiTestTemplateVersion(raw = {}) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const active = source.activeVersion && typeof source.activeVersion === 'object' ? source.activeVersion : source
+  const directions = Array.isArray(active.directions) && active.directions.length
+    ? active.directions.map((item, index) => sanitizeAiTestDirection(item, index))
+    : FALLBACK_AI_TEST_DIRECTIONS
+  return {
+    templateId: sanitizeAiTestText(source.id || source.templateId || active.templateId || FALLBACK_AI_TEST_TEMPLATE.templateId, 120),
+    templateKey: sanitizeAiTestText(source.key || source.templateKey || '', 120),
+    versionId: sanitizeAiTestText(active.versionId || active.id || source.activeVersionId || FALLBACK_AI_TEST_TEMPLATE.versionId, 120),
+    version: Number(active.version || 1),
+    title: sanitizeAiTestText(active.title || source.title || FALLBACK_AI_TEST_TEMPLATE.title, 160),
+    promptBody: typeof active.promptBody === 'string' && active.promptBody.trim()
+      ? active.promptBody
+      : FALLBACK_AI_TEST_TEMPLATE.promptBody,
+    negativePrompt: typeof active.negativePrompt === 'string'
+      ? active.negativePrompt
+      : FALLBACK_AI_TEST_TEMPLATE.negativePrompt,
+    directions,
+  }
+}
+
+function sanitizeAiTestCategoryFactors(raw = []) {
+  const list = Array.isArray(raw) ? raw : []
+  const factors = list
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null
+      const categoryKey = sanitizeAiTestText(item.categoryKey || item.key, 80)
+      const categoryLabel = sanitizeAiTestText(item.categoryLabel || item.label || categoryKey, 120)
+      const factorText = sanitizeAiTestText(item.factorText || item.categoryFactor || item.text || item.description, 800)
+      if (!categoryKey) return null
+      return { categoryKey, categoryLabel: categoryLabel || categoryKey, factorText }
+    })
+    .filter(Boolean)
+  return factors.length ? factors : FALLBACK_AI_TEST_CATEGORY_FACTORS
+}
+
+function sanitizeAiTestResultEntries(raw = {}) {
+  if (!raw || typeof raw !== 'object') return {}
+  const next = {}
+  for (const [key, result] of Object.entries(raw)) {
+    if (!result || typeof result !== 'object') continue
+    const status = String(result.status || '')
+    if (!['queue', 'running', 'model_pending', 'done', 'error', 'cancelled'].includes(status)) continue
+    const dataUrl = status === 'done'
+      ? normalizeImageResultSrc(result.dataUrl || (result.assetId ? assetResultUrl(result.assetId) : ''))
+      : ''
+    if (status === 'done' && !dataUrl) continue
+    next[key] = {
+      status,
+      dataUrl,
+      assetId: sanitizeAiTestText(result.assetId, 120),
+      itemId: sanitizeAiTestText(result.itemId, 120),
+      finalPrompt: typeof result.finalPrompt === 'string' ? result.finalPrompt : '',
+      error: sanitizeAiTestText(result.error, 1000),
+      taskStatus: sanitizeAiTestText(result.taskStatus, 80),
+      attempt: Math.max(0, Number(result.attempt) || 0),
+      attempts: Math.max(1, Number(result.attempts) || 1),
+    }
+  }
+  return next
+}
+
+function getActiveAiTestTemplate() {
+  const templates = Array.isArray(state.aiTest.templates) ? state.aiTest.templates : []
+  const selected = state.aiTest.templateVersionId
+    ? templates.find((template) => template.versionId === state.aiTest.templateVersionId)
+    : null
+  return selected || templates[0] || FALLBACK_AI_TEST_TEMPLATE
+}
+
+function getAiTestCategoryFactor(categoryKey = state.aiTest.fields.categoryKey) {
+  const key = String(categoryKey || '').trim()
+  return state.aiTest.categoryFactors.find((item) => item.categoryKey === key)
+    || state.aiTest.categoryFactors[0]
+    || FALLBACK_AI_TEST_CATEGORY_FACTORS[0]
+}
+
+function replaceAiTestTemplateVariables(templateText, variables = {}) {
+  return String(templateText || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, name) => (
+    variables[name] == null ? '' : String(variables[name])
+  ))
+}
+
+function renderAiTestPrompt({ template = getActiveAiTestTemplate(), fields = state.aiTest.fields, direction, groupIndex = 1, groupTotal = 1 } = {}) {
+  const normalizedFields = sanitizeAiTestFields(fields)
+  const factor = getAiTestCategoryFactor(normalizedFields.categoryKey)
+  const dir = sanitizeAiTestDirection(direction, groupIndex - 1)
+  const prompt = replaceAiTestTemplateVariables(template.promptBody, {
+    categoryKey: normalizedFields.categoryKey,
+    categoryLabel: factor.categoryLabel,
+    categoryFactor: factor.factorText,
+    modelProfile: normalizedFields.modelProfile,
+    modelFeature: normalizedFields.modelProfile,
+    pose: normalizedFields.pose,
+    background: normalizedFields.background,
+    productColor: normalizedFields.productColor,
+    color: normalizedFields.productColor,
+    sellingPoint: normalizedFields.sellingPoint,
+    directionKey: dir.key,
+    directionLabel: dir.label,
+    directionWeightText: dir.weightText,
+    weightText: dir.weightText,
+    groupIndex: String(groupIndex),
+    groupTotal: String(groupTotal),
+    count: String(groupTotal),
+    aspectRatio: state.aiTest.aspectRatio,
+    resolution: state.aiTest.resolution,
+  }).trim()
+  const negative = String(template.negativePrompt || '').trim()
+  return negative ? `${prompt}\n\n${negative}` : prompt
+}
+
+function getAiTestResultKey(imageAssetId, groupIndex) {
+  return `${String(imageAssetId || '')}::${Math.max(1, Number(groupIndex) || 1)}`
+}
+
+function getAiTestPreviewRows() {
+  const template = getActiveAiTestTemplate()
+  const directions = Array.isArray(template.directions) && template.directions.length
+    ? template.directions
+    : FALLBACK_AI_TEST_DIRECTIONS
+  const images = Array.isArray(state.aiTest.images) ? state.aiTest.images : []
+  const groupTotal = Math.max(1, Math.min(
+    clampAiTestCount(state.aiTest.count),
+    Math.floor(AI_TEST_TOTAL_ITEM_LIMIT / Math.max(1, images.length || 1)),
+  ))
+  const rows = []
+  for (const [imageIndex, image] of images.entries()) {
+    for (let index = 0; index < groupTotal; index += 1) {
+      const groupIndex = index + 1
+      const direction = sanitizeAiTestDirection(directions[index % directions.length], index)
+      const imageAssetId = image.assetId || image.id
+      rows.push({
+        key: getAiTestResultKey(imageAssetId, groupIndex),
+        image,
+        imageAssetId,
+        imageIndex,
+        groupIndex,
+        groupTotal,
+        direction,
+        prompt: renderAiTestPrompt({ template, fields: state.aiTest.fields, direction, groupIndex, groupTotal }),
+      })
+    }
+  }
+  return rows
+}
+
 function savePrefs() {
   localStorage.setItem(PREF_STORAGE, JSON.stringify({
     activeView: state.activeView,
@@ -1049,6 +1359,14 @@ function savePrefs() {
     },
     style: {
       model: state.style.model,
+    },
+    aiTest: {
+      model: state.aiTest.model,
+      aspectRatio: state.aiTest.aspectRatio,
+      resolution: state.aiTest.resolution,
+      count: state.aiTest.count,
+      fields: sanitizeAiTestFields(state.aiTest.fields),
+      templateVersionId: state.aiTest.templateVersionId,
     },
   }))
 }
@@ -1109,6 +1427,20 @@ function createRuntimeStorageSnapshot() {
       subjectRefs: state.style.subjectRefs.map((item) => serializeAssetBackedItem(item)),
       batchResults: serializeStyleResultEntries(state.style.batchResults),
     },
+    aiTest: {
+      jobId: state.aiTest.jobId || '',
+      jobTab: state.aiTest.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(state.aiTest.jobPage) || 1),
+      jobs: state.aiTest.jobs.map(serializeJobTask),
+      images: state.aiTest.images.map((item) => serializeAssetBackedItem(item)),
+      fields: sanitizeAiTestFields(state.aiTest.fields),
+      model: state.aiTest.model,
+      aspectRatio: state.aiTest.aspectRatio,
+      resolution: state.aiTest.resolution,
+      count: clampAiTestCount(state.aiTest.count),
+      templateVersionId: state.aiTest.templateVersionId || '',
+      results: sanitizeAiTestResultEntries(state.aiTest.results),
+    },
   }
 }
 
@@ -1166,6 +1498,20 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
         ? snapshot.style.subjectRefs.slice(-RUNTIME_FALLBACK_SUBJECT_REF_LIMIT)
         : [],
       batchResults: serializeStyleResultEntries(snapshot.style?.batchResults),
+    },
+    aiTest: {
+      jobId: String(snapshot.aiTest?.jobId || ''),
+      jobTab: snapshot.aiTest?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(snapshot.aiTest?.jobPage) || 1),
+      jobs: Array.isArray(snapshot.aiTest?.jobs) ? snapshot.aiTest.jobs.slice(-RUNTIME_FALLBACK_TASK_LIMIT) : [],
+      images: Array.isArray(snapshot.aiTest?.images) ? snapshot.aiTest.images.slice(-RUNTIME_FALLBACK_ITEM_LIMIT) : [],
+      fields: sanitizeAiTestFields(snapshot.aiTest?.fields),
+      model: getModel(snapshot.aiTest?.model)?.id || DEFAULT_AI_TEST_MODEL,
+      aspectRatio: normalizeAspectRatio(snapshot.aiTest?.aspectRatio, '1:1'),
+      resolution: normalizeCanvasResolution(snapshot.aiTest?.resolution, '1k'),
+      count: clampAiTestCount(snapshot.aiTest?.count),
+      templateVersionId: sanitizeAiTestText(snapshot.aiTest?.templateVersionId, 120),
+      results: sanitizeAiTestResultEntries(snapshot.aiTest?.results),
     },
   }
 }
@@ -1526,6 +1872,7 @@ function sanitizeRuntimeState(raw = {}) {
   const translateJobs = sanitizeStoredJobTasks(raw.translate?.jobs, raw.translate?.jobId, 'translate_batch')
   const outfitJobs = sanitizeStoredJobTasks(raw.outfit?.jobs, raw.outfit?.jobId, 'outfit_batch')
   const styleJobs = sanitizeStoredJobTasks(raw.style?.jobs, raw.style?.jobId, 'style_transfer_batch')
+  const aiTestJobs = sanitizeStoredJobTasks(raw.aiTest?.jobs, raw.aiTest?.jobId, 'ai_test_batch')
   const translateItems = Array.isArray(raw.translate?.items)
     ? raw.translate.items
       .map((item) => sanitizeStoredAssetItem(item))
@@ -1550,6 +1897,9 @@ function sanitizeRuntimeState(raw = {}) {
         role: item.role || 'full_outfit',
         instructions: normalizeGarmentInstructions(item.instructions),
       }))
+    : []
+  const aiTestImages = Array.isArray(raw.aiTest?.images)
+    ? raw.aiTest.images.map((item) => sanitizeStoredAssetItem(item)).filter(Boolean)
     : []
 
   return {
@@ -1600,6 +1950,20 @@ function sanitizeRuntimeState(raw = {}) {
       batchResults: sanitizeStyleResultEntries(raw.style?.batchResults),
       history: sanitizeStyleHistoryEntries(raw.style?.history),
     },
+    aiTest: {
+      jobId: typeof raw.aiTest?.jobId === 'string' ? raw.aiTest.jobId : '',
+      jobTab: raw.aiTest?.jobTab === 'history' ? 'history' : 'current',
+      jobPage: Math.max(1, Number(raw.aiTest?.jobPage) || 1),
+      jobs: aiTestJobs,
+      images: aiTestImages,
+      fields: sanitizeAiTestFields(raw.aiTest?.fields),
+      model: getModel(raw.aiTest?.model)?.id || DEFAULT_AI_TEST_MODEL,
+      aspectRatio: normalizeAspectRatio(raw.aiTest?.aspectRatio, '1:1'),
+      resolution: normalizeCanvasResolution(raw.aiTest?.resolution, '1k'),
+      count: clampAiTestCount(raw.aiTest?.count),
+      templateVersionId: sanitizeAiTestText(raw.aiTest?.templateVersionId, 120),
+      results: sanitizeAiTestResultEntries(raw.aiTest?.results),
+    },
   }
 }
 
@@ -1648,24 +2012,28 @@ function getLoadedStoredJobId(tasks = []) {
 function getJobTasks(kind) {
   if (kind === 'translate') return state.translate.jobs
   if (kind === 'style') return state.style.jobs
+  if (kind === 'aiTest') return state.aiTest.jobs
   return state.outfit.jobs
 }
 
 function getLoadedJobId(kind) {
   if (kind === 'translate') return state.translate.jobId
   if (kind === 'style') return state.style.jobId
+  if (kind === 'aiTest') return state.aiTest.jobId
   return state.outfit.jobId
 }
 
 function getJobTab(kind) {
   if (kind === 'translate') return state.translate.jobTab
   if (kind === 'style') return state.style.jobTab
+  if (kind === 'aiTest') return state.aiTest.jobTab
   return state.outfit.jobTab
 }
 
 function getJobPage(kind) {
   if (kind === 'translate') return state.translate.jobPage
   if (kind === 'style') return state.style.jobPage
+  if (kind === 'aiTest') return state.aiTest.jobPage
   return state.outfit.jobPage
 }
 
@@ -1677,6 +2045,9 @@ function setJobTab(kind, tab) {
   } else if (kind === 'style') {
     state.style.jobTab = next
     state.style.jobPage = 1
+  } else if (kind === 'aiTest') {
+    state.aiTest.jobTab = next
+    state.aiTest.jobPage = 1
   } else {
     state.outfit.jobTab = next
     state.outfit.jobPage = 1
@@ -1691,6 +2062,8 @@ function setJobPage(kind, page) {
     state.translate.jobPage = next
   } else if (kind === 'style') {
     state.style.jobPage = next
+  } else if (kind === 'aiTest') {
+    state.aiTest.jobPage = next
   } else {
     state.outfit.jobPage = next
   }
@@ -1702,6 +2075,8 @@ function setLoadedJobId(kind, jobId) {
     state.translate.jobId = jobId || ''
   } else if (kind === 'style') {
     state.style.jobId = jobId || ''
+  } else if (kind === 'aiTest') {
+    state.aiTest.jobId = jobId || ''
   } else {
     state.outfit.jobId = jobId || ''
   }
@@ -1732,7 +2107,13 @@ function makeJobTask(jobId, type, extra = {}) {
 function upsertJobTask(kind, jobId, patch = {}) {
   if (!jobId) return null
   const tasks = getJobTasks(kind)
-  const type = kind === 'translate' ? 'translate_batch' : kind === 'style' ? 'style_transfer_batch' : 'outfit_batch'
+  const type = kind === 'translate'
+    ? 'translate_batch'
+    : kind === 'style'
+      ? 'style_transfer_batch'
+      : kind === 'aiTest'
+        ? 'ai_test_batch'
+        : 'outfit_batch'
   let task = tasks.find((entry) => entry.jobId === jobId)
   if (task) {
     Object.assign(task, patch)
@@ -1757,6 +2138,11 @@ function removeJobTask(kind, jobId) {
     if (state.style.jobId === jobId) state.style.jobId = ''
     styleJobWatchers.delete(jobId)
     state.style.jobPage = clampJobTaskPage(state.style.jobs, state.style.jobTab, state.style.jobPage)
+  } else if (kind === 'aiTest') {
+    state.aiTest.jobs = state.aiTest.jobs.filter((task) => task.jobId !== jobId)
+    if (state.aiTest.jobId === jobId) state.aiTest.jobId = ''
+    aiTestJobWatchers.delete(jobId)
+    state.aiTest.jobPage = clampJobTaskPage(state.aiTest.jobs, state.aiTest.jobTab, state.aiTest.jobPage)
   } else {
     state.outfit.jobs = state.outfit.jobs.filter((task) => task.jobId !== jobId)
     if (state.outfit.jobId === jobId) state.outfit.jobId = ''
@@ -1833,6 +2219,11 @@ function resetLoadedWorkspaceForDraft(kind) {
     styleWorkspaceLoadToken += 1
     state.style.resultDataUrl = ''
     state.style.progress = ''
+  } else if (kind === 'aiTest') {
+    aiTestWorkspaceLoadToken += 1
+    state.aiTest.images = []
+    state.aiTest.results = {}
+    state.aiTest.progress = ''
   } else {
     outfitWorkspaceLoadToken += 1
     state.outfit.models = []
@@ -2004,6 +2395,12 @@ function getJobTaskThumbsFromItems(kind, items = []) {
     }
     return thumbs
   }
+  if (kind === 'aiTest') {
+    for (const item of Array.isArray(items) ? items : []) {
+      addJobTaskThumb(thumbs, seen, item?.inputJson?.imageAssetId || item?.inputJson?.image?.assetId, `商品图 ${thumbs.length + 1}`)
+    }
+    return thumbs
+  }
 
   let modelCount = 0
   let garmentCount = 0
@@ -2049,6 +2446,12 @@ function getJobTaskThumbsFromWorkspace(kind) {
     }
     return thumbs
   }
+  if (kind === 'aiTest') {
+    for (const item of state.aiTest.images) {
+      addJobTaskThumbFromItem(thumbs, seen, item, `商品图 ${thumbs.length + 1}`)
+    }
+    return thumbs
+  }
 
   let modelCount = 0
   for (const item of state.outfit.models) {
@@ -2079,7 +2482,13 @@ function updateJobTaskFromJob(task, job, items = null) {
   task.itemCount = Array.isArray(items) ? items.length : Number(task.itemCount || job.progressTotal || 0)
   task.failureSummary = Array.isArray(items) ? summarizeJobItemFailures(items) : ''
   if (Array.isArray(items)) {
-    const kind = job.type === 'translate_batch' ? 'translate' : job.type === 'style_transfer_batch' ? 'style' : 'outfit'
+    const kind = job.type === 'translate_batch'
+      ? 'translate'
+      : job.type === 'style_transfer_batch'
+        ? 'style'
+        : job.type === 'ai_test_batch'
+          ? 'aiTest'
+          : 'outfit'
     const thumbs = getJobTaskThumbsFromItems(kind, items)
     task.thumbs = thumbs.length ? thumbs : getJobTaskThumbsFromWorkspace(kind)
   }
@@ -2103,6 +2512,11 @@ function createJobTaskLabel(job, items = null) {
   if (job?.type === 'style_transfer_batch') {
     const subjects = Number(job?.summaryJson?.subjectCount || job?.progressTotal || 0)
     return `${created} · ${subjects || '多'} 个主体`
+  }
+  if (job?.type === 'ai_test_batch') {
+    const images = Number(job?.summaryJson?.imageCount || job?.configJson?.request?.images?.length || 0)
+    const count = Number(job?.summaryJson?.itemCount || job?.progressTotal || 0)
+    return `${created} · ${images || '多'} 张商品图 · ${count || '多'} 组测图`
   }
   return `${created} · ${Array.isArray(items) ? items.length : total} 项`
 }
@@ -2141,6 +2555,7 @@ function releaseCompletedLoadedTasksForView(view) {
   if (view === 'translate') return releaseCompletedLoadedTasksForKind('translate')
   if (view === 'outfit') return releaseCompletedLoadedTasksForKind('outfit')
   if (view === 'style') return releaseCompletedLoadedTasksForKind('style')
+  if (view === 'ai-test') return releaseCompletedLoadedTasksForKind('aiTest')
   return false
 }
 
@@ -2149,7 +2564,9 @@ async function loadJobIntoWorkspace(kind, jobId) {
     ? ++translateWorkspaceLoadToken
     : kind === 'style'
       ? ++styleWorkspaceLoadToken
-      : ++outfitWorkspaceLoadToken
+      : kind === 'aiTest'
+        ? ++aiTestWorkspaceLoadToken
+        : ++outfitWorkspaceLoadToken
   const task = upsertJobTask(kind, jobId, { syncing: true, error: '' })
   markJobTaskLoaded(kind, jobId)
   if (kind === 'translate') {
@@ -2158,6 +2575,9 @@ async function loadJobIntoWorkspace(kind, jobId) {
   } else if (kind === 'style') {
     state.style.progress = '正在切换任务结果…'
     renderStyle()
+  } else if (kind === 'aiTest') {
+    state.aiTest.progress = '正在切换任务结果…'
+    renderAiTest()
   } else {
     state.outfit.progress = '正在切换任务结果…'
     renderOutfit()
@@ -2165,7 +2585,13 @@ async function loadJobIntoWorkspace(kind, jobId) {
   renderJobList(kind)
   try {
     const { job, items } = await fetchJobSnapshot(jobId)
-    const currentToken = kind === 'translate' ? translateWorkspaceLoadToken : kind === 'style' ? styleWorkspaceLoadToken : outfitWorkspaceLoadToken
+    const currentToken = kind === 'translate'
+      ? translateWorkspaceLoadToken
+      : kind === 'style'
+        ? styleWorkspaceLoadToken
+        : kind === 'aiTest'
+          ? aiTestWorkspaceLoadToken
+          : outfitWorkspaceLoadToken
     if (currentToken !== loadToken) {
       return
     }
@@ -2179,6 +2605,10 @@ async function loadJobIntoWorkspace(kind, jobId) {
       await hydrateStyleWorkspaceFromJob(job, items)
       if (styleWorkspaceLoadToken !== loadToken) return
       applyStyleJobSnapshot(job, items)
+    } else if (kind === 'aiTest') {
+      await hydrateAiTestWorkspaceFromJob(job, items)
+      if (aiTestWorkspaceLoadToken !== loadToken) return
+      applyAiTestJobSnapshot(job, items)
     } else {
       await hydrateOutfitWorkspaceFromJob(job, items)
       if (outfitWorkspaceLoadToken !== loadToken) return
@@ -2189,11 +2619,19 @@ async function loadJobIntoWorkspace(kind, jobId) {
       void syncTranslateJob(jobId, { applyToWorkspace: true })
     } else if (kind === 'style') {
       void syncStyleJob(jobId, { applyToWorkspace: true })
+    } else if (kind === 'aiTest') {
+      void syncAiTestJob(jobId, { applyToWorkspace: true })
     } else {
       void syncOutfitJob(jobId, { applyToWorkspace: true })
     }
   } catch (error) {
-    const currentToken = kind === 'translate' ? translateWorkspaceLoadToken : kind === 'style' ? styleWorkspaceLoadToken : outfitWorkspaceLoadToken
+    const currentToken = kind === 'translate'
+      ? translateWorkspaceLoadToken
+      : kind === 'style'
+        ? styleWorkspaceLoadToken
+        : kind === 'aiTest'
+          ? aiTestWorkspaceLoadToken
+          : outfitWorkspaceLoadToken
     if (currentToken !== loadToken) {
       return
     }
@@ -2205,12 +2643,15 @@ async function loadJobIntoWorkspace(kind, jobId) {
         state.translate.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       } else if (kind === 'style') {
         state.style.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
+      } else if (kind === 'aiTest') {
+        state.aiTest.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       } else {
         state.outfit.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，已从列表移除'
       }
       saveRuntimeState()
       if (kind === 'translate') renderTranslate()
       else if (kind === 'style') renderStyle()
+      else if (kind === 'aiTest') renderAiTest()
       else renderOutfit()
       return
     }
@@ -2226,6 +2667,7 @@ async function loadJobIntoWorkspace(kind, jobId) {
     saveRuntimeState()
     if (kind === 'translate') renderTranslate()
     else if (kind === 'style') renderStyle()
+    else if (kind === 'aiTest') renderAiTest()
     else renderOutfit()
   } finally {
     if (task) task.syncing = false
@@ -2242,6 +2684,8 @@ async function pauseJobTask(kind, jobId) {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else if (kind === 'style') {
       await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'aiTest') {
+      await syncAiTestJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2263,6 +2707,8 @@ async function resumeJobTask(kind, jobId) {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else if (kind === 'style') {
       await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'aiTest') {
+      await syncAiTestJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2285,6 +2731,8 @@ async function retryJobTask(kind, jobId) {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else if (kind === 'style') {
       await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'aiTest') {
+      await syncAiTestJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2306,6 +2754,8 @@ async function cancelJobTask(kind, jobId) {
       await syncTranslateJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else if (kind === 'style') {
       await syncStyleJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
+    } else if (kind === 'aiTest') {
+      await syncAiTestJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     } else {
       await syncOutfitJob(jobId, { applyToWorkspace: getLoadedJobId(kind) === jobId })
     }
@@ -2334,6 +2784,9 @@ async function deleteJobTask(kind, jobId) {
     } else if (kind === 'style') {
       state.style.running = false
       renderStyle()
+    } else if (kind === 'aiTest') {
+      state.aiTest.running = false
+      renderAiTest()
     } else {
       state.outfit.running = false
       renderOutfit()
@@ -2349,7 +2802,13 @@ async function deleteJobTask(kind, jobId) {
 }
 
 function getTaskDeleteTarget() {
-  const kind = state.taskDelete.kind === 'outfit' ? 'outfit' : state.taskDelete.kind === 'style' ? 'style' : 'translate'
+  const kind = state.taskDelete.kind === 'outfit'
+    ? 'outfit'
+    : state.taskDelete.kind === 'style'
+      ? 'style'
+      : state.taskDelete.kind === 'aiTest'
+        ? 'aiTest'
+        : 'translate'
   const task = state.taskDelete.jobId
     ? getJobTasks(kind).find((entry) => entry.jobId === state.taskDelete.jobId)
     : null
@@ -2369,7 +2828,13 @@ function openTaskDeleteDialog(kind, jobId) {
 function renderTaskDeleteDialog() {
   if (!dom.taskDeleteDialog) return
   const { kind, task } = getTaskDeleteTarget()
-  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate' ? '批量翻译任务' : kind === 'style' ? '批量风格迁移任务' : '批量换装任务')
+  dom.taskDeleteTitle.textContent = task?.label || (kind === 'translate'
+    ? '批量翻译任务'
+    : kind === 'style'
+      ? '批量风格迁移任务'
+      : kind === 'aiTest'
+        ? 'AI 测图任务'
+        : '批量换装任务')
   dom.taskDeleteMeta.textContent = task
     ? `${getJobStatusLabel(task.status)} · ${task.createdAt ? formatTimestamp(task.createdAt) : task.jobId}`
     : ''
@@ -6944,6 +7409,111 @@ function bindStyle() {
   })
 }
 
+function bindAiTest() {
+  if (!dom.aiTestGrid) return
+  dom.aiTestModel.addEventListener('change', () => {
+    state.aiTest.model = dom.aiTestModel.value
+    savePrefs()
+    renderAiTest()
+  })
+  dom.aiTestAspect.addEventListener('change', () => {
+    state.aiTest.aspectRatio = normalizeAspectRatio(dom.aiTestAspect.value, '1:1')
+    savePrefs()
+    renderAiTest()
+  })
+  dom.aiTestResolution.addEventListener('change', () => {
+    state.aiTest.resolution = normalizeCanvasResolution(dom.aiTestResolution.value, '1k')
+    savePrefs()
+    renderAiTest()
+  })
+  dom.aiTestCount.addEventListener('input', () => {
+    state.aiTest.count = clampAiTestCount(dom.aiTestCount.value)
+    savePrefs()
+    renderAiTest()
+  })
+  dom.aiTestCategory.addEventListener('change', () => {
+    state.aiTest.fields.categoryKey = dom.aiTestCategory.value || DEFAULT_AI_TEST_FIELDS.categoryKey
+    savePrefs()
+    renderAiTest()
+  })
+  dom.aiTestTemplate.addEventListener('change', () => {
+    state.aiTest.templateVersionId = dom.aiTestTemplate.value
+    savePrefs()
+    renderAiTest()
+  })
+  for (const [input, field] of [
+    [dom.aiTestModelProfile, 'modelProfile'],
+    [dom.aiTestPose, 'pose'],
+    [dom.aiTestBackground, 'background'],
+    [dom.aiTestProductColor, 'productColor'],
+    [dom.aiTestSellingPoint, 'sellingPoint'],
+  ]) {
+    input.addEventListener('input', () => {
+      state.aiTest.fields[field] = sanitizeAiTestText(input.value)
+      savePrefs()
+      renderAiTest()
+    })
+  }
+
+  bindDropSurface({
+    surface: dom.aiTestDropzone,
+    input: dom.aiTestFileInput,
+    onFiles: async (files) => {
+      if (isAiTestBusy()) return
+      setJobTab('aiTest', 'current')
+      const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'))
+      if (!imageFiles.length) return
+      resetLoadedWorkspaceForDraft('aiTest')
+      const uploads = imageFiles.map((file, index) => createUploadProgressState({
+        title: 'AI 测图商品图',
+        detail: file.name,
+        percent: 0,
+        active: index === 0,
+      }))
+      state.aiTest.progress = '正在读取商品图…'
+      renderUploadQueue(dom.aiTestUpload, uploads)
+      renderAiTest()
+      try {
+        const images = await prepareAssetItems(files, {
+          kind: 'upload',
+          source: 'ai_test_source',
+          onProgress: ({ current, total, filename }) => {
+            state.aiTest.progress = `正在上传商品图 ${current}/${total} · ${filename}`
+            setUploadProgress(uploads[current - 1], { current, total, filename, active: true })
+            renderUploadQueue(dom.aiTestUpload, uploads)
+            renderAiTest()
+          },
+          onUploadProgress: ({ current, total, filename, percent }) => {
+            setUploadProgress(uploads[current - 1], { current, total, filename, percent, active: true, done: percent >= 100 })
+            renderUploadQueue(dom.aiTestUpload, uploads)
+          },
+        })
+        state.aiTest.images.push(...images)
+        state.aiTest.progress = ''
+        saveRuntimeState()
+      } catch (error) {
+        state.aiTest.progress = trimError(error)
+      } finally {
+        renderUploadQueue(dom.aiTestUpload, [])
+        renderAiTest()
+      }
+    },
+    onClick: () => !isAiTestBusy(),
+  })
+
+  dom.aiTestRun.addEventListener('click', runAiTestBatch)
+  dom.aiTestRefreshTemplate.addEventListener('click', () => {
+    void loadAiTestTemplates({ force: true })
+  })
+  for (const button of dom.aiTestJobTabs || []) {
+    button.addEventListener('click', () => {
+      setJobTab('aiTest', button.dataset.jobTab)
+      saveRuntimeState()
+      renderAiTest()
+    })
+  }
+}
+
 function renderStyle() {
   const s = state.style
   const busy = isStyleBusy()
@@ -7351,6 +7921,7 @@ function renderAll() {
   renderGenerate()
   renderOutfit()
   renderStyle()
+  renderAiTest()
 }
 
 function renderShell() {
@@ -7658,6 +8229,226 @@ function renderTranslate() {
   dom.tGrid.replaceChildren(thead, tbody)
 }
 
+function renderAiTest() {
+  if (!dom.aiTestGrid) return
+  const busy = isAiTestBusy()
+  const showLoadedWorkspace = shouldShowLoadedJobWorkspace('aiTest')
+  const ai = state.aiTest
+  ai.fields = sanitizeAiTestFields(ai.fields)
+  ai.count = clampAiTestCount(ai.count)
+  ai.aspectRatio = normalizeAspectRatio(ai.aspectRatio, '1:1')
+  ai.resolution = normalizeCanvasResolution(ai.resolution, '1k')
+
+  dom.aiTestModel.value = ai.model
+  dom.aiTestAspect.value = ai.aspectRatio
+  dom.aiTestResolution.value = ai.resolution
+  dom.aiTestCount.value = String(ai.count)
+  dom.aiTestModelProfile.value = ai.fields.modelProfile
+  dom.aiTestPose.value = ai.fields.pose
+  dom.aiTestBackground.value = ai.fields.background
+  dom.aiTestProductColor.value = ai.fields.productColor
+  dom.aiTestSellingPoint.value = ai.fields.sellingPoint
+  dom.aiTestProgress.textContent = ai.progress || ''
+
+  renderAiTestTemplateControls()
+  renderAiTestImageList()
+  renderJobList('aiTest')
+
+  const rows = showLoadedWorkspace ? getAiTestPreviewRows() : []
+  const hasRows = rows.length > 0
+  dom.aiTestEmpty.classList.toggle('hidden', hasRows)
+  dom.aiTestRun.disabled = busy || !hasRows
+  dom.aiTestModel.disabled = busy
+  dom.aiTestAspect.disabled = busy
+  dom.aiTestResolution.disabled = busy
+  dom.aiTestCount.disabled = busy
+  dom.aiTestTemplate.disabled = busy || ai.templateLoading || ai.templates.length <= 1
+  dom.aiTestCategory.disabled = busy || ai.categoryFactors.length <= 1
+  dom.aiTestRefreshTemplate.disabled = busy || ai.templateLoading
+  dom.aiTestDropzone.classList.toggle('disabled', busy)
+  for (const input of [dom.aiTestModelProfile, dom.aiTestPose, dom.aiTestBackground, dom.aiTestProductColor, dom.aiTestSellingPoint]) {
+    input.disabled = busy
+  }
+
+  if (!hasRows) {
+    dom.aiTestGrid.replaceChildren()
+    return
+  }
+
+  const thead = document.createElement('thead')
+  const headRow = document.createElement('tr')
+  for (const label of ['源图', '组别', '方向', 'Prompt', '状态', '结果', '操作']) {
+    headRow.append(createHeaderCell(label))
+  }
+  thead.append(headRow)
+
+  const tbody = document.createElement('tbody')
+  for (const row of rows) {
+    tbody.append(createAiTestPreviewRow(row, busy))
+  }
+  dom.aiTestGrid.replaceChildren(thead, tbody)
+}
+
+function renderAiTestTemplateControls() {
+  if (!dom.aiTestCategory || !dom.aiTestTemplate) return
+  const ai = state.aiTest
+  if (!ai.categoryFactors.length) ai.categoryFactors = FALLBACK_AI_TEST_CATEGORY_FACTORS
+  if (!ai.templates.length) ai.templates = [FALLBACK_AI_TEST_TEMPLATE]
+  if (!ai.categoryFactors.some((item) => item.categoryKey === ai.fields.categoryKey)) {
+    ai.fields.categoryKey = ai.categoryFactors[0]?.categoryKey || DEFAULT_AI_TEST_FIELDS.categoryKey
+  }
+  if (!ai.templateVersionId || !ai.templates.some((template) => template.versionId === ai.templateVersionId)) {
+    ai.templateVersionId = ai.templates[0]?.versionId || FALLBACK_AI_TEST_TEMPLATE.versionId
+  }
+
+  dom.aiTestCategory.replaceChildren(...ai.categoryFactors.map((factor) => {
+    const option = document.createElement('option')
+    option.value = factor.categoryKey
+    option.textContent = factor.categoryLabel || factor.categoryKey
+    return option
+  }))
+  dom.aiTestCategory.value = ai.fields.categoryKey
+
+  dom.aiTestTemplate.replaceChildren(...ai.templates.map((template) => {
+    const option = document.createElement('option')
+    option.value = template.versionId
+    option.textContent = `${template.title || 'AI 测图模板'} · v${template.version || 1}`
+    return option
+  }))
+  dom.aiTestTemplate.value = ai.templateVersionId
+
+  const template = getActiveAiTestTemplate()
+  dom.aiTestTemplateStatus.textContent = ai.templateLoading
+    ? '模板加载中…'
+    : ai.templateError
+      ? ai.templateError
+      : `当前模板：${template.title || template.versionId}`
+  dom.aiTestTemplateStatus.classList.toggle('err', Boolean(ai.templateError))
+}
+
+function renderAiTestImageList() {
+  if (!dom.aiTestImageList) return
+  const busy = isAiTestBusy()
+  dom.aiTestImageList.replaceChildren(...state.aiTest.images.map((image, index) => {
+    const item = document.createElement('div')
+    item.className = 'ai-test-image-item'
+    const img = document.createElement('img')
+    img.src = assetImageSrc(image)
+    img.alt = readableAssetLabel(image, `商品图 ${index + 1}`)
+    const name = document.createElement('span')
+    name.textContent = readableAssetLabel(image, `商品图 ${index + 1}`)
+    const remove = document.createElement('button')
+    remove.type = 'button'
+    remove.className = 'row-rm'
+    remove.textContent = '×'
+    remove.disabled = busy
+    remove.title = '移除商品图'
+    remove.addEventListener('click', () => {
+      if (busy) return
+      const assetId = image.assetId || image.id
+      state.aiTest.images = state.aiTest.images.filter((entry) => entry.id !== image.id)
+      for (const key of Object.keys(state.aiTest.results)) {
+        if (key.startsWith(`${assetId}::`)) delete state.aiTest.results[key]
+      }
+      saveRuntimeState()
+      renderAiTest()
+    })
+    item.append(img, name, remove)
+    return item
+  }))
+}
+
+function createAiTestPreviewRow(row, busy) {
+  const tr = document.createElement('tr')
+  tr.dataset.aiTestRow = row.key
+  tr.append(createImageLabelCell(row.image))
+
+  const group = document.createElement('td')
+  group.className = 'ai-test-group-cell'
+  group.textContent = `${row.imageIndex + 1}-${row.groupIndex} / ${row.groupTotal}`
+  tr.append(group)
+
+  const direction = document.createElement('td')
+  const directionLabel = document.createElement('strong')
+  directionLabel.textContent = row.direction.label
+  const directionText = document.createElement('div')
+  directionText.className = 'grid-meta'
+  directionText.textContent = row.direction.weightText
+  direction.append(directionLabel, directionText)
+  tr.append(direction)
+
+  const prompt = document.createElement('td')
+  prompt.className = 'ai-test-prompt-cell'
+  prompt.textContent = row.prompt
+  tr.append(prompt)
+
+  const result = state.aiTest.results[row.key] || {}
+  const status = document.createElement('td')
+  status.append(createStatusLine(getAiTestResultStatusText(result), getAiTestResultTone(result), result.status === 'running' || result.status === 'model_pending'))
+  if (result.error) {
+    const tip = document.createElement('div')
+    tip.className = 'err-tip'
+    tip.textContent = result.error
+    status.append(tip)
+  }
+  tr.append(status)
+
+  const resultCell = document.createElement('td')
+  if (result.status === 'done' && result.dataUrl) {
+    resultCell.append(createPreviewButton({
+      src: result.dataUrl,
+      alt: `AI 测图 ${row.imageIndex + 1}-${row.groupIndex}`,
+      caption: `${readableAssetLabel(row.image, '商品图')} · ${row.direction.label}`,
+      downloadName: `ai-test-${row.imageIndex}-${row.groupIndex}.png`,
+      className: 'img-button',
+    }))
+  } else {
+    resultCell.append(createStatusLine('暂无结果'))
+  }
+  tr.append(resultCell)
+
+  const actions = document.createElement('td')
+  const actionWrap = document.createElement('div')
+  actionWrap.className = 'cell-actions'
+  const copy = document.createElement('button')
+  copy.type = 'button'
+  copy.className = 'retry-btn'
+  copy.textContent = '复制 Prompt'
+  copy.addEventListener('click', () => {
+    void copyTextToClipboard(result.finalPrompt || row.prompt)
+  })
+  const retry = document.createElement('button')
+  retry.type = 'button'
+  retry.className = 'retry-btn'
+  retry.textContent = '重试'
+  retry.disabled = busy || result.status !== 'error' || !result.itemId || !state.aiTest.jobId
+  retry.addEventListener('click', () => {
+    void retryAiTestJob(row.key)
+  })
+  actionWrap.append(copy, retry)
+  actions.append(actionWrap)
+  tr.append(actions)
+
+  return tr
+}
+
+function getAiTestResultStatusText(result = {}) {
+  if (result.status === 'done') return '已完成'
+  if (result.status === 'error') return '失败'
+  if (result.status === 'running') return result.attempt ? `生成中 · 第 ${result.attempt} 次` : '生成中'
+  if (result.status === 'model_pending') return result.taskStatus ? `模型处理中 · ${result.taskStatus}` : '模型处理中'
+  if (result.status === 'cancelled') return '已结束'
+  if (result.status === 'queue') return '排队中'
+  return '待生成'
+}
+
+function getAiTestResultTone(result = {}) {
+  if (result.status === 'done') return 'ok'
+  if (result.status === 'error') return 'err'
+  if (result.status === 'running' || result.status === 'model_pending') return 'run'
+  return ''
+}
+
 function renderHome() {
   if (!dom.hRecentList) return
   if (dom.hPrompt && document.activeElement !== dom.hPrompt) {
@@ -7768,8 +8559,7 @@ function renderProjects() {
 }
 
 function renderJobList(kind) {
-  const list = kind === 'translate' ? dom.tJobList : kind === 'style' ? dom.sJobList : dom.oJobList
-  const empty = kind === 'translate' ? dom.tJobEmpty : kind === 'style' ? dom.sJobEmpty : dom.oJobEmpty
+  const { list, empty, tabButtons } = getJobPanelDom(kind)
   if (!list) return
   const tab = getJobTab(kind)
   const allTasks = getJobTasks(kind)
@@ -7777,7 +8567,6 @@ function renderJobList(kind) {
   const allTabTasks = getSortedJobTasksForTab(allTasks, tab)
   const tasks = getPagedJobTasksForTab(allTasks, tab, page)
   const pageCount = getJobTaskPageCount(allTasks, tab)
-  const tabButtons = kind === 'translate' ? dom.tJobTabs : kind === 'style' ? dom.sJobTabs : dom.oJobTabs
   for (const button of tabButtons || []) {
     const active = button.dataset.jobTab === tab
     const count = filterJobTasksForTab(allTasks, button.dataset.jobTab).length
@@ -7793,6 +8582,19 @@ function renderJobList(kind) {
   const pagination = createJobPagination(kind, tab, page, pageCount, allTabTasks.length)
   if (pagination) nodes.push(pagination)
   list.replaceChildren(...nodes)
+}
+
+function getJobPanelDom(kind) {
+  if (kind === 'translate') {
+    return { list: dom.tJobList, empty: dom.tJobEmpty, tabButtons: dom.tJobTabs }
+  }
+  if (kind === 'style') {
+    return { list: dom.sJobList, empty: dom.sJobEmpty, tabButtons: dom.sJobTabs }
+  }
+  if (kind === 'aiTest') {
+    return { list: dom.aiTestJobList, empty: dom.aiTestJobEmpty, tabButtons: dom.aiTestJobTabs }
+  }
+  return { list: dom.oJobList, empty: dom.oJobEmpty, tabButtons: dom.oJobTabs }
 }
 
 function createJobPagination(kind, tab, page, pageCount, total) {
@@ -7995,6 +8797,16 @@ function getJobTaskDownloadEntries(kind, items = []) {
       })
       continue
     }
+    if (kind === 'aiTest') {
+      const imageIndex = Math.max(0, Number(item.inputJson?.imageIndex) || 0)
+      const groupIndex = Math.max(1, Number(item.inputJson?.groupIndex) || 1)
+      const backendName = String(item.outputJson?.filename || item.outputJson?.fileName || '').trim()
+      entries.push({
+        href: assetResultUrl(resultAssetId),
+        name: backendName || `ai-test-${imageIndex}-${groupIndex}.png`,
+      })
+      continue
+    }
 
     const modelId = sanitizeFileName(String(item.inputJson?.modelAssetId || 'model'))
     const lookId = sanitizeFileName(String(item.inputJson?.lookId || item.id || 'look'))
@@ -8045,7 +8857,7 @@ function createJobTaskThumbs(kind, task) {
   wrap.className = `job-card-thumbs${thumbs.length ? '' : ' empty'}`
   if (!thumbs.length) {
     const placeholder = document.createElement('span')
-    placeholder.textContent = kind === 'translate' ? '译' : kind === 'style' ? '风' : '装'
+    placeholder.textContent = kind === 'translate' ? '译' : kind === 'style' ? '风' : kind === 'aiTest' ? '测' : '装'
     wrap.append(placeholder)
     return wrap
   }
@@ -8064,6 +8876,7 @@ function getJobTypeLabel(type) {
   if (type === 'translate_batch') return '批量翻译'
   if (type === 'outfit_batch') return '批量换装'
   if (type === 'style_transfer_batch') return '批量风格迁移'
+  if (type === 'ai_test_batch') return 'AI 测图'
   return '任务'
 }
 
@@ -8632,6 +9445,231 @@ async function runOutfitBatch() {
   }
 }
 
+async function loadAiTestTemplates({ force = false } = {}) {
+  if (!dom.aiTestGrid) return
+  if (state.aiTest.templateLoading) return
+  if (!force && state.aiTest.templatesLoaded && state.aiTest.templates.length) return
+  state.aiTest.templateLoading = true
+  state.aiTest.templateError = ''
+  renderAiTest()
+  try {
+    const data = await getJson('/api/ai-test/templates')
+    state.aiTest.templates = Array.isArray(data.templates) && data.templates.length
+      ? data.templates.map((template) => sanitizeAiTestTemplateVersion(template))
+      : [FALLBACK_AI_TEST_TEMPLATE]
+    state.aiTest.categoryFactors = sanitizeAiTestCategoryFactors(data.categoryFactors)
+    if (!state.aiTest.templateVersionId || !state.aiTest.templates.some((template) => template.versionId === state.aiTest.templateVersionId)) {
+      state.aiTest.templateVersionId = state.aiTest.templates[0]?.versionId || FALLBACK_AI_TEST_TEMPLATE.versionId
+    }
+    if (!state.aiTest.categoryFactors.some((factor) => factor.categoryKey === state.aiTest.fields.categoryKey)) {
+      state.aiTest.fields.categoryKey = state.aiTest.categoryFactors[0]?.categoryKey || DEFAULT_AI_TEST_FIELDS.categoryKey
+    }
+    state.aiTest.templatesLoaded = true
+    savePrefs()
+  } catch (error) {
+    state.aiTest.templates = [FALLBACK_AI_TEST_TEMPLATE]
+    state.aiTest.categoryFactors = FALLBACK_AI_TEST_CATEGORY_FACTORS
+    state.aiTest.templateError = trimError(error)
+  } finally {
+    state.aiTest.templateLoading = false
+    renderAiTest()
+  }
+}
+
+function getAiTestRunConfig() {
+  return {
+    modelId: state.aiTest.model,
+    aspectRatio: normalizeAspectRatio(state.aiTest.aspectRatio, '1:1'),
+    resolution: normalizeCanvasResolution(state.aiTest.resolution, '1k'),
+    count: clampAiTestCount(state.aiTest.count),
+    templateVersionId: state.aiTest.templateVersionId || getActiveAiTestTemplate().versionId,
+    fields: sanitizeAiTestFields(state.aiTest.fields),
+    clientKeys: { ...state.keys },
+  }
+}
+
+function getAiTestSignature(config = getAiTestRunConfig()) {
+  return JSON.stringify({
+    modelId: config.modelId,
+    aspectRatio: config.aspectRatio,
+    resolution: config.resolution,
+    count: config.count,
+    templateVersionId: config.templateVersionId,
+    fields: config.fields,
+    images: state.aiTest.images.map((item) => item.assetId || item.id),
+  })
+}
+
+async function runAiTestBatch() {
+  if (isAiTestBusy() || state.aiTest.images.length === 0) return
+  const runConfig = getAiTestRunConfig()
+  const signature = getAiTestSignature(runConfig)
+  if (state.aiTest.submittingJobId && state.aiTest.pendingSignature === signature) {
+    state.aiTest.progress = '任务已提交，正在同步进度…'
+    renderAiTest()
+    return
+  }
+
+  try {
+    state.aiTest.running = true
+    state.aiTest.progress = '正在提交 AI 测图任务…'
+    renderAiTest()
+    const images = state.aiTest.images.map((item, index) => ({
+      assetId: item.assetId || item.id,
+      index,
+      name: item.name || `商品图 ${index + 1}`,
+      mime: item.mime || 'image/png',
+    }))
+    const data = await postJson('/api/jobs/ai-test-batch', {
+      sessionId: state.runtime.sessionId || undefined,
+      images,
+      fields: runConfig.fields,
+      count: runConfig.count,
+      modelId: runConfig.modelId,
+      aspectRatio: runConfig.aspectRatio,
+      resolution: runConfig.resolution,
+      templateVersionId: runConfig.templateVersionId,
+      concurrency: DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+      clientKeys: runConfig.clientKeys,
+    })
+
+    state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+    state.aiTest.submittingJobId = data.jobId
+    state.aiTest.pendingSignature = signature
+    upsertJobTask('aiTest', data.jobId, {
+      type: 'ai_test_batch',
+      status: 'queued',
+      progress: data.itemCount ? `0 / ${data.itemCount}` : '排队中…',
+      label: `刚刚 · ${state.aiTest.images.length} 张商品图 · ${data.itemCount || getAiTestPreviewRows().length} 组测图`,
+      loaded: true,
+      thumbs: getJobTaskThumbsFromWorkspace('aiTest'),
+      itemCount: Number(data.itemCount || 0),
+      progressTotal: Number(data.itemCount || 0),
+      signature,
+    })
+    markJobTaskLoaded('aiTest', data.jobId)
+    setJobTab('aiTest', 'current')
+    state.aiTest.running = false
+    state.aiTest.progress = '任务已提交，可继续上传商品图'
+    saveRuntimeState()
+    renderAiTest()
+    void syncAiTestJob(data.jobId, { applyToWorkspace: true })
+  } catch (error) {
+    state.aiTest.running = false
+    clearAiTestSubmitLock()
+    state.aiTest.progress = trimError(error)
+    renderAiTest()
+  }
+}
+
+function mapAiTestJobItem(item) {
+  const finalPrompt = String(item.outputJson?.finalPrompt || item.inputJson?.prompt || '')
+  if (item.status === 'completed') {
+    const resultAssetId = String(item.outputJson?.resultAssetId || '')
+    return {
+      status: 'done',
+      dataUrl: assetResultUrl(resultAssetId),
+      assetId: resultAssetId,
+      finalPrompt,
+      attempts: Number(item.attemptCount || 1),
+      itemId: item.id,
+      taskStatus: String(item.outputJson?.imageTaskStatus || ''),
+    }
+  }
+  if (item.status === 'failed') {
+    return {
+      status: 'error',
+      error: formatJobItemFailureMessage(item),
+      finalPrompt,
+      attempts: Number(item.attemptCount || 1),
+      itemId: item.id,
+    }
+  }
+  if (item.status === 'running') {
+    return {
+      status: 'running',
+      finalPrompt,
+      attempt: Math.max(1, Number(item.attemptCount || 1)),
+      itemId: item.id,
+      taskStatus: String(item.outputJson?.imageTaskStatus || ''),
+    }
+  }
+  if (item.status === 'cancelled') {
+    return { status: 'cancelled', finalPrompt, itemId: item.id }
+  }
+  if (item.status === 'queued' && item.outputJson?.imageTask) {
+    return {
+      status: 'model_pending',
+      finalPrompt,
+      attempt: Math.max(1, Number(item.attemptCount || 1)),
+      itemId: item.id,
+      taskStatus: String(item.outputJson?.imageTaskStatus || 'running'),
+    }
+  }
+  return {
+    status: 'queue',
+    finalPrompt,
+    attempt: Number(item.attemptCount || 0),
+    itemId: item.id,
+  }
+}
+
+async function hydrateAiTestWorkspaceFromJob(job, items) {
+  const config = job?.configJson?.request || job?.configJson || {}
+  const inputImages = unique(items.map((item) => String(item.inputJson?.imageAssetId || item.inputJson?.image?.assetId || '')).filter(Boolean))
+  const existing = new Map(state.aiTest.images.map((item) => [item.assetId || item.id, item]))
+  const missing = inputImages
+    .filter((assetId) => !existing.has(assetId))
+    .map((assetId) => ({ id: assetId, assetId, name: assetId, mime: 'image/png' }))
+  const hydrated = await hydrateAssetItems(missing)
+  state.aiTest.images = [
+    ...state.aiTest.images.filter((item) => inputImages.includes(item.assetId || item.id)),
+    ...hydrated,
+  ]
+  state.aiTest.fields = sanitizeAiTestFields(config.fields || {
+    categoryKey: job?.configJson?.categoryKey,
+  })
+  state.aiTest.model = getModel(config.modelId || job?.configJson?.modelId)?.id || state.aiTest.model
+  state.aiTest.aspectRatio = normalizeAspectRatio(config.aspectRatio, state.aiTest.aspectRatio)
+  state.aiTest.resolution = normalizeCanvasResolution(config.resolution, state.aiTest.resolution)
+  state.aiTest.count = clampAiTestCount(config.count || job?.configJson?.count)
+  state.aiTest.templateVersionId = sanitizeAiTestText(config.templateVersionId || job?.configJson?.templateVersionId || job?.configJson?.activeTemplateVersionId, 120) || state.aiTest.templateVersionId
+}
+
+function applyAiTestJobSnapshot(job, items) {
+  const nextResults = { ...state.aiTest.results }
+  for (const item of Array.isArray(items) ? items : []) {
+    const imageAssetId = String(item.inputJson?.imageAssetId || item.inputJson?.image?.assetId || '')
+    const groupIndex = Number(item.inputJson?.groupIndex || 0)
+    if (!imageAssetId || !groupIndex) continue
+    nextResults[getAiTestResultKey(imageAssetId, groupIndex)] = mapAiTestJobItem(item)
+  }
+  state.aiTest.results = sanitizeAiTestResultEntries(nextResults)
+  state.aiTest.progress = formatBatchProgress(job)
+  renderAiTest()
+}
+
+async function retryAiTestJob(rowKey) {
+  if (!canRetryAiTestItem()) return
+  const result = state.aiTest.results[rowKey]
+  if (!state.aiTest.jobId || !result?.itemId) {
+    await runAiTestBatch()
+    return
+  }
+  state.aiTest.running = true
+  state.aiTest.progress = 'AI 测图重试中'
+  renderAiTest()
+  try {
+    await postJson(`/api/jobs/${encodeURIComponent(state.aiTest.jobId)}/items/${encodeURIComponent(result.itemId)}/retry`, {})
+    await syncAiTestJob(state.aiTest.jobId, { applyToWorkspace: true })
+    state.aiTest.running = false
+  } catch (error) {
+    state.aiTest.running = false
+    state.aiTest.progress = trimError(error)
+    renderAiTest()
+  }
+}
+
 function getTranslateRunConfig() {
   const fontMode = getEffectiveTranslateFontMode()
   const activeReference = fontMode === 'reference'
@@ -8908,6 +9946,16 @@ function isStyleBusy() {
   return state.style.analyzing || state.style.running || state.style.generating || Boolean(state.style.submittingJobId)
 }
 
+function hasAiTestActiveItems() {
+  return Object.values(state.aiTest.results).some((result) =>
+    result?.status === 'queue' || result?.status === 'running' || result?.status === 'model_pending',
+  )
+}
+
+function isAiTestBusy() {
+  return state.aiTest.running || Boolean(state.aiTest.submittingJobId)
+}
+
 function clearTranslateSubmitLock(jobId = '') {
   if (jobId && state.translate.submittingJobId !== jobId) return
   state.translate.submittingJobId = ''
@@ -8926,12 +9974,22 @@ function clearStyleSubmitLock(jobId = '') {
   state.style.pendingSignature = ''
 }
 
+function clearAiTestSubmitLock(jobId = '') {
+  if (jobId && state.aiTest.submittingJobId !== jobId) return
+  state.aiTest.submittingJobId = ''
+  state.aiTest.pendingSignature = ''
+}
+
 function canRetryTranslateItem() {
   return Boolean(state.translate.jobId) && !hasTranslateActiveItems()
 }
 
 function canRetryOutfitItem() {
   return Boolean(state.outfit.jobId) && !hasOutfitActiveItems()
+}
+
+function canRetryAiTestItem() {
+  return Boolean(state.aiTest.jobId) && !hasAiTestActiveItems()
 }
 
 function getRunningLabel(base, attempt = 1) {
@@ -9313,10 +10371,10 @@ function toggleTargetLanguage(code) {
 
 function setActiveView(view, { updateRoute = true } = {}) {
   const previousView = state.activeView
-  if (previousView && previousView !== normalizeView(view)) {
+  if (previousView && previousView !== normalizeAppView(view)) {
     if (releaseCompletedLoadedTasksForView(previousView)) saveRuntimeState()
   }
-  state.activeView = normalizeView(view)
+  state.activeView = normalizeAppView(view)
   if (state.activeView === 'generate') {
     ensureCanvasFirstOpenAiPanel()
   }
@@ -9343,6 +10401,9 @@ function setActiveView(view, { updateRoute = true } = {}) {
     renderTranslate()
   } else if (state.activeView === 'outfit') {
     renderOutfit()
+  } else if (state.activeView === 'ai-test') {
+    renderAiTest()
+    void loadAiTestTemplates()
   }
   const scrollToTop = () => {
     $('.main')?.scrollTo({ top: 0, behavior: 'auto' })
@@ -9374,7 +10435,8 @@ function closeDropdowns() {
 }
 
 function populateModelSelects() {
-  for (const select of [dom.tModel, dom.gModel, dom.oModel, dom.sModel, dom.gAiModel]) {
+  for (const select of [dom.tModel, dom.gModel, dom.oModel, dom.sModel, dom.gAiModel, dom.aiTestModel]) {
+    if (!select) continue
     select.replaceChildren(...MODEL_OPTIONS.map((model) => {
       const option = document.createElement('option')
       option.value = model.id
@@ -10314,11 +11376,16 @@ async function restoreRuntimeState() {
   state.style.jobId = getLoadedStoredJobId(runtime.style.jobs)
   state.style.jobTab = runtime.style.jobTab
   state.style.jobPage = runtime.style.jobPage
+  state.aiTest.jobs = runtime.aiTest.jobs
+  state.aiTest.jobId = getLoadedStoredJobId(runtime.aiTest.jobs)
+  state.aiTest.jobTab = runtime.aiTest.jobTab
+  state.aiTest.jobPage = runtime.aiTest.jobPage
 
-  const [translateItems, outfitModels, outfitGarments] = await Promise.all([
+  const [translateItems, outfitModels, outfitGarments, aiTestImages] = await Promise.all([
     hydrateAssetItems(runtime.translate.items),
     hydrateAssetRefs(runtime.outfit.models),
     hydrateAssetRefs(runtime.outfit.garments),
+    hydrateAssetItems(runtime.aiTest.images),
   ])
 
   state.translate.items = translateItems.map((item) => ({ ...item, results: {} }))
@@ -10332,6 +11399,14 @@ async function restoreRuntimeState() {
     role: item.role || 'full_outfit',
     instructions: normalizeGarmentInstructions(item.instructions),
   }))
+  state.aiTest.images = aiTestImages
+  state.aiTest.fields = runtime.aiTest.fields
+  state.aiTest.model = runtime.aiTest.model
+  state.aiTest.aspectRatio = runtime.aiTest.aspectRatio
+  state.aiTest.resolution = runtime.aiTest.resolution
+  state.aiTest.count = runtime.aiTest.count
+  state.aiTest.templateVersionId = runtime.aiTest.templateVersionId
+  state.aiTest.results = runtime.aiTest.results
 
   restoreTranslateResults(savedResults)
   restoreOutfitResults(savedResults)
@@ -10361,6 +11436,7 @@ async function restoreRuntimeState() {
   watchStoredJobTasks('translate')
   watchStoredJobTasks('outfit')
   watchStoredJobTasks('style')
+  watchStoredJobTasks('aiTest')
 }
 
 function assetResultUrl(assetId, projectId = '') {
@@ -10708,6 +11784,8 @@ function watchStoredJobTasks(kind) {
       void syncTranslateJob(task.jobId, { passive404: true })
     } else if (kind === 'style') {
       void syncStyleJob(task.jobId, { passive404: true })
+    } else if (kind === 'aiTest') {
+      void syncAiTestJob(task.jobId, { passive404: true })
     } else {
       void syncOutfitJob(task.jobId, { passive404: true })
     }
@@ -11109,6 +12187,83 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
         styleJobWatchers.delete(jobId)
       }
       renderStyle()
+      if (status === 401) return
+      await wait(JOB_POLL_ERROR_INTERVAL_MS)
+    }
+  }
+}
+
+async function syncAiTestJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
+  const token = ++aiTestWatcherToken
+  aiTestJobWatchers.set(jobId, token)
+
+  while (aiTestJobWatchers.get(jobId) === token) {
+    try {
+      const { job, items } = await fetchJobSnapshot(jobId)
+      clearAiTestSubmitLock(jobId)
+      if (job?.type && job.type !== 'ai_test_batch') {
+        removeJobTask('aiTest', jobId)
+        saveRuntimeState()
+        renderAiTest()
+        return
+      }
+
+      const shouldApply = applyToWorkspace || getLoadedJobId('aiTest') === jobId
+      upsertJobTask('aiTest', jobId, { job, items, loaded: shouldApply })
+      const task = getJobTasks('aiTest').find((entry) => entry.jobId === jobId)
+      if (shouldApply && task && job.status === 'completed') {
+        task.loaded = true
+        task.holdInCurrent = true
+      }
+      if (shouldApply) {
+        if (getLoadedJobId('aiTest') !== jobId) {
+          renderJobList('aiTest')
+          saveRuntimeState()
+          if (shouldStopPollingJobSnapshot(job, items)) {
+            aiTestJobWatchers.delete(jobId)
+            break
+          }
+          await wait(getJobPollInterval('aiTest', job))
+          continue
+        }
+        await hydrateAiTestWorkspaceFromJob(job, items)
+        applyAiTestJobSnapshot(job, items)
+      } else {
+        renderAiTest()
+      }
+      saveRuntimeState()
+
+      if (shouldStopPollingJobSnapshot(job, items)) {
+        aiTestJobWatchers.delete(jobId)
+        break
+      }
+
+      await wait(getJobPollInterval('aiTest', job))
+    } catch (error) {
+      const status = Number(error?.status || 0)
+      if (status === 404 || status === 403) {
+        const wasLoaded = getLoadedJobId('aiTest') === jobId
+        removeJobTask('aiTest', jobId)
+        clearAiTestSubmitLock(jobId)
+        if (!passive404 && wasLoaded) {
+          state.aiTest.progress = status === 403 ? '任务无权限访问，已从列表移除' : '任务记录已失效，请重新提交'
+        }
+        saveRuntimeState()
+        renderAiTest()
+        return
+      }
+
+      const message = status === 401
+        ? '请先登录后查看这个云端任务'
+        : status === 429
+          ? '云端读取太频繁，请稍后再试'
+          : trimError(error)
+      const task = upsertJobTask('aiTest', jobId, { error: message })
+      if (getLoadedJobId('aiTest') === jobId) state.aiTest.progress = task.error
+      if (status === 401) {
+        aiTestJobWatchers.delete(jobId)
+      }
+      renderAiTest()
       if (status === 401) return
       await wait(JOB_POLL_ERROR_INTERVAL_MS)
     }

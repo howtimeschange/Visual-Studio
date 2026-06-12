@@ -3996,6 +3996,133 @@ dialog input::placeholder,
   font-size: var(--text-sm);
 }
 
+/* ═══════════════ AI TEST VIEW ═══════════════ */
+
+.ai-test-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-md);
+}
+
+.ai-test-form-panel {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.ai-test-panel-head,
+.ai-test-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.ai-test-panel-head h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.ai-test-dropzone {
+  min-height: 140px;
+  margin-top: 0;
+  cursor: pointer;
+}
+
+.ai-test-image-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-xs);
+}
+
+.ai-test-image-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 54px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+}
+
+.ai-test-image-item img {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--bg);
+}
+
+.ai-test-image-item span {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-test-table-wrap {
+  margin-top: var(--space-md);
+}
+
+.ai-test-table {
+  min-width: 1180px;
+  table-layout: fixed;
+}
+
+.ai-test-table th:nth-child(1),
+.ai-test-table td:nth-child(1) {
+  width: 170px;
+}
+
+.ai-test-table th:nth-child(2),
+.ai-test-table td:nth-child(2) {
+  width: 92px;
+}
+
+.ai-test-table th:nth-child(3),
+.ai-test-table td:nth-child(3) {
+  width: 180px;
+}
+
+.ai-test-table th:nth-child(4),
+.ai-test-table td:nth-child(4) {
+  width: 360px;
+}
+
+.ai-test-table th:nth-child(5),
+.ai-test-table td:nth-child(5) {
+  width: 140px;
+}
+
+.ai-test-table th:nth-child(6),
+.ai-test-table td:nth-child(6) {
+  width: 150px;
+}
+
+.ai-test-table th:nth-child(7),
+.ai-test-table td:nth-child(7) {
+  width: 160px;
+}
+
+.ai-test-prompt-cell {
+  max-height: 152px;
+  overflow: auto;
+  color: var(--text-soft);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.ai-test-group-cell {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
 .style-analysis {
   display: grid;
   gap: var(--space-md);

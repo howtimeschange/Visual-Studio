@@ -27,7 +27,19 @@ function extractFunction(source, name) {
   const functionStart = source.slice(Math.max(0, start - 6), start) === 'async '
     ? start - 6
     : start
-  const paramsEnd = source.indexOf(')', start)
+  const paramsStart = source.indexOf('(', start)
+  let paramsDepth = 0
+  let paramsEnd = -1
+  for (let index = paramsStart; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '(') paramsDepth += 1
+    if (char === ')') paramsDepth -= 1
+    if (paramsDepth === 0) {
+      paramsEnd = index
+      break
+    }
+  }
+  if (paramsEnd === -1) throw new Error(`Could not extract function params for ${name}`)
   const bodyStart = source.indexOf('{', paramsEnd)
   let depth = 0
   for (let index = bodyStart; index < source.length; index += 1) {
@@ -60,6 +72,34 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     RUNTIME_FALLBACK_ITEM_LIMIT: 24,
     RUNTIME_FALLBACK_ELEMENT_LIMIT: 80,
     RUNTIME_FALLBACK_SUBJECT_REF_LIMIT: 12,
+    DEFAULT_AI_TEST_MODEL: 'gpt-image-2',
+    DEFAULT_AI_TEST_COUNT: 6,
+    AI_TEST_COUNT_LIMIT: 60,
+    AI_TEST_TOTAL_ITEM_LIMIT: 120,
+    AI_TEST_FIELD_LIMIT: 500,
+    DEFAULT_AI_TEST_FIELDS: {
+      categoryKey: 'tshirt',
+      modelProfile: '',
+      pose: '',
+      background: '',
+      productColor: '',
+      sellingPoint: '',
+    },
+    FALLBACK_AI_TEST_DIRECTIONS: [
+      { key: 'model', label: '模特表现', weightText: '强化模特气质' },
+    ],
+    FALLBACK_AI_TEST_CATEGORY_FACTORS: [
+      { categoryKey: 'tshirt', categoryLabel: 'T恤', factorText: '突出亲肤棉感' },
+    ],
+    FALLBACK_AI_TEST_TEMPLATE: {
+      templateId: 'ai_test_children_main_image',
+      versionId: 'ai_test_children_main_image_v1',
+      version: 1,
+      title: '默认模板',
+      promptBody: '{{categoryLabel}} {{groupIndex}}',
+      negativePrompt: '',
+      directions: [{ key: 'model', label: '模特表现', weightText: '强化模特气质' }],
+    },
     CANVAS_SAVE_DEBOUNCE_MS: 2200,
     CANVAS_SHAPES: new Set(['square', 'circle', 'triangle', 'message', 'arrow-left', 'arrow-right']),
     TRANSLATE_FONT_MODES: new Set(['match_original', 'reference']),
@@ -129,6 +169,27 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         tags: [],
         subject: '',
         subjectRefs: [],
+      },
+      aiTest: {
+        jobId: '',
+        jobTab: 'current',
+        jobPage: 1,
+        jobs: [],
+        images: [],
+        results: {},
+        fields: {
+          categoryKey: 'tshirt',
+          modelProfile: '',
+          pose: '',
+          background: '',
+          productColor: '',
+          sellingPoint: '',
+        },
+        model: 'gpt-image-2',
+        aspectRatio: '1:1',
+        resolution: '1k',
+        count: 6,
+        templateVersionId: '',
       },
     },
     persistCurrentAiSession: () => {},
@@ -232,6 +293,19 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'sanitizeRuntimeState',
     'sanitizeStoredJobTasks',
     'sanitizeStoredAssetItem',
+    'sanitizeAiTestText',
+    'clampAiTestCount',
+    'sanitizeAiTestFields',
+    'sanitizeAiTestDirection',
+    'sanitizeAiTestTemplateVersion',
+    'sanitizeAiTestCategoryFactors',
+    'sanitizeAiTestResultEntries',
+    'getActiveAiTestTemplate',
+    'getAiTestCategoryFactor',
+    'replaceAiTestTemplateVariables',
+    'renderAiTestPrompt',
+    'getAiTestResultKey',
+    'getAiTestPreviewRows',
     'sanitizeCanvasElement',
     'sanitizeCanvasPath',
     'normalizeCanvasShape',
@@ -321,6 +395,17 @@ test('app defaults batch translation to gpt image 2 and outfit to nano banana 2'
     MAX_ASYNC_IMAGE_JOB_CONCURRENCY: 10,
     DEFAULT_TRANSLATE_HEADLINE_COLOR: '#111827',
     DEFAULT_TRANSLATE_BODY_COLOR: '#374151',
+    DEFAULT_AI_TEST_MODEL: 'gpt-image-2',
+    DEFAULT_AI_TEST_COUNT: 6,
+    AI_TEST_COUNT_LIMIT: 60,
+    DEFAULT_AI_TEST_FIELDS: {
+      categoryKey: 'tshirt',
+      modelProfile: '',
+      pose: '',
+      background: '',
+      productColor: '',
+      sellingPoint: '',
+    },
   })
 
   assert.equal(state.translate.model, 'gpt-image-2')
@@ -728,6 +813,92 @@ test('runtime storage preserves style transfer draft and analyzed style', async 
   assert.deepEqual(sanitized.style.tags, ['catalog'])
   assert.equal(sanitized.style.subjectRefs[0].assetId, 'subject-asset')
   assert.equal(sanitized.style.batchResults[0].assetId, 'style-result-1')
+})
+
+test('runtime storage preserves ai test draft images jobs and results', async () => {
+  const harness = await createRuntimeHarness()
+  harness.state.aiTest = {
+    jobId: 'ai-test-job',
+    jobTab: 'history',
+    jobPage: 2,
+    jobs: [{
+      jobId: 'ai-test-job',
+      type: 'ai_test_batch',
+      status: 'completed',
+      loaded: true,
+      progressDone: 2,
+      progressTotal: 2,
+    }],
+    images: [{
+      id: 'source-asset',
+      assetId: 'source-asset',
+      name: 'source.png',
+      mime: 'image/png',
+      dataUrl: 'data:image/png;base64,source',
+    }],
+    results: {
+      'source-asset::1': {
+        status: 'done',
+        dataUrl: '/api/results/ai-result-1',
+        assetId: 'ai-result-1',
+        itemId: 'item-1',
+        finalPrompt: 'final prompt',
+      },
+    },
+    fields: {
+      categoryKey: 'pants',
+      modelProfile: '中大童男童',
+      pose: '侧身跳跃',
+      background: '纯白背景',
+      productColor: '藏青色',
+      sellingPoint: '弹力腰头',
+    },
+    model: 'gpt-image-2',
+    aspectRatio: '3:4',
+    resolution: '2k',
+    count: 4,
+    templateVersionId: 'aitver_children_main_image_v1',
+  }
+
+  const snapshot = harness.createRuntimeStorageSnapshot()
+  const sanitized = harness.sanitizeRuntimeState(snapshot)
+
+  assert.equal(snapshot.aiTest.jobId, 'ai-test-job')
+  assert.equal(snapshot.aiTest.jobTab, 'history')
+  assert.equal(snapshot.aiTest.jobPage, 2)
+  assert.equal(snapshot.aiTest.images[0].assetId, 'source-asset')
+  assert.equal(snapshot.aiTest.results['source-asset::1'].finalPrompt, 'final prompt')
+  assert.equal(sanitized.aiTest.jobs[0].type, 'ai_test_batch')
+  assert.equal(sanitized.aiTest.fields.categoryKey, 'pants')
+  assert.equal(sanitized.aiTest.model, 'gpt-image-2')
+  assert.equal(sanitized.aiTest.aspectRatio, '3:4')
+  assert.equal(sanitized.aiTest.resolution, '2k')
+  assert.equal(sanitized.aiTest.count, 4)
+  assert.equal(sanitized.aiTest.templateVersionId, 'aitver_children_main_image_v1')
+  assert.equal(sanitized.aiTest.results['source-asset::1'].assetId, 'ai-result-1')
+})
+
+test('ai test preview rows match backend total item cap', async () => {
+  const harness = await createRuntimeHarness()
+  harness.state.aiTest.categoryFactors = harness.FALLBACK_AI_TEST_CATEGORY_FACTORS
+  harness.state.aiTest.templates = [harness.FALLBACK_AI_TEST_TEMPLATE]
+  harness.state.aiTest.images = [
+    { id: 'source-1', assetId: 'source-1', name: 'source-1.png' },
+    { id: 'source-2', assetId: 'source-2', name: 'source-2.png' },
+  ]
+  harness.state.aiTest.count = 60
+
+  const twoImageRows = harness.getAiTestPreviewRows()
+  assert.equal(twoImageRows.length, 120)
+  assert.equal(twoImageRows.filter((row) => row.imageAssetId === 'source-1').length, 60)
+  assert.equal(twoImageRows.filter((row) => row.imageAssetId === 'source-2').length, 60)
+  assert.equal(twoImageRows.at(-1).groupTotal, 60)
+
+  harness.state.aiTest.images.push({ id: 'source-3', assetId: 'source-3', name: 'source-3.png' })
+  const threeImageRows = harness.getAiTestPreviewRows()
+  assert.equal(threeImageRows.length, 120)
+  assert.equal(threeImageRows.filter((row) => row.imageAssetId === 'source-1').length, 40)
+  assert.equal(threeImageRows.at(-1).groupTotal, 40)
 })
 
 test('style result sanitizers normalize bare base64 images before rendering', async () => {
