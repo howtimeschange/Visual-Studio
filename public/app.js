@@ -76,6 +76,7 @@ const DEFAULT_AI_TEST_COUNT = 6
 const AI_TEST_COUNT_LIMIT = 60
 const AI_TEST_TOTAL_ITEM_LIMIT = 120
 const AI_TEST_FIELD_LIMIT = 500
+const AI_TEST_PROMPT_LIMIT = 6000
 const DEFAULT_AI_TEST_FIELDS = {
   categoryKey: 'tshirt',
   modelProfile: '',
@@ -502,6 +503,7 @@ const state = {
     count: DEFAULT_AI_TEST_COUNT,
     fields: { ...DEFAULT_AI_TEST_FIELDS },
     images: [],
+    rows: [],
     results: {},
     templates: [],
     categoryFactors: [],
@@ -754,6 +756,7 @@ const dom = {
   aiTestProductColor: $('#ai-test-product-color'),
   aiTestSellingPoint: $('#ai-test-selling-point'),
   aiTestRun: $('#ai-test-run'),
+  aiTestResetPrompts: $('#ai-test-reset-prompts'),
   aiTestRefreshTemplate: $('#ai-test-refresh-template'),
   aiTestProgress: $('#ai-test-progress'),
   aiTestGrid: $('#ai-test-grid'),
@@ -947,6 +950,7 @@ function hydrateStoredState() {
   state.aiTest.resolution = runtime.aiTest.resolution
   state.aiTest.count = runtime.aiTest.count
   state.aiTest.templateVersionId = runtime.aiTest.templateVersionId
+  state.aiTest.rows = sanitizeAiTestRows(runtime.aiTest.rows, runtime.aiTest.images)
 
   const stored = readJson(PREF_STORAGE, null)
   if (stored) {
@@ -1156,6 +1160,17 @@ function sanitizeAiTestText(value, limit = AI_TEST_FIELD_LIMIT) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit)
 }
 
+function sanitizeAiTestPromptText(value, limit = AI_TEST_PROMPT_LIMIT) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim()
+    .slice(0, limit)
+}
+
 function clampAiTestCount(value) {
   return clamp(Math.trunc(Number(value) || DEFAULT_AI_TEST_COUNT), 1, AI_TEST_COUNT_LIMIT)
 }
@@ -1180,6 +1195,44 @@ function sanitizeAiTestDirection(raw = {}, index = 0) {
     label: sanitizeAiTestText(source.label, 120) || fallback.label,
     weightText: sanitizeAiTestText(source.weightText || source.weight || source.description, 500) || fallback.weightText,
   }
+}
+
+function getAiTestTemplateDirections(template = getActiveAiTestTemplate()) {
+  return Array.isArray(template.directions) && template.directions.length
+    ? template.directions.map((item, index) => sanitizeAiTestDirection(item, index))
+    : FALLBACK_AI_TEST_DIRECTIONS
+}
+
+function getAiTestDirectionByKey(directionKey, fallbackIndex = 0) {
+  const directions = getAiTestTemplateDirections()
+  const key = sanitizeAiTestText(directionKey, 80)
+  return directions.find((direction) => direction.key === key)
+    || directions[fallbackIndex % directions.length]
+    || sanitizeAiTestDirection(null, fallbackIndex)
+}
+
+function sanitizeAiTestRows(rawRows = [], images = state.aiTest.images) {
+  if (!Array.isArray(rawRows)) return []
+  const imageAssetIds = new Set((Array.isArray(images) ? images : [])
+    .map((image) => image?.assetId || image?.id)
+    .filter(Boolean))
+  const rows = []
+  for (const [index, raw] of rawRows.entries()) {
+    if (!raw || typeof raw !== 'object') continue
+    if (rows.length >= AI_TEST_TOTAL_ITEM_LIMIT) break
+    const imageAssetId = sanitizeAiTestText(raw.imageAssetId || raw.assetId || raw.image?.assetId, 180)
+    if (!imageAssetId || (imageAssetIds.size && !imageAssetIds.has(imageAssetId))) continue
+    const rawDirectionKey = sanitizeAiTestText(raw.directionKey || raw.direction?.key, 80)
+    const direction = getAiTestDirectionByKey(rawDirectionKey, index)
+    rows.push({
+      id: sanitizeAiTestText(raw.id, 120) || `ai-test-row-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+      imageAssetId,
+      directionKey: rawDirectionKey || direction.key,
+      prompt: sanitizeAiTestPromptText(raw.prompt || raw.finalPrompt || raw.promptOverride),
+      customPrompt: Boolean(raw.customPrompt),
+    })
+  }
+  return rows
 }
 
 function sanitizeAiTestTemplateVersion(raw = {}) {
@@ -1299,33 +1352,174 @@ function getAiTestResultKey(imageAssetId, groupIndex) {
   return `${String(imageAssetId || '')}::${Math.max(1, Number(groupIndex) || 1)}`
 }
 
-function getAiTestPreviewRows() {
-  const template = getActiveAiTestTemplate()
-  const directions = Array.isArray(template.directions) && template.directions.length
-    ? template.directions
-    : FALLBACK_AI_TEST_DIRECTIONS
+function createAiTestRowId() {
+  return `ai-test-row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function getAiTestImageAssetId(image = {}) {
+  return image.assetId || image.id || ''
+}
+
+function getAiTestRowCounts(rows = state.aiTest.rows) {
+  const counts = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row?.imageAssetId) continue
+    counts.set(row.imageAssetId, (counts.get(row.imageAssetId) || 0) + 1)
+  }
+  return counts
+}
+
+function countAiTestRowsForImage(imageAssetId, rows = state.aiTest.rows) {
+  return getAiTestRowCounts(rows).get(imageAssetId) || 0
+}
+
+function getAiTestMaxRowsPerImage() {
+  const imageCount = Math.max(1, state.aiTest.images.length || 1)
+  return Math.max(1, Math.floor(AI_TEST_TOTAL_ITEM_LIMIT / imageCount))
+}
+
+function createAiTestDraftRow(imageAssetId, directionIndex = 0) {
+  const direction = getAiTestDirectionByKey('', directionIndex)
+  return {
+    id: createAiTestRowId(),
+    imageAssetId,
+    directionKey: direction.key,
+    prompt: '',
+    customPrompt: false,
+  }
+}
+
+function buildAiTestRowPrompt(row, groupIndex = 1, groupTotal = 1) {
+  const direction = getAiTestDirectionByKey(row.directionKey, groupIndex - 1)
+  return renderAiTestPrompt({
+    template: getActiveAiTestTemplate(),
+    fields: state.aiTest.fields,
+    direction,
+    groupIndex,
+    groupTotal,
+  })
+}
+
+function ensureAiTestRows({ targetCount = state.aiTest.count, forcePrompt = false } = {}) {
   const images = Array.isArray(state.aiTest.images) ? state.aiTest.images : []
-  const groupTotal = Math.max(1, Math.min(
-    clampAiTestCount(state.aiTest.count),
-    Math.floor(AI_TEST_TOTAL_ITEM_LIMIT / Math.max(1, images.length || 1)),
-  ))
-  const rows = []
-  for (const [imageIndex, image] of images.entries()) {
-    for (let index = 0; index < groupTotal; index += 1) {
-      const groupIndex = index + 1
-      const direction = sanitizeAiTestDirection(directions[index % directions.length], index)
-      const imageAssetId = image.assetId || image.id
-      rows.push({
-        key: getAiTestResultKey(imageAssetId, groupIndex),
-        image,
-        imageAssetId,
-        imageIndex,
-        groupIndex,
-        groupTotal,
-        direction,
-        prompt: renderAiTestPrompt({ template, fields: state.aiTest.fields, direction, groupIndex, groupTotal }),
-      })
+  const imageAssetIds = new Set(images.map(getAiTestImageAssetId).filter(Boolean))
+  const maxRowsPerImage = getAiTestMaxRowsPerImage()
+  const perImageTarget = Math.max(1, Math.min(clampAiTestCount(targetCount), maxRowsPerImage))
+  let rows = sanitizeAiTestRows(state.aiTest.rows, images)
+    .filter((row) => imageAssetIds.has(row.imageAssetId))
+
+  for (const image of images) {
+    const imageAssetId = getAiTestImageAssetId(image)
+    if (!imageAssetId) continue
+    const existing = rows.filter((row) => row.imageAssetId === imageAssetId)
+    for (let index = existing.length; index < perImageTarget; index += 1) {
+      rows.push(createAiTestDraftRow(imageAssetId, index))
     }
+  }
+
+  const rowsByImage = new Map()
+  for (const row of rows) {
+    const list = rowsByImage.get(row.imageAssetId) || []
+    list.push(row)
+    rowsByImage.set(row.imageAssetId, list)
+  }
+  const nextRows = []
+  for (const image of images) {
+    const imageAssetId = getAiTestImageAssetId(image)
+    const list = (rowsByImage.get(imageAssetId) || []).slice(0, maxRowsPerImage)
+    for (const [index, row] of list.entries()) {
+      const groupTotal = list.length
+      if (forcePrompt || !row.customPrompt || !row.prompt) {
+        row.prompt = buildAiTestRowPrompt(row, index + 1, groupTotal)
+        row.customPrompt = false
+      }
+      nextRows.push(row)
+    }
+  }
+  state.aiTest.rows = nextRows.slice(0, AI_TEST_TOTAL_ITEM_LIMIT)
+}
+
+function setAiTestRowsPerImage(nextCount) {
+  const images = Array.isArray(state.aiTest.images) ? state.aiTest.images : []
+  state.aiTest.count = Math.max(1, Math.min(clampAiTestCount(nextCount), getAiTestMaxRowsPerImage()))
+  const imageAssetIds = new Set(images.map(getAiTestImageAssetId).filter(Boolean))
+  let rows = sanitizeAiTestRows(state.aiTest.rows, images)
+    .filter((row) => imageAssetIds.has(row.imageAssetId))
+  const directions = getAiTestTemplateDirections()
+  const nextRows = []
+  for (const image of images) {
+    const imageAssetId = getAiTestImageAssetId(image)
+    const existing = rows.filter((row) => row.imageAssetId === imageAssetId).slice(0, state.aiTest.count)
+    for (let index = existing.length; index < state.aiTest.count; index += 1) {
+      existing.push(createAiTestDraftRow(imageAssetId, index % directions.length))
+    }
+    nextRows.push(...existing)
+  }
+  state.aiTest.rows = nextRows.slice(0, AI_TEST_TOTAL_ITEM_LIMIT)
+  ensureAiTestRows({ targetCount: state.aiTest.count })
+}
+
+function addAiTestRow(imageAssetId) {
+  const maxRowsPerImage = getAiTestMaxRowsPerImage()
+  if (state.aiTest.rows.length >= AI_TEST_TOTAL_ITEM_LIMIT) return
+  if (countAiTestRowsForImage(imageAssetId) >= maxRowsPerImage) return
+  const directionIndex = countAiTestRowsForImage(imageAssetId)
+  state.aiTest.rows.push(createAiTestDraftRow(imageAssetId, directionIndex))
+  state.aiTest.count = Math.max(state.aiTest.count, countAiTestRowsForImage(imageAssetId))
+  ensureAiTestRows({ targetCount: Math.max(1, state.aiTest.count) })
+}
+
+function removeAiTestRow(rowId) {
+  state.aiTest.rows = state.aiTest.rows.filter((row) => row.id !== rowId)
+  const counts = Array.from(getAiTestRowCounts().values())
+  state.aiTest.count = clampAiTestCount(counts.length ? Math.max(...counts) : 1)
+}
+
+function updateAiTestRowsForTemplateChange({ forcePrompt = false } = {}) {
+  const directions = getAiTestTemplateDirections()
+  state.aiTest.rows = sanitizeAiTestRows(state.aiTest.rows, state.aiTest.images).map((row, index) => {
+    const direction = directions.find((item) => item.key === row.directionKey) || directions[index % directions.length]
+    return {
+      ...row,
+      directionKey: direction.key,
+      prompt: forcePrompt || !row.customPrompt ? '' : row.prompt,
+      customPrompt: forcePrompt ? false : row.customPrompt,
+    }
+  })
+  ensureAiTestRows({ targetCount: state.aiTest.count, forcePrompt })
+}
+
+function getAiTestPreviewRows() {
+  const images = Array.isArray(state.aiTest.images) ? state.aiTest.images : []
+  ensureAiTestRows()
+  const imageByAssetId = new Map(images.map((image, index) => [getAiTestImageAssetId(image), { image, imageIndex: index }]))
+  const groupTotals = getAiTestRowCounts()
+  const groupIndexes = new Map()
+  const rows = []
+  for (const row of state.aiTest.rows) {
+    const imageRef = imageByAssetId.get(row.imageAssetId)
+    if (!imageRef) continue
+    const groupIndex = (groupIndexes.get(row.imageAssetId) || 0) + 1
+    groupIndexes.set(row.imageAssetId, groupIndex)
+    const groupTotal = groupTotals.get(row.imageAssetId) || groupIndex
+    const direction = getAiTestDirectionByKey(row.directionKey, groupIndex - 1)
+    if (!row.customPrompt || !row.prompt) {
+      row.prompt = buildAiTestRowPrompt(row, groupIndex, groupTotal)
+      row.customPrompt = false
+    }
+    rows.push({
+      key: getAiTestResultKey(row.imageAssetId, groupIndex),
+      rowId: row.id,
+      image: imageRef.image,
+      imageAssetId: row.imageAssetId,
+      imageIndex: imageRef.imageIndex,
+      groupIndex,
+      groupTotal,
+      direction,
+      directionKey: direction.key,
+      prompt: row.prompt,
+      customPrompt: row.customPrompt,
+    })
   }
   return rows
 }
@@ -1367,6 +1561,7 @@ function savePrefs() {
       count: state.aiTest.count,
       fields: sanitizeAiTestFields(state.aiTest.fields),
       templateVersionId: state.aiTest.templateVersionId,
+      rows: sanitizeAiTestRows(state.aiTest.rows, state.aiTest.images),
     },
   }))
 }
@@ -1439,6 +1634,7 @@ function createRuntimeStorageSnapshot() {
       resolution: state.aiTest.resolution,
       count: clampAiTestCount(state.aiTest.count),
       templateVersionId: state.aiTest.templateVersionId || '',
+      rows: sanitizeAiTestRows(state.aiTest.rows, state.aiTest.images),
       results: sanitizeAiTestResultEntries(state.aiTest.results),
     },
   }
@@ -1511,6 +1707,7 @@ function createCompactRuntimeStorageSnapshot(snapshot = {}) {
       resolution: normalizeCanvasResolution(snapshot.aiTest?.resolution, '1k'),
       count: clampAiTestCount(snapshot.aiTest?.count),
       templateVersionId: sanitizeAiTestText(snapshot.aiTest?.templateVersionId, 120),
+      rows: sanitizeAiTestRows(snapshot.aiTest?.rows, snapshot.aiTest?.images),
       results: sanitizeAiTestResultEntries(snapshot.aiTest?.results),
     },
   }
@@ -1962,6 +2159,7 @@ function sanitizeRuntimeState(raw = {}) {
       resolution: normalizeCanvasResolution(raw.aiTest?.resolution, '1k'),
       count: clampAiTestCount(raw.aiTest?.count),
       templateVersionId: sanitizeAiTestText(raw.aiTest?.templateVersionId, 120),
+      rows: sanitizeAiTestRows(raw.aiTest?.rows, aiTestImages),
       results: sanitizeAiTestResultEntries(raw.aiTest?.results),
     },
   }
@@ -2222,6 +2420,7 @@ function resetLoadedWorkspaceForDraft(kind) {
   } else if (kind === 'aiTest') {
     aiTestWorkspaceLoadToken += 1
     state.aiTest.images = []
+    state.aiTest.rows = []
     state.aiTest.results = {}
     state.aiTest.progress = ''
   } else {
@@ -7427,18 +7626,23 @@ function bindAiTest() {
     renderAiTest()
   })
   dom.aiTestCount.addEventListener('input', () => {
-    state.aiTest.count = clampAiTestCount(dom.aiTestCount.value)
+    setAiTestRowsPerImage(dom.aiTestCount.value)
     savePrefs()
+    saveRuntimeState()
     renderAiTest()
   })
   dom.aiTestCategory.addEventListener('change', () => {
     state.aiTest.fields.categoryKey = dom.aiTestCategory.value || DEFAULT_AI_TEST_FIELDS.categoryKey
+    ensureAiTestRows({ targetCount: state.aiTest.count })
     savePrefs()
+    saveRuntimeState()
     renderAiTest()
   })
   dom.aiTestTemplate.addEventListener('change', () => {
     state.aiTest.templateVersionId = dom.aiTestTemplate.value
+    updateAiTestRowsForTemplateChange()
     savePrefs()
+    saveRuntimeState()
     renderAiTest()
   })
   for (const [input, field] of [
@@ -7450,7 +7654,9 @@ function bindAiTest() {
   ]) {
     input.addEventListener('input', () => {
       state.aiTest.fields[field] = sanitizeAiTestText(input.value)
+      ensureAiTestRows({ targetCount: state.aiTest.count })
       savePrefs()
+      saveRuntimeState()
       renderAiTest()
     })
   }
@@ -7489,6 +7695,7 @@ function bindAiTest() {
           },
         })
         state.aiTest.images.push(...images)
+        ensureAiTestRows({ targetCount: state.aiTest.count })
         state.aiTest.progress = ''
         saveRuntimeState()
       } catch (error) {
@@ -7502,6 +7709,13 @@ function bindAiTest() {
   })
 
   dom.aiTestRun.addEventListener('click', runAiTestBatch)
+  dom.aiTestResetPrompts.addEventListener('click', () => {
+    if (isAiTestBusy()) return
+    updateAiTestRowsForTemplateChange({ forcePrompt: true })
+    state.aiTest.progress = '已按当前模板重算所有 Prompt'
+    saveRuntimeState()
+    renderAiTest()
+  })
   dom.aiTestRefreshTemplate.addEventListener('click', () => {
     void loadAiTestTemplates({ force: true })
   })
@@ -8238,6 +8452,7 @@ function renderAiTest() {
   ai.count = clampAiTestCount(ai.count)
   ai.aspectRatio = normalizeAspectRatio(ai.aspectRatio, '1:1')
   ai.resolution = normalizeCanvasResolution(ai.resolution, '1k')
+  ensureAiTestRows({ targetCount: ai.count })
 
   dom.aiTestModel.value = ai.model
   dom.aiTestAspect.value = ai.aspectRatio
@@ -8264,6 +8479,7 @@ function renderAiTest() {
   dom.aiTestCount.disabled = busy
   dom.aiTestTemplate.disabled = busy || ai.templateLoading || ai.templates.length <= 1
   dom.aiTestCategory.disabled = busy || ai.categoryFactors.length <= 1
+  dom.aiTestResetPrompts.disabled = busy || !hasRows
   dom.aiTestRefreshTemplate.disabled = busy || ai.templateLoading
   dom.aiTestDropzone.classList.toggle('disabled', busy)
   for (const input of [dom.aiTestModelProfile, dom.aiTestPose, dom.aiTestBackground, dom.aiTestProductColor, dom.aiTestSellingPoint]) {
@@ -8347,13 +8563,28 @@ function renderAiTestImageList() {
       if (busy) return
       const assetId = image.assetId || image.id
       state.aiTest.images = state.aiTest.images.filter((entry) => entry.id !== image.id)
+      state.aiTest.rows = state.aiTest.rows.filter((row) => row.imageAssetId !== assetId)
       for (const key of Object.keys(state.aiTest.results)) {
         if (key.startsWith(`${assetId}::`)) delete state.aiTest.results[key]
       }
+      ensureAiTestRows({ targetCount: state.aiTest.count })
       saveRuntimeState()
       renderAiTest()
     })
-    item.append(img, name, remove)
+    const add = document.createElement('button')
+    add.type = 'button'
+    add.className = 'retry-btn ai-test-add-row-btn'
+    add.textContent = '+ 行'
+    add.disabled = busy || countAiTestRowsForImage(image.assetId || image.id) >= getAiTestMaxRowsPerImage()
+    add.title = '为这张商品图新增一个测图方向'
+    add.addEventListener('click', () => {
+      if (busy) return
+      addAiTestRow(image.assetId || image.id)
+      saveRuntimeState()
+      savePrefs()
+      renderAiTest()
+    })
+    item.append(img, name, add, remove)
     return item
   }))
 }
@@ -8369,17 +8600,55 @@ function createAiTestPreviewRow(row, busy) {
   tr.append(group)
 
   const direction = document.createElement('td')
-  const directionLabel = document.createElement('strong')
-  directionLabel.textContent = row.direction.label
+  const directionSelect = document.createElement('select')
+  directionSelect.className = 'input ai-test-row-direction'
+  directionSelect.disabled = busy
+  const directions = getAiTestTemplateDirections()
+  directionSelect.replaceChildren(...directions.map((item) => {
+    const option = document.createElement('option')
+    option.value = item.key
+    option.textContent = item.label
+    return option
+  }))
+  directionSelect.value = row.direction.key
+  directionSelect.addEventListener('change', () => {
+    const draft = state.aiTest.rows.find((entry) => entry.id === row.rowId)
+    if (!draft) return
+    draft.directionKey = directionSelect.value
+    if (!draft.customPrompt) draft.prompt = ''
+    ensureAiTestRows({ targetCount: state.aiTest.count })
+    saveRuntimeState()
+    renderAiTest()
+  })
   const directionText = document.createElement('div')
-  directionText.className = 'grid-meta'
+  directionText.className = 'grid-meta ai-test-direction-hint'
   directionText.textContent = row.direction.weightText
-  direction.append(directionLabel, directionText)
+  direction.append(directionSelect, directionText)
   tr.append(direction)
 
   const prompt = document.createElement('td')
   prompt.className = 'ai-test-prompt-cell'
-  prompt.textContent = row.prompt
+  const promptInput = document.createElement('textarea')
+  promptInput.className = 'input ai-test-prompt-input'
+  promptInput.rows = 6
+  promptInput.value = row.prompt
+  promptInput.disabled = busy
+  promptInput.spellcheck = false
+  promptInput.placeholder = '可以直接改这一行最终 prompt'
+  promptInput.addEventListener('input', () => {
+    const draft = state.aiTest.rows.find((entry) => entry.id === row.rowId)
+    if (!draft) return
+    draft.prompt = sanitizeAiTestPromptText(promptInput.value)
+    draft.customPrompt = true
+    promptMeta.className = 'grid-meta ai-test-custom-prompt'
+    promptMeta.textContent = '已手动修改'
+    reset.disabled = false
+    saveRuntimeState()
+  })
+  const promptMeta = document.createElement('div')
+  promptMeta.className = row.customPrompt ? 'grid-meta ai-test-custom-prompt' : 'grid-meta'
+  promptMeta.textContent = row.customPrompt ? '已手动修改' : '来自当前模板，可直接编辑'
+  prompt.append(promptInput, promptMeta)
   tr.append(prompt)
 
   const result = state.aiTest.results[row.key] || {}
@@ -8415,7 +8684,22 @@ function createAiTestPreviewRow(row, busy) {
   copy.className = 'retry-btn'
   copy.textContent = '复制 Prompt'
   copy.addEventListener('click', () => {
-    void copyTextToClipboard(result.finalPrompt || row.prompt)
+    const draft = state.aiTest.rows.find((entry) => entry.id === row.rowId)
+    void copyTextToClipboard(result.finalPrompt || draft?.prompt || row.prompt)
+  })
+  const reset = document.createElement('button')
+  reset.type = 'button'
+  reset.className = 'retry-btn'
+  reset.textContent = '重置'
+  reset.disabled = busy || !row.customPrompt
+  reset.addEventListener('click', () => {
+    const draft = state.aiTest.rows.find((entry) => entry.id === row.rowId)
+    if (!draft) return
+    draft.prompt = ''
+    draft.customPrompt = false
+    ensureAiTestRows({ targetCount: state.aiTest.count })
+    saveRuntimeState()
+    renderAiTest()
   })
   const retry = document.createElement('button')
   retry.type = 'button'
@@ -8425,7 +8709,21 @@ function createAiTestPreviewRow(row, busy) {
   retry.addEventListener('click', () => {
     void retryAiTestJob(row.key)
   })
-  actionWrap.append(copy, retry)
+  const remove = document.createElement('button')
+  remove.type = 'button'
+  remove.className = 'row-rm'
+  remove.textContent = '×'
+  remove.title = '删除这一行'
+  remove.disabled = busy || countAiTestRowsForImage(row.imageAssetId) <= 1
+  remove.addEventListener('click', () => {
+    if (busy) return
+    removeAiTestRow(row.rowId)
+    delete state.aiTest.results[row.key]
+    saveRuntimeState()
+    savePrefs()
+    renderAiTest()
+  })
+  actionWrap.append(copy, reset, retry, remove)
   actions.append(actionWrap)
   tr.append(actions)
 
@@ -9464,6 +9762,7 @@ async function loadAiTestTemplates({ force = false } = {}) {
     if (!state.aiTest.categoryFactors.some((factor) => factor.categoryKey === state.aiTest.fields.categoryKey)) {
       state.aiTest.fields.categoryKey = state.aiTest.categoryFactors[0]?.categoryKey || DEFAULT_AI_TEST_FIELDS.categoryKey
     }
+    updateAiTestRowsForTemplateChange()
     state.aiTest.templatesLoaded = true
     savePrefs()
   } catch (error) {
@@ -9477,6 +9776,14 @@ async function loadAiTestTemplates({ force = false } = {}) {
 }
 
 function getAiTestRunConfig() {
+  const rows = getAiTestPreviewRows().map((row) => ({
+    id: row.rowId,
+    imageAssetId: row.imageAssetId,
+    directionKey: row.direction.key,
+    direction: row.direction,
+    prompt: sanitizeAiTestPromptText(row.prompt),
+    customPrompt: Boolean(row.customPrompt),
+  }))
   return {
     modelId: state.aiTest.model,
     aspectRatio: normalizeAspectRatio(state.aiTest.aspectRatio, '1:1'),
@@ -9484,6 +9791,7 @@ function getAiTestRunConfig() {
     count: clampAiTestCount(state.aiTest.count),
     templateVersionId: state.aiTest.templateVersionId || getActiveAiTestTemplate().versionId,
     fields: sanitizeAiTestFields(state.aiTest.fields),
+    rows,
     clientKeys: { ...state.keys },
   }
 }
@@ -9496,6 +9804,7 @@ function getAiTestSignature(config = getAiTestRunConfig()) {
     count: config.count,
     templateVersionId: config.templateVersionId,
     fields: config.fields,
+    rows: config.rows,
     images: state.aiTest.images.map((item) => item.assetId || item.id),
   })
 }
@@ -9503,6 +9812,16 @@ function getAiTestSignature(config = getAiTestRunConfig()) {
 async function runAiTestBatch() {
   if (isAiTestBusy() || state.aiTest.images.length === 0) return
   const runConfig = getAiTestRunConfig()
+  if (!runConfig.rows.length) {
+    state.aiTest.progress = '请先添加测图行'
+    renderAiTest()
+    return
+  }
+  if (runConfig.rows.some((row) => !sanitizeAiTestPromptText(row.prompt))) {
+    state.aiTest.progress = '请补齐每一行 Prompt'
+    renderAiTest()
+    return
+  }
   const signature = getAiTestSignature(runConfig)
   if (state.aiTest.submittingJobId && state.aiTest.pendingSignature === signature) {
     state.aiTest.progress = '任务已提交，正在同步进度…'
@@ -9525,6 +9844,7 @@ async function runAiTestBatch() {
       images,
       fields: runConfig.fields,
       count: runConfig.count,
+      rows: runConfig.rows,
       modelId: runConfig.modelId,
       aspectRatio: runConfig.aspectRatio,
       resolution: runConfig.resolution,
@@ -9634,6 +9954,20 @@ async function hydrateAiTestWorkspaceFromJob(job, items) {
   state.aiTest.resolution = normalizeCanvasResolution(config.resolution, state.aiTest.resolution)
   state.aiTest.count = clampAiTestCount(config.count || job?.configJson?.count)
   state.aiTest.templateVersionId = sanitizeAiTestText(config.templateVersionId || job?.configJson?.templateVersionId || job?.configJson?.activeTemplateVersionId, 120) || state.aiTest.templateVersionId
+  const rowsFromConfig = sanitizeAiTestRows(config.rows, state.aiTest.images)
+  if (rowsFromConfig.length) {
+    state.aiTest.rows = rowsFromConfig
+  } else {
+    state.aiTest.rows = sanitizeAiTestRows((Array.isArray(items) ? items : []).map((item, index) => ({
+      id: item.id || `job-row-${index}`,
+      imageAssetId: String(item.inputJson?.imageAssetId || item.inputJson?.image?.assetId || ''),
+      directionKey: String(item.inputJson?.direction?.key || ''),
+      direction: item.inputJson?.direction || null,
+      prompt: String(item.inputJson?.prompt || item.outputJson?.finalPrompt || ''),
+      customPrompt: true,
+    })), state.aiTest.images)
+  }
+  ensureAiTestRows({ targetCount: state.aiTest.count })
 }
 
 function applyAiTestJobSnapshot(job, items) {
@@ -11406,6 +11740,7 @@ async function restoreRuntimeState() {
   state.aiTest.resolution = runtime.aiTest.resolution
   state.aiTest.count = runtime.aiTest.count
   state.aiTest.templateVersionId = runtime.aiTest.templateVersionId
+  state.aiTest.rows = sanitizeAiTestRows(runtime.aiTest.rows, aiTestImages)
   state.aiTest.results = runtime.aiTest.results
 
   restoreTranslateResults(savedResults)

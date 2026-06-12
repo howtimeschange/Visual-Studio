@@ -77,6 +77,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     AI_TEST_COUNT_LIMIT: 60,
     AI_TEST_TOTAL_ITEM_LIMIT: 120,
     AI_TEST_FIELD_LIMIT: 500,
+    AI_TEST_PROMPT_LIMIT: 6000,
     DEFAULT_AI_TEST_FIELDS: {
       categoryKey: 'tshirt',
       modelProfile: '',
@@ -190,6 +191,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
         resolution: '1k',
         count: 6,
         templateVersionId: '',
+        rows: [],
       },
     },
     persistCurrentAiSession: () => {},
@@ -294,9 +296,13 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'sanitizeStoredJobTasks',
     'sanitizeStoredAssetItem',
     'sanitizeAiTestText',
+    'sanitizeAiTestPromptText',
     'clampAiTestCount',
     'sanitizeAiTestFields',
     'sanitizeAiTestDirection',
+    'getAiTestTemplateDirections',
+    'getAiTestDirectionByKey',
+    'sanitizeAiTestRows',
     'sanitizeAiTestTemplateVersion',
     'sanitizeAiTestCategoryFactors',
     'sanitizeAiTestResultEntries',
@@ -305,6 +311,18 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
     'replaceAiTestTemplateVariables',
     'renderAiTestPrompt',
     'getAiTestResultKey',
+    'createAiTestRowId',
+    'getAiTestImageAssetId',
+    'getAiTestRowCounts',
+    'countAiTestRowsForImage',
+    'getAiTestMaxRowsPerImage',
+    'createAiTestDraftRow',
+    'buildAiTestRowPrompt',
+    'ensureAiTestRows',
+    'setAiTestRowsPerImage',
+    'addAiTestRow',
+    'removeAiTestRow',
+    'updateAiTestRowsForTemplateChange',
     'getAiTestPreviewRows',
     'sanitizeCanvasElement',
     'sanitizeCanvasPath',
@@ -858,6 +876,13 @@ test('runtime storage preserves ai test draft images jobs and results', async ()
     resolution: '2k',
     count: 4,
     templateVersionId: 'aitver_children_main_image_v1',
+    rows: [{
+      id: 'row-1',
+      imageAssetId: 'source-asset',
+      directionKey: 'model',
+      prompt: '自定义 prompt',
+      customPrompt: true,
+    }],
   }
 
   const snapshot = harness.createRuntimeStorageSnapshot()
@@ -875,6 +900,8 @@ test('runtime storage preserves ai test draft images jobs and results', async ()
   assert.equal(sanitized.aiTest.resolution, '2k')
   assert.equal(sanitized.aiTest.count, 4)
   assert.equal(sanitized.aiTest.templateVersionId, 'aitver_children_main_image_v1')
+  assert.equal(snapshot.aiTest.rows[0].prompt, '自定义 prompt')
+  assert.equal(sanitized.aiTest.rows[0].customPrompt, true)
   assert.equal(sanitized.aiTest.results['source-asset::1'].assetId, 'ai-result-1')
 })
 

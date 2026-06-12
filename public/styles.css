@@ -4037,7 +4037,7 @@ dialog input::placeholder,
 .ai-test-image-item {
   position: relative;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
+  grid-template-columns: 42px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   min-height: 54px;
@@ -4069,7 +4069,7 @@ dialog input::placeholder,
 }
 
 .ai-test-table {
-  min-width: 1180px;
+  min-width: 1320px;
   table-layout: fixed;
 }
 
@@ -4085,12 +4085,12 @@ dialog input::placeholder,
 
 .ai-test-table th:nth-child(3),
 .ai-test-table td:nth-child(3) {
-  width: 180px;
+  width: 210px;
 }
 
 .ai-test-table th:nth-child(4),
 .ai-test-table td:nth-child(4) {
-  width: 360px;
+  width: 430px;
 }
 
 .ai-test-table th:nth-child(5),
@@ -4109,18 +4109,49 @@ dialog input::placeholder,
 }
 
 .ai-test-prompt-cell {
-  max-height: 152px;
-  overflow: auto;
   color: var(--text-soft);
   font-size: var(--text-xs);
   line-height: 1.55;
-  white-space: pre-wrap;
 }
 
 .ai-test-group-cell {
   color: var(--text);
   font-variant-numeric: tabular-nums;
   font-weight: 700;
+}
+
+.ai-test-row-direction {
+  min-height: 34px;
+  padding: 0 9px;
+  font-size: var(--text-xs);
+}
+
+.ai-test-direction-hint {
+  margin-top: 6px;
+  max-height: 66px;
+  overflow: auto;
+  line-height: 1.45;
+}
+
+.ai-test-prompt-input {
+  width: 100%;
+  min-height: 132px;
+  max-height: 220px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.ai-test-custom-prompt {
+  color: var(--accent);
+}
+
+.ai-test-add-row-btn {
+  min-height: 28px;
+  padding: 0 8px;
+  white-space: nowrap;
 }
 
 .style-analysis {

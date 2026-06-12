@@ -36,6 +36,13 @@ type NormalizedAiTestImage = {
   index: number
 }
 
+type NormalizedAiTestRow = {
+  imageAssetId: string
+  directionKey: string
+  direction?: AiTestDirection
+  prompt: string
+}
+
 type NormalizedAiTestRequest = {
   sessionId?: string
   modelId: string
@@ -45,6 +52,7 @@ type NormalizedAiTestRequest = {
   count: number
   concurrency: number
   images: NormalizedAiTestImage[]
+  rows: NormalizedAiTestRow[]
   fields: AiTestFields
 }
 
@@ -75,6 +83,10 @@ const TEXT_LIMITS = {
   resolution: 24,
   imageAssetId: 180,
   imageLabel: 120,
+  prompt: 6000,
+  directionKey: 80,
+  directionLabel: 120,
+  directionWeightText: 600,
 }
 
 const MAX_AI_TEST_IMAGES = 20
@@ -206,7 +218,8 @@ export function normalizeAiTestRequest(body: Record<string, unknown> = {}): Norm
   }
   const sessionId = cleanText(body.sessionId, TEXT_LIMITS.sessionId)
   const templateVersionId = cleanText(body.templateVersionId, TEXT_LIMITS.templateVersionId)
-  return {
+  const images = normalizeImages(body.images)
+  const normalized: NormalizedAiTestRequest = {
     ...(sessionId ? { sessionId } : {}),
     modelId: cleanText(body.modelId ?? body.model, TEXT_LIMITS.modelId) || 'gpt-image-2',
     aspectRatio: cleanText(body.aspectRatio, TEXT_LIMITS.aspectRatio) || '1:1',
@@ -214,9 +227,12 @@ export function normalizeAiTestRequest(body: Record<string, unknown> = {}): Norm
     ...(templateVersionId ? { templateVersionId } : {}),
     count: clampCount(body.count, 1, 60, 6),
     concurrency: clampCount(body.concurrency, 1, 10, 10),
-    images: normalizeImages(body.images),
+    images,
+    rows: [],
     fields,
   }
+  normalized.rows = normalizeRows(body.rows, normalized.images)
+  return normalized
 }
 
 export function expandAiTestItems(
@@ -237,6 +253,47 @@ export function expandAiTestItems(
     || DEFAULT_AI_TEST_CATEGORY_FACTORS[normalized.fields.categoryKey]
     || fallbackCategoryFactor(normalized.fields.categoryKey)
   const items: AiTestExpandedItem[] = []
+  const normalizedRows = Array.isArray(normalized.rows) ? normalized.rows : []
+  if (normalizedRows.length > 0) {
+    const imageByAssetId = new Map(normalized.images.map((image) => [image.assetId, image]))
+    const rowTotals = new Map<string, number>()
+    for (const row of normalizedRows) {
+      if (!imageByAssetId.has(row.imageAssetId)) continue
+      rowTotals.set(row.imageAssetId, (rowTotals.get(row.imageAssetId) || 0) + 1)
+    }
+    const rowIndexes = new Map<string, number>()
+    for (const [rowIndex, row] of normalizedRows.entries()) {
+      const image = imageByAssetId.get(row.imageAssetId)
+      if (!image) continue
+      const groupIndex = (rowIndexes.get(row.imageAssetId) || 0) + 1
+      rowIndexes.set(row.imageAssetId, groupIndex)
+      const groupTotal = rowTotals.get(row.imageAssetId) || groupIndex
+      const direction = resolveRowDirection(row, directions, rowIndex)
+      items.push({
+        image,
+        imageIndex: image.index,
+        groupIndex,
+        groupTotal,
+        direction,
+        prompt: row.prompt || renderAiTestPrompt({
+          template,
+          fields: normalized.fields,
+          categoryFactor: factor,
+          direction,
+          groupIndex,
+          groupTotal,
+          aspectRatio: normalized.aspectRatio,
+          resolution: normalized.resolution,
+        }),
+        modelId: normalized.modelId,
+        aspectRatio: normalized.aspectRatio,
+        resolution: normalized.resolution,
+        templateVersionId: normalized.templateVersionId || template.versionId,
+      })
+    }
+    return items.slice(0, MAX_AI_TEST_TOTAL_ITEMS)
+  }
+
   for (const image of normalized.images) {
     for (let index = 0; index < effectiveCount; index += 1) {
       const direction = directions[index % directions.length]
@@ -338,6 +395,53 @@ function normalizeDirections(directions: unknown): AiTestDirection[] {
   return normalized.length > 0 ? normalized : DEFAULT_AI_TEST_DIRECTIONS
 }
 
+function normalizeRows(rows: unknown, images: NormalizedAiTestImage[]): NormalizedAiTestRow[] {
+  if (!Array.isArray(rows) || rows.length === 0) return []
+  const imageAssetIds = new Set(images.map((image) => image.assetId))
+  const normalized: NormalizedAiTestRow[] = []
+  for (const row of rows) {
+    if (normalized.length >= MAX_AI_TEST_TOTAL_ITEMS) break
+    if (!isRecord(row)) continue
+    const nestedImage = isRecord(row.image) ? row.image : {}
+    const imageAssetId = cleanText(
+      row.imageAssetId ?? row.assetId ?? nestedImage.assetId,
+      TEXT_LIMITS.imageAssetId,
+    )
+    if (!imageAssetId || !imageAssetIds.has(imageAssetId)) continue
+    const directionSource = isRecord(row.direction) ? row.direction : {}
+    const direction = normalizeOptionalDirection(directionSource)
+    const directionKey = cleanText(
+      row.directionKey ?? directionSource.key ?? direction?.key,
+      TEXT_LIMITS.directionKey,
+    )
+    normalized.push({
+      imageAssetId,
+      directionKey,
+      ...(direction ? { direction } : {}),
+      prompt: cleanPromptText(row.prompt ?? row.finalPrompt ?? row.promptOverride, TEXT_LIMITS.prompt),
+    })
+  }
+  return normalized
+}
+
+function normalizeOptionalDirection(direction: unknown): AiTestDirection | null {
+  if (!isRecord(direction)) return null
+  const key = cleanText(direction.key, TEXT_LIMITS.directionKey)
+  const label = cleanText(direction.label, TEXT_LIMITS.directionLabel)
+  const weightText = cleanText(direction.weightText || direction.weight || direction.description, TEXT_LIMITS.directionWeightText)
+  if (!key || !label) return null
+  return { key, label, weightText }
+}
+
+function resolveRowDirection(row: NormalizedAiTestRow, directions: AiTestDirection[], rowIndex: number): AiTestDirection {
+  const byKey = row.directionKey
+    ? directions.find((direction) => direction.key === row.directionKey)
+    : null
+  if (byKey) return byKey
+  if (row.direction) return row.direction
+  return directions[rowIndex % directions.length]
+}
+
 function normalizeCategoryFactor(factor: unknown): AiTestCategoryFactor | null {
   if (!isRecord(factor)) return null
   const categoryKey = cleanText(factor.categoryKey, 80)
@@ -366,6 +470,17 @@ function replaceTemplateVariables(template: string, variables: Record<string, st
 function cleanText(value: unknown, maxLength: number): string {
   return String(value ?? '')
     .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength)
+}
+
+function cleanPromptText(value: unknown, maxLength: number): string {
+  return String(value ?? '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{4,}/g, '\n\n\n')
     .trim()
     .slice(0, maxLength)
 }

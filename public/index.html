@@ -773,7 +773,7 @@
       <header class="view-head">
         <div>
           <h1>AI 测图</h1>
-          <p class="subtitle">上传商品图，按品类因子和测试方向批量生成主图候选。</p>
+          <p class="subtitle">上传商品图，按品类因子和测试方向批量生成主图候选；每一行都可以单独选择方向并改 prompt。</p>
         </div>
         <div class="head-right">
           <div class="field inline">
@@ -813,7 +813,7 @@
             <div class="dz-inner">
               <div class="dz-icon">＋</div>
               <div class="dz-text">拖拽或点击上传商品图</div>
-              <div class="dz-hint">支持多张图片，系统会按生成数量展开测图表格</div>
+              <div class="dz-hint">支持多张图片，可在表格中自由增删测图行、选择方向和编辑 prompt</div>
             </div>
           </div>
           <div id="ai-test-upload" class="upload-queue hidden"></div>
@@ -825,7 +825,7 @@
               <select id="ai-test-category" class="input"></select>
             </label>
             <label class="field">
-              <span>生成数量 N</span>
+              <span>每图默认行数</span>
               <input id="ai-test-count" class="input" type="number" min="1" max="60" step="1" />
             </label>
             <label class="field">
@@ -856,6 +856,7 @@
 
           <div class="actions ai-test-actions">
             <button id="ai-test-run" class="primary" disabled>开始测图</button>
+            <button id="ai-test-reset-prompts" type="button" class="ghost">按模板重算 Prompt</button>
             <button id="ai-test-refresh-template" type="button" class="ghost">刷新模板</button>
             <span class="progress" id="ai-test-progress"></span>
           </div>

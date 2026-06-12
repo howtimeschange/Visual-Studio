@@ -248,3 +248,57 @@ test('normalizeAiTestRequest accepts legacy aliases for future frontend compatib
     await cleanup()
   }
 })
+
+test('row-level workflow preserves custom prompts and chosen directions', async () => {
+  const { mod, cleanup } = await importAiTest()
+  try {
+    const items = mod.expandAiTestItems(baseRequest({
+      count: 6,
+      images: [{ assetId: 'asset-pants-1', label: '裤装主图' }],
+      rows: [
+        {
+          imageAssetId: 'asset-pants-1',
+          directionKey: 'composition',
+          prompt: '自由 Prompt：只测试干净构图和大主体，不要按默认场景顺序。',
+        },
+        {
+          imageAssetId: 'asset-pants-1',
+          directionKey: 'color',
+        },
+      ],
+    }))
+
+    assert.equal(items.length, 2)
+    assert.equal(items[0].groupIndex, 1)
+    assert.equal(items[0].groupTotal, 2)
+    assert.equal(items[0].direction.key, 'composition')
+    assert.equal(items[0].prompt, '自由 Prompt：只测试干净构图和大主体，不要按默认场景顺序。')
+    assert.equal(items[1].groupIndex, 2)
+    assert.equal(items[1].groupTotal, 2)
+    assert.equal(items[1].direction.key, 'color')
+    assert.match(items[1].prompt, /当前测试方向：产品颜色主导/)
+    assert.match(items[1].prompt, /藏青色/)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('row-level workflow ignores rows for unknown images and caps total row work', async () => {
+  const { mod, cleanup } = await importAiTest()
+  try {
+    const rows = Array.from({ length: 140 }, (_value, index) => ({
+      imageAssetId: index === 0 ? 'missing-asset' : 'asset-pants-1',
+      directionKey: index % 2 ? 'model' : 'scene',
+      prompt: `custom prompt ${index}`,
+    }))
+    const normalized = mod.normalizeAiTestRequest(baseRequest({ rows }))
+    const items = mod.expandAiTestItems(normalized)
+
+    assert.equal(normalized.rows.length, 120)
+    assert.equal(items.length, 120)
+    assert.equal(items.every((item) => item.image.assetId === 'asset-pants-1'), true)
+    assert.equal(items[0].prompt, 'custom prompt 1')
+  } finally {
+    await cleanup()
+  }
+})
