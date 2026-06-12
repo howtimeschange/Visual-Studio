@@ -935,6 +935,471 @@ test('runGenerateBatchJob resumes a pending image task across queue invocations'
   }
 })
 
+test('submitAiTestBatch queues one ai test cell per image count and seals credentials', async () => {
+  const { mod, cleanup } = await importRunner()
+  const sent = []
+  const env = {
+    VS_JOB_CREDENTIAL_KEK: 'shared-job-secret',
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  try {
+    const submitted = await mod.submitAiTestBatch(env, {
+      sessionId: 'session_ai_test_submit',
+      modelId: 'gpt-image-2',
+      aspectRatio: '3:4',
+      resolution: '2k',
+      count: 2,
+      concurrency: 99,
+      images: [
+        { assetId: 'pants_asset_1', label: 'navy pants' },
+        { assetId: 'pants_asset_2', label: 'detail pants' },
+      ],
+      fields: {
+        categoryKey: 'pants',
+        modelProfile: '中大童男童，阳光元气',
+        pose: '侧身跳跃抓拍',
+        background: '纯白极简背景',
+        productColor: '藏青色',
+        sellingPoint: '弹力腰头，高腰护肚，膝部活动不束缚',
+      },
+      clientKeys: { gptImageApiKey: 'ai-test-key' },
+    })
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const items = await mod.listJobItems(env, submitted.jobId)
+    const credential = await mod.getSealedCredential(env, String(job.configJson.sealedCredentialId))
+
+    assert.equal(submitted.itemCount, 4)
+    assert.equal(job.type, 'ai_test_batch')
+    assert.equal(job.progressTotal, 4)
+    assert.equal(job.configJson.concurrency, 10)
+    assert.equal(job.configJson.categoryKey, 'pants')
+    assert.equal(items.every((item) => item.itemType === 'ai_test_cell'), true)
+    assert.deepEqual(items.map((item) => item.inputJson.imageAssetId), [
+      'pants_asset_1',
+      'pants_asset_1',
+      'pants_asset_2',
+      'pants_asset_2',
+    ])
+    assert.match(items[0].inputJson.prompt, /裤装/)
+    assert.match(items[0].inputJson.prompt, /场景主导/)
+    assert.match(items[0].inputJson.prompt, /弹力腰头/)
+    assert.equal(items[0].inputJson.aspectRatio, '3:4')
+    assert.equal(items[0].inputJson.resolution, '2k')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].jobType, 'ai_test_batch')
+    assert.deepEqual(sent[0].clientKeys, { gptImageApiKey: 'ai-test-key' })
+    assert.deepEqual(
+      await mod.unsealJson(credential.ciphertext, env.VS_JOB_CREDENTIAL_KEK),
+      { gptImageApiKey: 'ai-test-key' },
+    )
+  } finally {
+    await cleanup()
+  }
+})
+
+test('runAiTestBatchJob stores completed ai test result assets', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    const payload = JSON.parse(String(init.body || '{}'))
+    calls.push({ input: String(input), payload })
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'YWktdGVzdC1yZXN1bHQ=' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_ai_test_run', null)
+    const image = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,YWktdGVzdC1zb3VyY2U=',
+      filename: 'pants.png',
+    })
+    const submitted = await mod.submitAiTestBatch(env, {
+      sessionId: session.id,
+      modelId: 'gpt-image-2',
+      aspectRatio: '1:1',
+      resolution: '1k',
+      count: 1,
+      images: [{ assetId: image.id, label: 'pants product' }],
+      fields: {
+        categoryKey: 'pants',
+        modelProfile: '中大童男童',
+        pose: '自然站姿',
+        background: '白底棚拍',
+        productColor: '藏青色',
+        sellingPoint: '弹力腰头',
+      },
+      clientKeys: { gptImageApiKey: 'ai-test-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    const resultDataUrl = await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId))
+
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(resultDataUrl, 'data:image/png;base64,YWktdGVzdC1yZXN1bHQ=')
+    assert.equal(item.outputJson.finalPrompt, item.inputJson.prompt)
+    assert.equal(item.outputJson.imageAssetId, image.id)
+    assert.equal(item.outputJson.imageTaskStatus, 'succeeded')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].payload.image.length, 1)
+    assert.match(calls[0].payload.prompt, /SUBJECT reference/i)
+    assert.match(calls[0].payload.prompt, /弹力腰头/)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runAiTestBatchJob resumes pending image tasks without creating duplicates', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_GENERATE_TASK_MAX_POLLS_PER_RUN: '1',
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_ai_test_resume_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_ai_test_resume_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (calls.filter((call) => String(call.input).includes('task_ai_test_resume_1')).length === 1) {
+      return new Response(JSON.stringify({
+        id: 'task_ai_test_resume_1',
+        status: 'running',
+        poll_url: 'https://relay.example/v1/images/tasks/task_ai_test_resume_1',
+        poll_after: 0,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_ai_test_resume_1',
+      status: 'succeeded',
+      data: [{ b64_json: 'YWktdGVzdC1yZXN1bWVk' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_ai_test_resume', null)
+    const image = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,YWktdGVzdC1zb3VyY2U=',
+      filename: 'pants.png',
+    })
+    const submitted = await mod.submitAiTestBatch(env, {
+      sessionId: session.id,
+      modelId: 'gpt-image-2',
+      count: 1,
+      images: [{ assetId: image.id, label: 'pants product' }],
+      fields: { categoryKey: 'pants', sellingPoint: '弹力腰头' },
+      clientKeys: { gptImageApiKey: 'ai-test-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTaskStatus, 'running')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,YWktdGVzdC1yZXN1bWVk',
+    )
+    assert.equal(sent.filter((message) => message.jobType === 'ai_test_batch').length, 3)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runAiTestBatchJob limits new ai test task creation per queue invocation', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    const postCount = calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length
+    return new Response(JSON.stringify({
+      id: `task_ai_test_limited_${postCount}`,
+      status: 'queued',
+      poll_url: `https://relay.example/v1/images/tasks/task_ai_test_limited_${postCount}`,
+      poll_after: 0,
+    }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_ai_test_limited', null)
+    const image = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,YWktdGVzdC1zb3VyY2U=',
+      filename: 'pants.png',
+    })
+    const submitted = await mod.submitAiTestBatch(env, {
+      sessionId: session.id,
+      modelId: 'gpt-image-2',
+      count: 5,
+      images: [{ assetId: image.id, label: 'pants product' }],
+      fields: { categoryKey: 'pants', sellingPoint: '弹力腰头' },
+      clientKeys: { gptImageApiKey: 'ai-test-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const items = await mod.listJobItems(env, submitted.jobId)
+    const postedTasks = calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST')
+
+    assert.equal(postedTasks.length, 2)
+    assert.equal(items.filter((item) => item.outputJson.imageTask).length, 2)
+    assert.equal(items.filter((item) => item.status === 'queued' && !item.outputJson.imageTask).length, 3)
+    assert.equal(job.status, 'queued')
+    assert.equal(job.summaryJson.pending, 5)
+    assert.equal(sent.filter((message) => message.jobType === 'ai_test_batch').length >= 2, true)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('retryJobItem supports failed ai test batch items', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const env = {
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+  let shouldFail = true
+
+  globalThis.fetch = async () => {
+    if (shouldFail) {
+      return new Response(JSON.stringify({ error: { message: 'temporary ai test outage' } }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ status: 'succeeded', data: [{ b64_json: 'YWktdGVzdC1yZXRyeQ==' }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_ai_test_retry_item', null)
+    const image = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,YWktdGVzdC1zb3VyY2U=',
+      filename: 'pants.png',
+    })
+    const submitted = await mod.submitAiTestBatch(env, {
+      sessionId: session.id,
+      modelId: 'gpt-image-2',
+      count: 1,
+      images: [{ assetId: image.id, label: 'pants product' }],
+      fields: { categoryKey: 'pants', sellingPoint: '弹力腰头' },
+      clientKeys: { gptImageApiKey: 'ai-test-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    let job = await mod.getJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'failed')
+    assert.equal(item.status, 'failed')
+    assert.equal(item.errorCode, 'ai_test_failed')
+
+    shouldFail = false
+    await mod.retryJobItem(env, submitted.jobId, item.id)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,YWktdGVzdC1yZXRyeQ==',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('retryJobItem creates a fresh ai test task after stored upstream task failure', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    VS_GENERATE_TASK_MAX_POLLS_PER_RUN: '1',
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      const postCount = calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length
+      return new Response(JSON.stringify({
+        id: `task_ai_test_retry_fresh_${postCount}`,
+        status: 'queued',
+        poll_url: `https://relay.example/v1/images/tasks/task_ai_test_retry_fresh_${postCount}`,
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).includes('task_ai_test_retry_fresh_1')) {
+      return new Response(JSON.stringify({
+        id: 'task_ai_test_retry_fresh_1',
+        status: 'failed',
+        error: { message: 'upstream task failed permanently' },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({
+      id: 'task_ai_test_retry_fresh_2',
+      status: 'succeeded',
+      data: [{ b64_json: 'YWktdGVzdC1mcmVzaC1yZXRyeQ==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_ai_test_fresh_retry', null)
+    const image = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,YWktdGVzdC1zb3VyY2U=',
+      filename: 'pants.png',
+    })
+    const submitted = await mod.submitAiTestBatch(env, {
+      sessionId: session.id,
+      modelId: 'gpt-image-2',
+      count: 1,
+      images: [{ assetId: image.id, label: 'pants product' }],
+      fields: { categoryKey: 'pants', sellingPoint: '弹力腰头' },
+      clientKeys: { gptImageApiKey: 'ai-test-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTask.id, 'task_ai_test_retry_fresh_1')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    let job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'failed')
+    assert.equal(item.status, 'failed')
+    assert.equal(item.outputJson.imageTask, undefined)
+    assert.equal(item.outputJson.imageTaskStatus, 'failed')
+
+    await mod.retryJobItem(env, submitted.jobId, item.id)
+    await mod.runQueuedJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTask.id, 'task_ai_test_retry_fresh_2')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 2)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,YWktdGVzdC1mcmVzaC1yZXRyeQ==',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
 test('runQueuedJob claims a generate batch item once under duplicate delivery', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
