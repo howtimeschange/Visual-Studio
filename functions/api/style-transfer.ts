@@ -359,5 +359,6 @@ function createPendingStyleResult(sessionId: string, result: Extract<ImageTaskSt
     pollTarget: result.pollTarget,
     pollUrl: result.pollUrl,
     nextPollAfterMs: result.nextPollAfterMs,
+    error: result.error,
   }
 }

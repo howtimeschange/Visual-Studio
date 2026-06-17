@@ -20,8 +20,9 @@
 
 import {
   Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
-  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
+  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
 } from '../_shared'
+import type { ImageTaskStepResult } from '../_shared'
 import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
 
@@ -147,6 +148,24 @@ type GenerateExecutionResult = {
   agentTrace: DesignAgentTrace
 }
 
+type GenerateTaskStepOptions = {
+  existingTask?: any
+  maxPollAttempts?: number
+  finalPrompt?: string
+  agentNotes?: string
+  agentTrace?: unknown
+  returnAfterCreate?: boolean
+  skipInitialPollDelay?: boolean
+}
+
+type GenerateTaskStepResult =
+  | GenerateExecutionResult
+  | (Extract<ImageTaskStepResult, { pending: true }> & {
+      refinedPrompt: string
+      agentNotes: string
+      agentTrace: DesignAgentTrace
+    })
+
 const DESIGN_AGENT_MODEL = VISION_MODEL
 const DEFAULT_AGENT_STEPS = [
   '读取参考图与上一轮结果里的硬约束。',
@@ -230,6 +249,19 @@ export async function executeGenerate(
   ctx: GenerateExecutionContext,
   emit?: (event: StreamEvent) => Promise<void> | void,
 ): Promise<GenerateExecutionResult> {
+  const result = await executeGenerateTaskStep(ctx, emit)
+  if ('pending' in result && result.pending) {
+    throw createStatusError('Image task is still running.', 202)
+  }
+  await emit?.({ type: 'result', ...result })
+  return result
+}
+
+export async function executeGenerateTaskStep(
+  ctx: GenerateExecutionContext,
+  emit?: (event: StreamEvent) => Promise<void> | void,
+  stepOptions: GenerateTaskStepOptions = {},
+): Promise<GenerateTaskStepResult> {
   const normalizedMessage = ctx.userMessage.trim()
     || (ctx.previousResult
       ? 'Refine the previous image into a cleaner and more polished commercial draft.'
@@ -244,6 +276,64 @@ export async function executeGenerate(
     trace: initialTrace,
     activeStep: 0,
   })
+
+  if (stepOptions.existingTask) {
+    const finalPrompt = String(stepOptions.finalPrompt || normalizedMessage).trim()
+    const agentNotes = String(stepOptions.agentNotes || '').trim()
+      || (ctx.previousResult
+        ? '本轮继续检查上一版修改图的生图任务。'
+        : '本轮继续检查已创建的生图任务。')
+    const agentTrace = normalizeDesignAgentTrace(
+      stepOptions.agentTrace,
+      agentNotes,
+      commerceContext,
+      route,
+      initialTrace.summary,
+    )
+    await emit?.({
+      type: 'trace',
+      trace: agentTrace,
+      activeStep: 3,
+    })
+    await emit?.({
+      type: 'status',
+      content: '正在检查已创建的生图任务…',
+      activeStep: 3,
+    })
+
+    const imageModelOptions = {
+      ...ctx.imageModelOptions,
+      existingTask: stepOptions.existingTask,
+      maxPollAttempts: stepOptions.maxPollAttempts,
+      returnAfterCreate: stepOptions.returnAfterCreate,
+      skipInitialPollDelay: stepOptions.skipInitialPollDelay,
+    }
+    const imageResult = await callImageModelTaskStep(
+      ctx.baseUrl,
+      ctx.genKey,
+      MODEL_MAP[ctx.modelId],
+      [],
+      finalPrompt,
+      imageModelOptions,
+    )
+
+    if (imageResult.pending) {
+      return {
+        ...imageResult,
+        refinedPrompt: finalPrompt,
+        agentNotes,
+        agentTrace,
+      }
+    }
+    if (!imageResult.ok) throw createStatusError(imageResult.error, imageResult.status)
+
+    return {
+      resultDataUrl: imageResult.dataUrl,
+      refinedPrompt: finalPrompt,
+      agentNotes,
+      agentTrace,
+    }
+  }
 
   let finalPrompt = normalizedMessage
   let agentNotes = ''
@@ -316,25 +406,37 @@ export async function executeGenerate(
     ...ctx.referenceImages.map((image) => ({ base64: image.base64, mime: image.mime })),
   ]
 
-  const imageResult = await callImageModel(
+  const imageModelOptions = {
+    ...ctx.imageModelOptions,
+    maxPollAttempts: stepOptions.maxPollAttempts,
+    returnAfterCreate: stepOptions.returnAfterCreate,
+    skipInitialPollDelay: stepOptions.skipInitialPollDelay,
+  }
+  const imageResult = await callImageModelTaskStep(
     ctx.baseUrl,
     ctx.genKey,
     MODEL_MAP[ctx.modelId],
     images,
     finalPrompt,
-    ctx.imageModelOptions,
+    imageModelOptions,
   )
 
+  if (imageResult.pending) {
+    return {
+      ...imageResult,
+      refinedPrompt: finalPrompt,
+      agentNotes,
+      agentTrace,
+    }
+  }
   if (!imageResult.ok) throw createStatusError(imageResult.error, imageResult.status)
 
-  const result = {
+  return {
     resultDataUrl: imageResult.dataUrl,
     refinedPrompt: finalPrompt,
     agentNotes,
     agentTrace,
   }
-  await emit?.({ type: 'result', ...result })
-  return result
 }
 
 function streamGenerateResponse(ctx: GenerateExecutionContext) {

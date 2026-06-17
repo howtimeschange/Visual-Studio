@@ -23,6 +23,7 @@ async function importRunner() {
           createSealedCredential,
           ensureSession,
           getAssetDataUrl,
+          getConversationTurn,
           getJob,
           getSealedCredential,
           listEvents,
@@ -477,6 +478,349 @@ test('runStyleTransferBatchJob resumes a pending image task across queue invocat
       await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
       'data:image/png;base64,c3R5bGUtcmVzdW1lZA==',
     )
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runStyleTransferBatchJob keeps an existing image task queued after transient poll failures', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_style_transient_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_style_transient_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    const pollCount = calls.filter((call) => String(call.input).includes('task_style_transient_1') && call.init.method === 'GET').length
+    if (pollCount <= 3) {
+      throw new Error('fetch failed: temporary network outage')
+    }
+    return new Response(JSON.stringify({
+      id: 'task_style_transient_1',
+      status: 'succeeded',
+      data: [{ b64_json: 'c3R5bGUtdHJhbnNpZW50LXJlY292ZXJlZA==' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_style_transient_retry', null)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3R5bGUtc291cmNl',
+      filename: 'style.png',
+    })
+    const subject = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'reference',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3ViamVjdA==',
+      filename: 'subject.png',
+    })
+    const submitted = await mod.submitStyleTransferBatch(env, {
+      sessionId: session.id,
+      sourceAssetId: source.id,
+      visualStyle: {
+        overall_concept: { theme: 'Soft catalog' },
+        reproduction_prompt: { style_essence_en: 'soft catalog lighting' },
+      },
+      subjects: [{ subject: '手袋', subjectAssetIds: [subject.id], label: 'subject.png' }],
+      modelId: 'nano-banana-2',
+      clientKeys: { banana2ApiKey: 'style-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(item.status, 'queued')
+    assert.equal(item.outputJson.imageTask?.id, 'task_style_transient_1')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTask?.id, 'task_style_transient_1')
+    assert.equal(item.outputJson.imageTaskStatus, 'retrying')
+    assert.match(item.outputJson.lastImageTaskError, /temporary network outage/i)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('/images/tasks/task_style_transient_1') && call.init.method === 'GET').length, 4)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,c3R5bGUtdHJhbnNpZW50LXJlY292ZXJlZA==',
+    )
+    assert.equal(sent.length >= 2, true)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runStyleTransferBatchJob fails after repeated transient poll failures exhaust the local budget', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    VS_IMAGE_RETRY_DELAY_MS: '0',
+    VS_INPUTS_BUCKET: createMemoryBucket(),
+    VS_RESULTS_BUCKET: createMemoryBucket(),
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_style_poll_budget_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_style_poll_budget_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).includes('task_style_poll_budget_1') && init.method === 'GET') {
+      throw new Error('fetch failed: persistent network outage')
+    }
+    throw new Error(`Unexpected fetch ${input}`)
+  }
+
+  try {
+    const session = await mod.ensureSession(env, 'session_style_poll_budget', null)
+    const source = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'upload',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3R5bGUtc291cmNl',
+      filename: 'style.png',
+    })
+    const subject = await mod.createAsset(env, {
+      sessionId: session.id,
+      userId: null,
+      kind: 'reference',
+      source: 'test',
+      dataUrl: 'data:image/png;base64,c3ViamVjdA==',
+      filename: 'subject.png',
+    })
+    const submitted = await mod.submitStyleTransferBatch(env, {
+      sessionId: session.id,
+      sourceAssetId: source.id,
+      visualStyle: {
+        overall_concept: { theme: 'Soft catalog' },
+        reproduction_prompt: { style_essence_en: 'soft catalog lighting' },
+      },
+      subjects: [{ subject: '手袋', subjectAssetIds: [subject.id], label: 'subject.png' }],
+      modelId: 'nano-banana-2',
+      clientKeys: { banana2ApiKey: 'style-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'failed')
+    assert.equal(item.status, 'failed')
+    assert.equal(item.errorCode, 'style_transfer_failed')
+    assert.match(item.errorMessage, /persistent network outage/i)
+    assert.equal(item.outputJson.imageTaskStatus, 'failed')
+    assert.equal(item.outputJson.imageTask, undefined)
+    assert.match(item.outputJson.lastImageTaskError, /persistent network outage/i)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runGenerateTurnJob resumes a pending image task across queue invocations', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const sent = []
+  const calls = []
+  const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
+    VS_JOBS_QUEUE: {
+      send: async (message) => {
+        sent.push(message)
+      },
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      const payload = JSON.parse(String(init.body || '{}'))
+      assert.match(payload.prompt, /fresh campaign visual/i)
+      return new Response(JSON.stringify({
+        id: 'task_generate_turn_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_generate_turn_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).includes('task_generate_turn_1')) {
+      return new Response(JSON.stringify({
+        id: 'task_generate_turn_1',
+        status: 'succeeded',
+        data: [{ b64_json: 'Z2VuZXJhdGUtdHVybi1yZXN1bHQ=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    throw new Error(`Unexpected fetch ${input}`)
+  }
+
+  try {
+    const submitted = await mod.submitGenerateTurn(env, {
+      sessionId: 'session_generate_turn_resume',
+      userMessage: 'Fresh campaign visual',
+      modelId: 'nano-banana-2',
+      useDesignAgent: false,
+      clientKeys: { banana2ApiKey: 'generate-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    let job = await mod.getJob(env, submitted.jobId)
+    let turn = await mod.getConversationTurn(env, submitted.turnId)
+    let [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'queued')
+    assert.equal(turn.status, 'queued')
+    assert.equal(item.status, 'queued')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(item.outputJson.imageTask?.id, 'task_generate_turn_1')
+    assert.equal(item.outputJson.imageTaskStatus, 'queued')
+    assert.match(item.outputJson.finalPrompt, /fresh campaign visual/i)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('/images/tasks/task_generate_turn_1')).length, 0)
+    assert.equal(sent.length >= 2, true)
+
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    job = await mod.getJob(env, submitted.jobId)
+    turn = await mod.getConversationTurn(env, submitted.turnId)
+    ;[item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'completed')
+    assert.equal(turn.status, 'completed')
+    assert.equal(item.status, 'completed')
+    assert.equal(item.attemptCount, 1)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
+    assert.equal(calls.filter((call) => String(call.input).includes('/images/tasks/task_generate_turn_1')).length, 1)
+    assert.equal(
+      await mod.getAssetDataUrl(env, String(item.outputJson.resultAssetId)),
+      'data:image/png;base64,Z2VuZXJhdGUtdHVybi1yZXN1bHQ=',
+    )
+    assert.match(turn.requestJson.refinedPrompt, /fresh campaign visual/i)
+  } finally {
+    globalThis.fetch = originalFetch
+    await cleanup()
+  }
+})
+
+test('runGenerateTurnJob fails after repeated transient poll failures exhaust the local budget', async () => {
+  const { mod, cleanup } = await importRunner()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
+    VS_IMAGE_RETRY_DELAY_MS: '0',
+    VS_JOBS_QUEUE: {
+      send: async () => {},
+    },
+  }
+
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init })
+    if (String(input).endsWith('/images/tasks') && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        id: 'task_generate_turn_budget_1',
+        status: 'queued',
+        poll_url: 'https://relay.example/v1/images/tasks/task_generate_turn_budget_1',
+        poll_after: 0,
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (String(input).includes('task_generate_turn_budget_1') && init.method === 'GET') {
+      throw new Error('fetch failed: persistent network outage')
+    }
+    throw new Error(`Unexpected fetch ${input}`)
+  }
+
+  try {
+    const submitted = await mod.submitGenerateTurn(env, {
+      sessionId: 'session_generate_turn_poll_budget',
+      userMessage: 'Fresh campaign visual',
+      modelId: 'nano-banana-2',
+      useDesignAgent: false,
+      clientKeys: { banana2ApiKey: 'generate-key' },
+    })
+
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+    await mod.runQueuedJob(env, submitted.jobId)
+
+    const job = await mod.getJob(env, submitted.jobId)
+    const turn = await mod.getConversationTurn(env, submitted.turnId)
+    const [item] = await mod.listJobItems(env, submitted.jobId)
+    assert.equal(job.status, 'failed')
+    assert.equal(turn.status, 'failed')
+    assert.equal(item.status, 'failed')
+    assert.equal(item.errorCode, 'generate_failed')
+    assert.match(item.errorMessage, /persistent network outage/i)
+    assert.equal(item.outputJson.imageTaskStatus, 'failed')
+    assert.equal(item.outputJson.imageTask, undefined)
+    assert.match(item.outputJson.lastImageTaskError, /persistent network outage/i)
+    assert.equal(calls.filter((call) => String(call.input).endsWith('/images/tasks') && call.init.method === 'POST').length, 1)
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()

@@ -43,7 +43,7 @@ import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
 import { executeTranslate, prepareTranslatePlan } from '../api/translate'
 import { executeOutfitSwapTaskStep, prepareOutfitAnalysis } from '../api/outfit-swap'
 import { executeStyleTransferGenerate } from '../api/style-transfer'
-import { buildGenerateExecutionContext, executeGenerate } from '../api/generate'
+import { buildGenerateExecutionContext, executeGenerateTaskStep } from '../api/generate'
 import { executeDirectGenerate, executeDirectGenerateTaskStep, normalizeDirectGenerateRequest } from '../api/generate-direct'
 
 type WaitUntil = (promise: Promise<unknown>) => void
@@ -426,6 +426,15 @@ function shouldPreserveImageTaskForRetry(item: JobItemRecord, message: string): 
   const text = String(message || '').toLowerCase()
   if (/image task\s+(failed|error|canceled|cancelled)/i.test(message)) return false
   return /too many subrequests|timed out|fetch failed|network|connection|socket|econnreset|etimedout|upstream (408|409|425|429|5\d\d)/i.test(text)
+}
+
+function getImageTaskPollErrorCount(outputJson: Record<string, unknown> | null | undefined): number {
+  const numeric = Math.floor(Number(outputJson?.imageTaskPollErrorCount || 0))
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0
+}
+
+function nextImageTaskPollErrorCount(outputJson: Record<string, unknown> | null | undefined, hasError: boolean): number {
+  return hasError ? getImageTaskPollErrorCount(outputJson) + 1 : 0
 }
 
 async function runWithAutoRetry<T>(task: () => Promise<T>): Promise<{ result: T; attempts: number }> {
@@ -1260,6 +1269,28 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
       }))
 
       if ((result as any).pending) {
+        const pendingError = String((result as any).error || '').slice(0, 500)
+        const pollErrorCount = nextImageTaskPollErrorCount(item.outputJson, Boolean(pendingError))
+        if (pendingError && pollErrorCount >= MAX_JOB_ITEM_ATTEMPTS) {
+          await updateJobItem(env, jobId, item.id, {
+            status: 'failed',
+            attemptCount: item.attemptCount,
+            errorCode: 'style_transfer_failed',
+            errorMessage: pendingError,
+            outputJson: clearImageTaskOutput(item.outputJson, {
+              imageTaskStatus: 'failed',
+              imageTaskPollErrorCount: pollErrorCount,
+              lastImageTaskError: pendingError,
+            }),
+            finishedAt: nowIso(),
+          })
+          await publishEvent(env, 'item', item.id, 'item_failed', {
+            jobId,
+            error: pendingError,
+          })
+          progress.publish()
+          return
+        }
         await updateJobItem(env, jobId, item.id, {
           status: 'queued',
           outputJson: {
@@ -1267,8 +1298,10 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
             imageTask: (result as any).task,
             imageTaskPollTarget: (result as any).pollTarget,
             imageTaskPollUrl: (result as any).pollUrl,
-            imageTaskStatus: (result as any).taskStatus,
+            imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
             nextPollAfterMs: (result as any).nextPollAfterMs,
+            imageTaskPollErrorCount: pollErrorCount,
+            lastImageTaskError: pendingError || item.outputJson?.lastImageTaskError,
           },
           errorCode: null,
           errorMessage: null,
@@ -1277,7 +1310,9 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
         })
         await publishEvent(env, 'item', item.id, 'progress', {
           jobId,
-          imageTaskStatus: (result as any).taskStatus,
+          imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
+          retryable: Boolean(pendingError),
+          error: pendingError || undefined,
         })
         return
       }
@@ -1318,16 +1353,45 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
         modelId: String(job.configJson.modelId || ''),
       })
     } catch (error: any) {
+      const message = String(error?.message || 'Style transfer failed')
+      if (isRetryableError(error) && item.attemptCount < MAX_JOB_ITEM_ATTEMPTS) {
+        const preserveExistingTask = shouldPreserveImageTaskForRetry(item, message)
+        await updateJobItem(env, jobId, item.id, {
+          status: 'queued',
+          attemptCount: item.attemptCount,
+          outputJson: (preserveExistingTask ? preserveImageTaskOutputForRetry : clearImageTaskOutput)(item.outputJson, {
+            imageTaskStatus: 'retrying',
+            lastImageTaskError: message.slice(0, 500),
+          }),
+          errorCode: null,
+          errorMessage: null,
+          startedAt: null,
+          finishedAt: null,
+        })
+        await publishEvent(env, 'item', item.id, 'progress', {
+          jobId,
+          imageTaskStatus: 'retrying',
+          retryable: true,
+          error: message,
+        })
+        progress.publish()
+        return
+      }
+
       await updateJobItem(env, jobId, item.id, {
         status: 'failed',
         attemptCount: Number(error?.attempts || item.attemptCount || 1),
         errorCode: 'style_transfer_failed',
-        errorMessage: String(error?.message || 'Style transfer failed'),
+        errorMessage: message,
+        outputJson: clearImageTaskOutput(item.outputJson, {
+          imageTaskStatus: 'failed',
+          lastImageTaskError: message.slice(0, 500),
+        }),
         finishedAt: nowIso(),
       })
       await publishEvent(env, 'item', item.id, 'item_failed', {
         jobId,
-        error: String(error?.message || 'Style transfer failed'),
+        error: message,
       })
     }
 
@@ -1809,10 +1873,24 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   if (!turn) return
 
   const clientKeys = await loadJobClientKeys(env, job)
+  const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued')
+  const queuedItem = items[0]
+  if (!queuedItem) return
+
+  const queuedExistingTask = getRecoverableImageTask(queuedItem)
+  const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
+    attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
+    startedAt: nowIso(),
+    errorCode: null,
+    errorMessage: null,
+  })
+  if (!item) return
+
   await updateJob(env, jobId, { status: 'running' })
   await updateConversationTurn(env, turn.id, { status: 'running' })
   await publishEvent(env, 'job', job.id, 'status', { status: 'running', turnId: turn.id })
   await publishEvent(env, 'turn', turn.id, 'status', { status: 'running' })
+  await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
 
   const requestHistory = Array.isArray(turn.requestJson.history) && turn.requestJson.history.length > 0
     ? turn.requestJson.history as Array<{ role: string; content: string }>
@@ -1844,6 +1922,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   }
 
   try {
+    const existingTask = getRecoverableImageTask(item)
     const context = buildGenerateExecutionContext({
       modelId: turn.modelId,
       userMessage: turn.userMessage,
@@ -1853,31 +1932,140 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       previousResult,
       clientKeys,
     }, env)
+    const maxPollAttempts = clampNonNegativeInt(
+      env.VS_GENERATE_TASK_MAX_POLLS_PER_RUN,
+      DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN,
+      20,
+    )
 
-    const { result, attempts } = await runWithAutoRetry(() => executeGenerate(context, async (event) => {
+    const { result } = await runWithAutoRetry(() => executeGenerateTaskStep(context, async (event) => {
       if (event.type === 'trace') {
         await updateConversationTurn(env, turn.id, { traceJson: event.trace })
       }
       await publishEvent(env, 'turn', turn.id, event.type, { ...event })
+    }, {
+      existingTask,
+      finalPrompt: String(item.outputJson?.finalPrompt || turn.requestJson?.refinedPrompt || ''),
+      agentNotes: String(item.outputJson?.agentNotes || turn.requestJson?.agentNotes || ''),
+      agentTrace: item.outputJson?.agentTrace || turn.traceJson || null,
+      maxPollAttempts,
+      returnAfterCreate: true,
+      skipInitialPollDelay: Boolean(existingTask),
     }))
+
+    if ((result as any).pending) {
+      const pendingError = String((result as any).error || '').slice(0, 500)
+      const pollErrorCount = nextImageTaskPollErrorCount(item.outputJson, Boolean(pendingError))
+      if (pendingError && pollErrorCount >= MAX_JOB_ITEM_ATTEMPTS) {
+        await updateConversationTurn(env, turn.id, { status: 'failed' })
+        await updateJob(env, jobId, {
+          status: 'failed',
+          progressFailed: 1,
+          summaryJson: { ...job.summaryJson, error: pendingError },
+        })
+        await updateJobItem(env, jobId, item.id, {
+          status: 'failed',
+          attemptCount: item.attemptCount,
+          errorCode: 'generate_failed',
+          errorMessage: pendingError,
+          outputJson: clearImageTaskOutput(item.outputJson, {
+            finalPrompt: (result as any).refinedPrompt,
+            agentNotes: (result as any).agentNotes,
+            agentTrace: (result as any).agentTrace,
+            imageTaskStatus: 'failed',
+            imageTaskPollErrorCount: pollErrorCount,
+            lastImageTaskError: pendingError,
+          }),
+          finishedAt: nowIso(),
+        })
+        await publishEvent(env, 'item', item.id, 'item_failed', {
+          jobId,
+          error: pendingError,
+        })
+        await publishEvent(env, 'turn', turn.id, 'error', {
+          error: pendingError,
+          status: 502,
+        })
+        await publishEvent(env, 'job', job.id, 'job_completed', {
+          status: 'failed',
+          error: pendingError,
+        })
+        await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
+        return
+      }
+      await updateJobItem(env, jobId, item.id, {
+        status: 'queued',
+        outputJson: {
+          ...item.outputJson,
+          imageTask: (result as any).task,
+          imageTaskPollTarget: (result as any).pollTarget,
+          imageTaskPollUrl: (result as any).pollUrl,
+          imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
+          nextPollAfterMs: (result as any).nextPollAfterMs,
+          finalPrompt: (result as any).refinedPrompt,
+          agentNotes: (result as any).agentNotes,
+          agentTrace: (result as any).agentTrace,
+          imageTaskPollErrorCount: pollErrorCount,
+          lastImageTaskError: pendingError
+            ? pendingError
+            : item.outputJson?.lastImageTaskError,
+        },
+        errorCode: null,
+        errorMessage: null,
+        startedAt: null,
+        finishedAt: null,
+      })
+      await updateConversationTurn(env, turn.id, {
+        status: 'queued',
+        traceJson: (result as any).agentTrace,
+        requestJson: {
+          ...turn.requestJson,
+          refinedPrompt: (result as any).refinedPrompt,
+          agentNotes: (result as any).agentNotes,
+        },
+      })
+      await updateJob(env, jobId, {
+        status: 'queued',
+        summaryJson: {
+          ...job.summaryJson,
+          imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
+          nextPollAfterMs: (result as any).nextPollAfterMs,
+        },
+      })
+      await publishEvent(env, 'item', item.id, 'progress', {
+        jobId,
+        imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
+      })
+      await publishEvent(env, 'job', job.id, 'status', {
+        status: 'queued',
+        turnId: turn.id,
+        imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
+      })
+      await publishEvent(env, 'turn', turn.id, 'status', {
+        status: 'queued',
+        imageTaskStatus: pendingError ? 'retrying' : (result as any).taskStatus,
+      })
+      await scheduleJobExecution(env, { ...job, status: 'queued' }, undefined, 'recover', {}, (result as any).nextPollAfterMs)
+      return
+    }
 
     const resultAsset = await createAsset(env, {
       sessionId: job.sessionId,
       userId: job.userId || null,
       kind: 'result',
       source: 'generate_turn',
-      dataUrl: result.resultDataUrl,
+      dataUrl: (result as any).resultDataUrl,
       filename: `${turn.id}.png`,
     })
 
     await updateConversationTurn(env, turn.id, {
       status: 'completed',
       resultAssetId: resultAsset.id,
-      traceJson: result.agentTrace,
+      traceJson: (result as any).agentTrace,
       requestJson: {
         ...turn.requestJson,
-        refinedPrompt: result.refinedPrompt,
-        agentNotes: result.agentNotes,
+        refinedPrompt: (result as any).refinedPrompt,
+        agentNotes: (result as any).agentNotes,
       },
     })
     await updateJob(env, jobId, {
@@ -1885,15 +2073,21 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       progressDone: 1,
       summaryJson: { resultAssetId: resultAsset.id },
     })
-    const items = await listJobItems(env, jobId)
-    if (items[0]) {
-      await updateJobItem(env, jobId, items[0].id, {
-        status: 'completed',
-        attemptCount: attempts,
-        finishedAt: nowIso(),
-        outputJson: { resultAssetId: resultAsset.id },
-      })
-    }
+    await updateJobItem(env, jobId, item.id, {
+      status: 'completed',
+      finishedAt: nowIso(),
+      outputJson: clearImageTaskOutput(item.outputJson, {
+        resultAssetId: resultAsset.id,
+        finalPrompt: (result as any).refinedPrompt,
+        agentNotes: (result as any).agentNotes,
+        agentTrace: (result as any).agentTrace,
+        imageTaskStatus: 'succeeded',
+      }),
+    })
+    await publishEvent(env, 'item', item.id, 'item_completed', {
+      jobId,
+      resultAssetId: resultAsset.id,
+    })
     await publishEvent(env, 'job', job.id, 'job_completed', { status: 'completed', resultAssetId: resultAsset.id })
     await createUsageEvent(env, {
       userId: job.userId || null,
@@ -1912,16 +2106,21 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       progressFailed: 1,
       summaryJson: { error: String(error?.message || 'Generate failed') },
     })
-    const items = await listJobItems(env, jobId)
-    if (items[0]) {
-      await updateJobItem(env, jobId, items[0].id, {
-        status: 'failed',
-        attemptCount: Number(error?.attempts || items[0].attemptCount || 1),
-        finishedAt: nowIso(),
-        errorCode: 'generate_failed',
-        errorMessage: String(error?.message || 'Generate failed'),
-      })
-    }
+    await updateJobItem(env, jobId, item.id, {
+      status: 'failed',
+      attemptCount: Number(error?.attempts || item.attemptCount || 1),
+      finishedAt: nowIso(),
+      errorCode: 'generate_failed',
+      errorMessage: String(error?.message || 'Generate failed'),
+      outputJson: clearImageTaskOutput(item.outputJson, {
+        imageTaskStatus: 'failed',
+        lastImageTaskError: String(error?.message || 'Generate failed').slice(0, 500),
+      }),
+    })
+    await publishEvent(env, 'item', item.id, 'item_failed', {
+      jobId,
+      error: String(error?.message || 'Generate failed'),
+    })
     await publishEvent(env, 'turn', turn.id, 'error', {
       error: String(error?.message || 'Generate failed'),
       status: Number(error?.status || 0) || undefined,
