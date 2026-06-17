@@ -93,6 +93,11 @@ test('expensive POST APIs require a logged-in user before spending upstream call
       subjects: [{ subjectAssetIds: ['asset_2'] }],
       clientKeys: { banana2ApiKey: 'key' },
     }],
+    ['functions/api/jobs/ai-test-batch.ts', {
+      images: [{ assetId: 'asset_1' }],
+      count: 1,
+      clientKeys: { gptImageApiKey: 'key' },
+    }],
     ['functions/api/jobs/recover.ts', {}],
   ]
 

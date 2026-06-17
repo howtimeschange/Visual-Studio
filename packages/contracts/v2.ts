@@ -6,6 +6,7 @@ export type JobType =
   | 'outfit_batch'
   | 'style_transfer_batch'
   | 'generate_batch'
+  | 'ai_test_batch'
 
 export type JobStatus =
   | 'queued'
@@ -22,6 +23,7 @@ export type JobItemType =
   | 'style_transfer_cell'
   | 'generate_turn_step'
   | 'generate_batch_item'
+  | 'ai_test_cell'
 
 export type JobItemStatus =
   | 'queued'

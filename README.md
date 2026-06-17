@@ -15,7 +15,8 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 - **图片批量翻译**：多图 x 多语言矩阵批量执行，支持字体参考图、颜色策略、自动重试、结果预览和下载。
 - **批量换装**：多模特 x 多服装矩阵生成，支持模型选择、模特库、服装角色分类、组合 look、重试和批量下载。
 - **风格迁移**：上传风格源图提取视觉 DNA，可对单个主体直接生成，也可对多个主体参考图发起批量迁移任务。
-- **异步任务体系**：翻译、换装、风格迁移和直接生图统一走 D1/R2/Queue 任务链路；批量图片任务默认和上限均为 10 图并发。
+- **AI 测图**：面向童装电商主图的多图 x 多测试方向批量工作台，支持提示词模板版本、品类高点击因子、最终 prompt 预览、单行重试和批量下载。
+- **异步任务体系**：翻译、换装、风格迁移、AI 测图和直接生图统一走 D1/R2/Queue 任务链路；批量图片任务默认和上限均为 10 图并发。
 
 ## 主要页面
 
@@ -28,6 +29,7 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 | `/?view=translate` | 图片批量翻译 |
 | `/?view=outfit` | 批量换装 |
 | `/?view=style` | 风格迁移 |
+| `/?view=ai-test` | AI 测图 |
 
 ## 画布功能
 
@@ -59,6 +61,16 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 - 适用范围：图片批量翻译、批量换装、风格迁移批量任务
 - 单图直接生成和单轮画布生成仍按一个任务项执行
 
+AI 测图的每个作业会展开为表格里的行级 `ai_test_cell`。前端默认按“每图默认行数”铺底，但每张图都可以继续增删测图行、单独选择生图方向并自由编辑最终 prompt；后端仍保留旧版 `count` 自动展开兼容，单个作业总任务项上限为 `120`。Queue worker 会分批创建/轮询上游 `/v1/images/tasks`，避免一次 Worker invocation 打满 Cloudflare 子请求限制。
+
+## AI 测图
+
+AI 测图入口是 `/?view=ai-test`。用户上传一张或多张商品图，填写品类、模特设定、姿态动作、背景环境、商品颜色、核心卖点和每图默认行数后，前端会展开表格预览每张图的测图组别、测试方向、最终 prompt、状态和结果图。表格行支持方向下拉、prompt 文本域、按模板重算、单图加行和行级删除；手动改过的 prompt 会随任务提交到后端，不会被方向顺序重新覆盖。
+
+提示词来自 `/api/ai-test/templates` 返回的 active 模板版本和品类因子。当前默认模板来自 `AI测图功能-需求文档.md`，并通过 D1 migration 初始化；前端只在接口不可用时使用兜底模板。管理员可通过同一模板 API 创建新版本、激活版本或归档版本，后续可以在不改前端代码的情况下替换默认提示词。
+
+提交测图任务使用 `POST /api/jobs/ai-test-batch`，生成 `ai_test_batch` 作业。新前端会提交 `rows` 明细，后端按每行的 `imageAssetId`、`directionKey`、`direction` 和 `prompt` 创建任务；未传 `rows` 时仍按 `count` 兼容旧工作流。任务卡支持暂停、继续、结束、整单重试、查看历史任务和下载全部；表格行支持复制最终 prompt，失败行可单独重试。
+
 ## 架构
 
 ```text
@@ -76,6 +88,8 @@ Browser SPA (public/index.html + public/app.js)
   ├─ POST    /api/jobs/translate-batch
   ├─ POST    /api/jobs/outfit-batch
   ├─ POST    /api/jobs/style-transfer-batch
+  ├─ GET/POST/PATCH /api/ai-test/templates
+  ├─ POST    /api/jobs/ai-test-batch
   ├─ POST    /api/jobs/generate-direct|generate-turn
   ├─ GET/POST/DELETE /api/jobs/:jobId
   ├─ POST    /api/style-transfer
@@ -90,6 +104,7 @@ Cloudflare Pages Functions
   ├─ functions/_lib/v2-events.ts   — 事件流
   ├─ functions/_lib/v2-runner.ts   — 批量任务执行器
   ├─ functions/_lib/v2-queue.ts    — Queue 调度抽象
+  ├─ packages/core/ai-test.ts      — AI 测图提示词渲染和请求展开
   └─ functions/api/*               — HTTP API
          │
          ├─ D1 metadata store, with in-memory fallback
@@ -129,6 +144,7 @@ functions/
     translate.ts
     outfit-swap.ts
     style-transfer.ts
+    ai-test/
     assets/
     jobs/
     results/

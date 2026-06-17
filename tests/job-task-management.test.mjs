@@ -41,14 +41,114 @@ async function createJobHarness() {
     JOB_DOWNLOAD_CONCURRENCY: 3,
     wait: async () => {},
     downloadAsset: async () => {},
+    translateWorkspaceLoadToken: 0,
+    outfitWorkspaceLoadToken: 0,
+    styleWorkspaceLoadToken: 0,
+    aiTestWorkspaceLoadToken: 0,
+    fetchJobSnapshot: async () => ({ job: null, items: [] }),
+    hydrateTranslateWorkspaceFromJob: async () => {},
+    hydrateOutfitWorkspaceFromJob: async () => {},
+    hydrateStyleWorkspaceFromJob: async () => {},
+    hydrateAiTestWorkspaceFromJob: async () => {},
+    applyTranslateJobSnapshot: () => {},
+    applyOutfitJobSnapshot: () => {},
+    applyStyleJobSnapshot: () => {},
+    applyAiTestJobSnapshot: () => {},
+    syncTranslateJob: () => {},
+    syncOutfitJob: () => {},
+    syncStyleJob: () => {},
+    syncAiTestJob: () => {},
+    saveRuntimeState: () => {},
+    formatBatchProgress: (job) => `${Number(job?.progressDone || 0)} / ${Number(job?.progressTotal || 0)}`,
+    formatRelativeTime: () => '刚刚',
+    renderTranslate: () => {},
+    renderOutfit: () => {},
+    renderStyle: () => {},
+    renderAiTest: () => {},
+    renderTranslateDropdowns: () => {},
+    trimError: (error) => String(error?.message || error || ''),
+    showAuthView: () => {},
+    window: { location: { pathname: '/', search: '' } },
     state: {
-      translate: { jobs: [], jobId: '', jobTab: 'current' },
-      outfit: { jobs: [], jobId: '', jobTab: 'current' },
-      style: { jobs: [], jobId: '', jobTab: 'current' },
+      translate: { jobs: [], jobId: '', jobTab: 'current', progress: '' },
+      outfit: { jobs: [], jobId: '', jobTab: 'current', models: [], garments: [], results: {}, progress: '' },
+      style: { jobs: [], jobId: '', jobTab: 'current', resultDataUrl: '', progress: '' },
+      aiTest: { jobs: [], jobId: '', jobTab: 'current', images: [], results: {}, progress: '' },
     },
     translateJobWatchers: new Map(),
     outfitJobWatchers: new Map(),
     styleJobWatchers: new Map(),
+    aiTestJobWatchers: new Map(),
+  }
+  const createElement = (tagName) => {
+    const node = {
+      tagName,
+      children: [],
+      dataset: {},
+      className: '',
+      textContent: '',
+      disabled: false,
+      attributes: {},
+      classList: {
+        values: new Set(),
+        toggle(name, force) {
+          const active = force === undefined ? !this.values.has(name) : Boolean(force)
+          if (active) this.values.add(name)
+          else this.values.delete(name)
+          return active
+        },
+        add(name) {
+          this.values.add(name)
+        },
+        remove(name) {
+          this.values.delete(name)
+        },
+        contains(name) {
+          return this.values.has(name)
+        },
+      },
+      append(...children) {
+        this.children.push(...children)
+      },
+      replaceChildren(...children) {
+        this.children = children
+      },
+      setAttribute(name, value) {
+        this.attributes[name] = String(value)
+      },
+      addEventListener() {},
+    }
+    return node
+  }
+  const createPanel = () => ({
+    list: createElement('div'),
+    empty: createElement('span'),
+    tabs: [
+      { dataset: { jobTab: 'current' }, classList: createElement('button').classList, setAttribute() {}, textContent: '' },
+      { dataset: { jobTab: 'history' }, classList: createElement('button').classList, setAttribute() {}, textContent: '' },
+    ],
+  })
+  const translatePanel = createPanel()
+  const outfitPanel = createPanel()
+  const stylePanel = createPanel()
+  const aiTestPanel = createPanel()
+  context.document = {
+    createElement,
+    createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
+  }
+  context.dom = {
+    tJobList: translatePanel.list,
+    tJobEmpty: translatePanel.empty,
+    tJobTabs: translatePanel.tabs,
+    oJobList: outfitPanel.list,
+    oJobEmpty: outfitPanel.empty,
+    oJobTabs: outfitPanel.tabs,
+    sJobList: stylePanel.list,
+    sJobEmpty: stylePanel.empty,
+    sJobTabs: stylePanel.tabs,
+    aiTestJobList: aiTestPanel.list,
+    aiTestJobEmpty: aiTestPanel.empty,
+    aiTestJobTabs: aiTestPanel.tabs,
   }
   const functionNames = [
     'base64Bytes',
@@ -65,11 +165,16 @@ async function createJobHarness() {
     'getJobTasks',
     'getLoadedJobId',
     'getJobTab',
+    'getJobPage',
     'setJobTab',
+    'setJobPage',
     'setLoadedJobId',
+    'makeJobTask',
+    'upsertJobTask',
     'markJobTaskLoaded',
     'clearJobTaskLoaded',
     'removeJobTask',
+    'resetLoadedWorkspaceForDraft',
     'getJobTaskBucket',
     'filterJobTasksForTab',
     'releaseCompletedLoadedTasksForKind',
@@ -79,6 +184,20 @@ async function createJobHarness() {
     'getJobTaskPageCount',
     'clampJobTaskPage',
     'getJobTaskDownloadEntries',
+    'getJobTaskThumbsFromWorkspace',
+    'addJobTaskThumbFromItem',
+    'updateJobTaskFromJob',
+    'createJobTaskLabel',
+    'getJobPanelDom',
+    'renderJobList',
+    'createJobTaskCard',
+    'shouldShowJobTaskDownload',
+    'createJobTaskThumbs',
+    'getJobTypeLabel',
+    'getJobStatusLabel',
+    'getJobStatusTone',
+    'createJobPagination',
+    'loadJobIntoWorkspace',
     'downloadAll',
     'classifyJobItemFailure',
     'formatJobItemFailureMessage',
@@ -111,11 +230,108 @@ test('sanitizeStoredJobTasks keeps only tasks matching the current view type', a
   const harness = await createJobHarness()
   const result = harness.sanitizeStoredJobTasks([
     { jobId: 'job-outfit', type: 'outfit_batch', status: 'queued', label: 'outfit' },
+    { jobId: 'job-ai-test', type: 'ai_test_batch', status: 'queued', label: 'ai test' },
     { jobId: 'job-translate', type: 'translate_batch', status: 'queued', label: 'translate' },
     { jobId: 'job-empty', type: '', status: 'queued', label: 'empty' },
   ], '', 'outfit_batch')
 
   assert.deepEqual(Array.from(result).map((task) => task.jobId), ['job-outfit'])
+})
+
+test('ai test tasks are isolated in the aiTest job list', async () => {
+  const harness = await createJobHarness()
+  const result = harness.sanitizeStoredJobTasks([
+    { jobId: 'job-outfit', type: 'outfit_batch', status: 'queued', label: 'outfit' },
+    { jobId: 'job-ai-test', type: 'ai_test_batch', status: 'queued', label: 'ai test' },
+    { jobId: 'job-style', type: 'style_transfer_batch', status: 'queued', label: 'style' },
+  ], '', 'ai_test_batch')
+
+  assert.deepEqual(Array.from(result).map((task) => task.jobId), ['job-ai-test'])
+})
+
+test('ai test job panel renders into ai test container only', async () => {
+  const harness = await createJobHarness()
+  harness.state.aiTest.jobs = [
+    {
+      jobId: 'job-ai-test',
+      type: 'ai_test_batch',
+      status: 'queued',
+      label: 'AI 测图任务',
+      loaded: true,
+      thumbs: [],
+    },
+  ]
+
+  harness.renderJobList('aiTest')
+
+  assert.equal(harness.dom.aiTestJobList.children.length, 1)
+  assert.equal(harness.dom.oJobList.children.length, 0)
+  assert.equal(harness.dom.aiTestJobEmpty.classList.contains('hidden'), true)
+  assert.equal(harness.dom.oJobEmpty.classList.contains('hidden'), false)
+})
+
+test('loading an ai test job hydrates the ai test workspace', async () => {
+  const harness = await createJobHarness()
+  const calls = []
+  const job = {
+    id: 'job-ai-test',
+    type: 'ai_test_batch',
+    status: 'completed',
+    progressTotal: 1,
+    progressDone: 1,
+    createdAt: '2026-06-12T08:00:00.000Z',
+  }
+  const items = [{
+    id: 'item-1',
+    itemType: 'ai_test_cell',
+    status: 'completed',
+    inputJson: { imageAssetId: 'source-1', groupIndex: 1 },
+    outputJson: { resultAssetId: 'result-1', finalPrompt: 'final prompt' },
+  }]
+  harness.fetchJobSnapshot = async (jobId) => {
+    calls.push(['fetch', jobId])
+    return { job, items }
+  }
+  harness.hydrateAiTestWorkspaceFromJob = async (hydratedJob, hydratedItems) => {
+    calls.push(['hydrate', hydratedJob.id, hydratedItems.length])
+    harness.state.aiTest.images = [{ id: 'source-1', assetId: 'source-1' }]
+  }
+  harness.applyAiTestJobSnapshot = (appliedJob, appliedItems) => {
+    calls.push(['apply', appliedJob.id, appliedItems.length])
+    harness.state.aiTest.results['source-1::1'] = { status: 'done', assetId: 'result-1' }
+  }
+
+  await harness.loadJobIntoWorkspace('aiTest', 'job-ai-test')
+
+  assert.deepEqual(calls, [
+    ['fetch', 'job-ai-test'],
+    ['hydrate', 'job-ai-test', 1],
+    ['apply', 'job-ai-test', 1],
+  ])
+  assert.equal(harness.state.aiTest.jobId, 'job-ai-test')
+  assert.equal(harness.state.aiTest.jobs[0].loaded, true)
+  assert.equal(harness.state.aiTest.results['source-1::1'].assetId, 'result-1')
+})
+
+test('resetting an ai test draft clears loaded job images and results', async () => {
+  const harness = await createJobHarness()
+  harness.state.aiTest.jobId = 'old-job'
+  harness.state.aiTest.jobs = [
+    { jobId: 'old-job', type: 'ai_test_batch', status: 'completed', loaded: true, holdInCurrent: true },
+  ]
+  harness.state.aiTest.images = [{ id: 'old-source', assetId: 'old-source' }]
+  harness.state.aiTest.results = {
+    'old-source::1': { status: 'done', assetId: 'old-result' },
+  }
+  harness.state.aiTest.progress = '完成 1 / 1'
+
+  harness.resetLoadedWorkspaceForDraft('aiTest')
+
+  assert.equal(harness.state.aiTest.jobId, '')
+  assert.equal(harness.state.aiTest.jobs[0].loaded, false)
+  assert.equal(harness.state.aiTest.images.length, 0)
+  assert.equal(Object.keys(harness.state.aiTest.results).length, 0)
+  assert.equal(harness.state.aiTest.progress, '')
 })
 
 test('sanitizeStoredJobTasks preserves loaded active outfit jobs after refresh', async () => {
@@ -450,6 +666,18 @@ test('job task downloads include completed outputs from task items', async () =>
       outputJson: { resultAssetId: 'style-a' },
     },
   ]
+  const aiTestItems = [
+    {
+      status: 'completed',
+      inputJson: { imageIndex: 2, groupIndex: 4 },
+      outputJson: { resultAssetId: 'ai-test-a' },
+    },
+    {
+      status: 'completed',
+      inputJson: { imageIndex: 0, groupIndex: 1 },
+      outputJson: { resultAssetId: 'ai-test-b', filename: 'backend-ai-test-name.png' },
+    },
+  ]
 
   assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('translate', translateItems))), [
     { href: '/api/results/translated-a', name: 'source-a.en.png' },
@@ -459,6 +687,10 @@ test('job task downloads include completed outputs from task items', async () =>
   ])
   assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('style', styleItems))), [
     { href: '/api/results/style-a', name: 'style-transfer-红色手袋.png' },
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.getJobTaskDownloadEntries('aiTest', aiTestItems))), [
+    { href: '/api/results/ai-test-a', name: 'ai-test-2-4.png' },
+    { href: '/api/results/ai-test-b', name: 'backend-ai-test-name.png' },
   ])
 })
 

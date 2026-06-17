@@ -50,6 +50,10 @@
         <span class="nav-label">风格迁移</span>
         <span class="nav-hint">提取风格 · 仿图生成</span>
       </button>
+      <button class="nav-item" data-view="ai-test">
+        <span class="nav-label">AI 测图</span>
+        <span class="nav-hint">多图 × 多方向测款</span>
+      </button>
     </nav>
 
     <div class="sidebar-footer">
@@ -104,6 +108,10 @@
           <button type="button" class="home-tool" data-view="style">
             <strong>风格迁移</strong>
             <span>提取风格并仿图生成</span>
+          </button>
+          <button type="button" class="home-tool" data-view="ai-test">
+            <strong>AI 测图</strong>
+            <span>商品图多方向批量测试</span>
           </button>
         </div>
       </div>
@@ -757,6 +765,119 @@
             <div id="s-history" class="style-history-grid"></div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ AI TEST VIEW ═══════════════ -->
+    <section class="view" id="view-ai-test">
+      <header class="view-head">
+        <div>
+          <h1>AI 测图</h1>
+          <p class="subtitle">上传商品图，按品类因子和测试方向批量生成主图候选；每一行都可以单独选择方向并改 prompt。</p>
+        </div>
+        <div class="head-right">
+          <div class="field inline">
+            <label>模型</label>
+            <select id="ai-test-model" class="input"></select>
+          </div>
+          <div class="field inline">
+            <label>比例</label>
+            <select id="ai-test-aspect" class="input">
+              <option value="1:1">1:1</option>
+              <option value="4:3">4:3</option>
+              <option value="3:4">3:4</option>
+              <option value="16:9">16:9</option>
+              <option value="9:16">9:16</option>
+            </select>
+          </div>
+          <div class="field inline">
+            <label>清晰度</label>
+            <select id="ai-test-resolution" class="input">
+              <option value="1k">1k</option>
+              <option value="2k">2k</option>
+              <option value="4k">4k</option>
+            </select>
+          </div>
+        </div>
+      </header>
+
+      <div class="ai-test-layout">
+        <section class="panel ai-test-form-panel">
+          <div class="ai-test-panel-head">
+            <h3>测图参数</h3>
+            <span id="ai-test-template-status" class="muted">模板未加载</span>
+          </div>
+
+          <div class="dropzone ai-test-dropzone" id="ai-test-dropzone">
+            <input id="ai-test-file-input" type="file" accept="image/*" multiple hidden />
+            <div class="dz-inner">
+              <div class="dz-icon">＋</div>
+              <div class="dz-text">拖拽或点击上传商品图</div>
+              <div class="dz-hint">支持多张图片，可在表格中自由增删测图行、选择方向和编辑 prompt</div>
+            </div>
+          </div>
+          <div id="ai-test-upload" class="upload-queue hidden"></div>
+          <div class="ai-test-image-list" id="ai-test-image-list"></div>
+
+          <div class="control-grid ai-test-control-grid">
+            <label class="field">
+              <span>品类</span>
+              <select id="ai-test-category" class="input"></select>
+            </label>
+            <label class="field">
+              <span>每图默认行数</span>
+              <input id="ai-test-count" class="input" type="number" min="1" max="60" step="1" />
+            </label>
+            <label class="field">
+              <span>模板版本</span>
+              <select id="ai-test-template" class="input"></select>
+            </label>
+            <label class="field">
+              <span>模特设定</span>
+              <input id="ai-test-model-profile" class="input" type="text" placeholder="如：中大童男童，阳光元气" />
+            </label>
+            <label class="field">
+              <span>姿态动作</span>
+              <input id="ai-test-pose" class="input" type="text" placeholder="如：侧身跳跃抓拍" />
+            </label>
+            <label class="field">
+              <span>背景环境</span>
+              <input id="ai-test-background" class="input" type="text" placeholder="如：纯白极简背景" />
+            </label>
+            <label class="field">
+              <span>商品颜色</span>
+              <input id="ai-test-product-color" class="input" type="text" placeholder="如：藏青色" />
+            </label>
+            <label class="field grow">
+              <span>核心卖点</span>
+              <input id="ai-test-selling-point" class="input" type="text" placeholder="如：弹力腰头，高腰护肚，膝部活动不束缚" />
+            </label>
+          </div>
+
+          <div class="actions ai-test-actions">
+            <button id="ai-test-run" class="primary" disabled>开始测图</button>
+            <button id="ai-test-reset-prompts" type="button" class="ghost">按模板重算 Prompt</button>
+            <button id="ai-test-refresh-template" type="button" class="ghost">刷新模板</button>
+            <span class="progress" id="ai-test-progress"></span>
+          </div>
+        </section>
+
+        <section class="job-panel ai-test-job-panel" aria-label="AI 测图任务">
+          <div class="job-panel-head">
+            <h3>任务管理</h3>
+            <span class="muted" id="ai-test-job-empty">暂无历史任务</span>
+          </div>
+          <div class="job-tabs" id="ai-test-job-tabs" role="tablist" aria-label="AI 测图任务分类">
+            <button type="button" class="job-tab active" data-job-tab="current" role="tab" aria-selected="true">当前任务</button>
+            <button type="button" class="job-tab" data-job-tab="history" role="tab" aria-selected="false">历史任务</button>
+          </div>
+          <div class="job-list" id="ai-test-job-list"></div>
+        </section>
+      </div>
+
+      <div class="grid-wrap ai-test-table-wrap">
+        <table class="grid ai-test-table" id="ai-test-grid"></table>
+        <div id="ai-test-empty" class="empty">先上传商品图并填写测图参数，预览表会自动展开</div>
       </div>
     </section>
   </main>

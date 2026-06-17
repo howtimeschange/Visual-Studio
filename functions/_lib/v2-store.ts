@@ -21,8 +21,44 @@ import type {
 } from '../../packages/contracts/v2'
 import { createId, nowIso } from '../../packages/core/id'
 import { sha256Hex } from '../../packages/core/hash'
+import {
+  DEFAULT_AI_TEST_CATEGORY_FACTORS,
+  DEFAULT_AI_TEST_DIRECTIONS,
+  DEFAULT_AI_TEST_TEMPLATE,
+} from '../../packages/core/ai-test'
 
 type BlobBucketKind = 'input' | 'result' | 'temp'
+
+type AiTestDirection = {
+  key: string
+  label: string
+  weightText: string
+}
+
+type AiTestPromptVersionRecord = {
+  templateId: string
+  versionId: string
+  version: number
+  title: string
+  promptBody: string
+  negativePrompt: string
+  directions: AiTestDirection[]
+  variables: string[]
+}
+
+type AiTestPromptTemplateRecord = {
+  id: string
+  key: string
+  title: string
+  description: string
+  activeVersion: AiTestPromptVersionRecord | null
+}
+
+type AiTestCategoryFactorRecord = {
+  categoryKey: string
+  categoryLabel: string
+  factorText: string
+}
 
 type MemoryState = {
   sessions: Map<string, SessionRecord>
@@ -45,6 +81,11 @@ type MemoryState = {
   usageEvents: UsageEventRecord[]
   userApiKeys: Map<string, UserApiKeysRecord>
   sealedCredentials: Map<string, SealedCredentialRecord>
+  aiTestTemplates: Map<string, AiTestPromptTemplateRecord>
+  aiTestTemplateIdsByKey: Map<string, string>
+  aiTestVersions: Map<string, AiTestPromptVersionRecord[]>
+  aiTestActiveVersionIds: Map<string, string>
+  aiTestCategoryFactors: Map<string, AiTestCategoryFactorRecord>
 }
 
 const memoryState: MemoryState = {
@@ -68,6 +109,11 @@ const memoryState: MemoryState = {
   usageEvents: [],
   userApiKeys: new Map(),
   sealedCredentials: new Map(),
+  aiTestTemplates: new Map(),
+  aiTestTemplateIdsByKey: new Map(),
+  aiTestVersions: new Map(),
+  aiTestActiveVersionIds: new Map(),
+  aiTestCategoryFactors: new Map(),
 }
 
 function dbFor(env: any): D1Database | null {
@@ -93,6 +139,10 @@ function stringifyJson(value: unknown): string {
 
 function isMissingUsageCostColumn(error: unknown): boolean {
   return /no column named|has no column|no such column/i.test(String((error as any)?.message || error || ''))
+}
+
+function isMissingAiTestPromptTable(error: unknown): boolean {
+  return /no such table|no such column/i.test(String((error as any)?.message || error || ''))
 }
 
 const DEFAULT_AUTH_SESSION_TOUCH_INTERVAL_MS = 2 * 60_000
@@ -390,6 +440,124 @@ function rowToSealedCredential(row: any): SealedCredentialRecord {
     expiresAt: String(row.expires_at),
     createdAt: String(row.created_at),
   }
+}
+
+function normalizeAiTestDirections(value: unknown): AiTestDirection[] {
+  const parsed = Array.isArray(value) ? value : DEFAULT_AI_TEST_DIRECTIONS
+  const directions = parsed
+    .map((item: any) => ({
+      key: String(item?.key || '').trim(),
+      label: String(item?.label || '').trim(),
+      weightText: String(item?.weightText || item?.weight_text || '').trim(),
+    }))
+    .filter((item) => item.key && item.label && item.weightText)
+  return directions.length ? directions : DEFAULT_AI_TEST_DIRECTIONS
+}
+
+function normalizeAiTestVariables(value: unknown): string[] {
+  const parsed = Array.isArray(value) ? value : DEFAULT_AI_TEST_TEMPLATE.variables
+  const variables = parsed.map((item) => String(item || '').trim()).filter(Boolean)
+  return variables.length ? variables : DEFAULT_AI_TEST_TEMPLATE.variables
+}
+
+function defaultAiTestPromptTemplate(): AiTestPromptTemplateRecord {
+  const activeVersion = cloneAiTestPromptVersion({
+    ...DEFAULT_AI_TEST_TEMPLATE,
+    templateId: 'aittpl_children_main_image',
+    versionId: 'aitver_children_main_image_v1',
+  })
+  return {
+    id: 'aittpl_children_main_image',
+    key: 'children_main_image',
+    title: '童装电商主图 AI 测图',
+    description: '来自 AI测图功能-需求文档.md 的默认提示词模板',
+    activeVersion,
+  }
+}
+
+function defaultAiTestCategoryFactors(): AiTestCategoryFactorRecord[] {
+  return Object.values(DEFAULT_AI_TEST_CATEGORY_FACTORS).map((factor) => ({ ...factor }))
+}
+
+function cloneAiTestPromptVersion(version: AiTestPromptVersionRecord): AiTestPromptVersionRecord {
+  return {
+    ...version,
+    directions: version.directions.map((direction) => ({ ...direction })),
+    variables: [...version.variables],
+  }
+}
+
+function cloneAiTestPromptTemplate(template: AiTestPromptTemplateRecord): AiTestPromptTemplateRecord {
+  return {
+    ...template,
+    activeVersion: template.activeVersion ? cloneAiTestPromptVersion(template.activeVersion) : null,
+  }
+}
+
+function cloneAiTestCategoryFactor(factor: AiTestCategoryFactorRecord): AiTestCategoryFactorRecord {
+  return { ...factor }
+}
+
+function ensureMemoryAiTestDefaults(): void {
+  if (!memoryState.aiTestTemplates.has('aittpl_children_main_image')) {
+    const template = defaultAiTestPromptTemplate()
+    memoryState.aiTestTemplates.set(template.id, template)
+    memoryState.aiTestTemplateIdsByKey.set(template.key, template.id)
+    memoryState.aiTestVersions.set(template.id, [template.activeVersion as AiTestPromptVersionRecord])
+    memoryState.aiTestActiveVersionIds.set(template.id, String(template.activeVersion?.versionId || ''))
+  }
+  if (memoryState.aiTestCategoryFactors.size === 0) {
+    for (const factor of defaultAiTestCategoryFactors()) {
+      memoryState.aiTestCategoryFactors.set(factor.categoryKey, factor)
+    }
+  }
+}
+
+function rowToAiTestPromptVersion(row: any): AiTestPromptVersionRecord {
+  return {
+    templateId: String(row.template_id || DEFAULT_AI_TEST_TEMPLATE.templateId),
+    versionId: String(row.id || DEFAULT_AI_TEST_TEMPLATE.versionId),
+    version: Number(row.version || DEFAULT_AI_TEST_TEMPLATE.version),
+    title: String(row.title || DEFAULT_AI_TEST_TEMPLATE.title),
+    promptBody: String(row.prompt_body || DEFAULT_AI_TEST_TEMPLATE.promptBody),
+    negativePrompt: row.negative_prompt === null || row.negative_prompt === undefined
+      ? DEFAULT_AI_TEST_TEMPLATE.negativePrompt
+      : String(row.negative_prompt),
+    directions: normalizeAiTestDirections(parseJson<unknown>(row.direction_json, DEFAULT_AI_TEST_DIRECTIONS)),
+    variables: normalizeAiTestVariables(parseJson<unknown>(row.variables_json, DEFAULT_AI_TEST_TEMPLATE.variables)),
+  }
+}
+
+function rowToAiTestPromptTemplate(templateRow: any, versionRow?: any | null): AiTestPromptTemplateRecord {
+  return {
+    id: String(templateRow.id || DEFAULT_AI_TEST_TEMPLATE.templateId),
+    key: String(templateRow.key || 'children_main_image'),
+    title: String(templateRow.title || '童装电商主图 AI 测图'),
+    description: String(templateRow.description || ''),
+    activeVersion: versionRow ? rowToAiTestPromptVersion(versionRow) : null,
+  }
+}
+
+function rowToAiTestCategoryFactor(row: any): AiTestCategoryFactorRecord {
+  const fallback = DEFAULT_AI_TEST_CATEGORY_FACTORS[String(row.category_key || '')] || null
+  return {
+    categoryKey: String(row.category_key || fallback?.categoryKey || ''),
+    categoryLabel: String(row.category_label || fallback?.categoryLabel || ''),
+    factorText: String(row.factor_text || fallback?.factorText || ''),
+  }
+}
+
+function memoryAiTestTemplateByKeyOrId(templateKeyOrId: string): AiTestPromptTemplateRecord | null {
+  ensureMemoryAiTestDefaults()
+  const keyOrId = String(templateKeyOrId || 'children_main_image')
+  const templateId = memoryState.aiTestTemplateIdsByKey.get(keyOrId) || keyOrId
+  const template = memoryState.aiTestTemplates.get(templateId)
+  if (!template) return null
+  const activeVersionId = memoryState.aiTestActiveVersionIds.get(template.id)
+  const activeVersion = (memoryState.aiTestVersions.get(template.id) || []).find((version) => version.versionId === activeVersionId)
+    || template.activeVersion
+    || null
+  return cloneAiTestPromptTemplate({ ...template, activeVersion })
 }
 
 export function normalizeEmail(email: string): string {
@@ -2489,4 +2657,232 @@ export async function deleteSealedCredential(envOrCredentialId: any, maybeCreden
     return
   }
   memoryState.sealedCredentials.delete(id)
+}
+
+export async function getActiveAiTestPromptTemplate(env: any, key = 'children_main_image'): Promise<AiTestPromptTemplateRecord> {
+  const db = dbFor(env)
+  if (db) {
+    try {
+      const row = await db.prepare(`
+        SELECT
+          t.id,
+          t.key,
+          t.title,
+          t.description,
+          v.id AS version_id,
+          v.template_id,
+          v.version,
+          v.title AS version_title,
+          v.prompt_body,
+          v.negative_prompt,
+          v.direction_json,
+          v.variables_json
+        FROM ai_test_prompt_templates t
+        LEFT JOIN ai_test_prompt_versions v ON v.id = t.active_version_id
+        WHERE t.key = ?
+        LIMIT 1
+      `).bind(key).first<any>()
+      if (row) {
+        return {
+          id: String(row.id),
+          key: String(row.key),
+          title: String(row.title || ''),
+          description: String(row.description || ''),
+          activeVersion: row.version_id ? rowToAiTestPromptVersion({
+            id: row.version_id,
+            template_id: row.template_id,
+            version: row.version,
+            title: row.version_title,
+            prompt_body: row.prompt_body,
+            negative_prompt: row.negative_prompt,
+            direction_json: row.direction_json,
+            variables_json: row.variables_json,
+          }) : null,
+        }
+      }
+    } catch (error) {
+      if (!isMissingAiTestPromptTable(error)) throw error
+      return defaultAiTestPromptTemplate()
+    }
+  }
+  return memoryAiTestTemplateByKeyOrId(key) || defaultAiTestPromptTemplate()
+}
+
+export async function listAiTestPromptTemplates(env: any): Promise<AiTestPromptTemplateRecord[]> {
+  const db = dbFor(env)
+  if (db) {
+    try {
+      const result = await db.prepare(`
+        SELECT
+          t.id,
+          t.key,
+          t.title,
+          t.description,
+          v.id AS version_id,
+          v.template_id,
+          v.version,
+          v.title AS version_title,
+          v.prompt_body,
+          v.negative_prompt,
+          v.direction_json,
+          v.variables_json
+        FROM ai_test_prompt_templates t
+        LEFT JOIN ai_test_prompt_versions v ON v.id = t.active_version_id
+        ORDER BY t.updated_at DESC, t.title ASC
+      `).all<any>()
+      const rows = result.results || []
+      return rows.map((row) => ({
+        id: String(row.id),
+        key: String(row.key),
+        title: String(row.title || ''),
+        description: String(row.description || ''),
+        activeVersion: row.version_id ? rowToAiTestPromptVersion({
+          id: row.version_id,
+          template_id: row.template_id,
+          version: row.version,
+          title: row.version_title,
+          prompt_body: row.prompt_body,
+          negative_prompt: row.negative_prompt,
+          direction_json: row.direction_json,
+          variables_json: row.variables_json,
+        }) : null,
+      }))
+    } catch (error) {
+      if (!isMissingAiTestPromptTable(error)) throw error
+      return [defaultAiTestPromptTemplate()]
+    }
+  }
+  ensureMemoryAiTestDefaults()
+  return [...memoryState.aiTestTemplates.values()].map((template) => memoryAiTestTemplateByKeyOrId(template.id) || template)
+}
+
+export async function listAiTestCategoryFactors(env: any): Promise<AiTestCategoryFactorRecord[]> {
+  const db = dbFor(env)
+  if (db) {
+    try {
+      const result = await db.prepare(`
+        SELECT category_key, category_label, factor_text
+        FROM ai_test_category_factors
+        WHERE enabled = 1
+        ORDER BY sort_order ASC, category_label ASC
+      `).all<any>()
+      const rows = result.results || []
+      return rows.map(rowToAiTestCategoryFactor).filter((factor) => factor.categoryKey)
+    } catch (error) {
+      if (!isMissingAiTestPromptTable(error)) throw error
+      return defaultAiTestCategoryFactors()
+    }
+  }
+  ensureMemoryAiTestDefaults()
+  return [...memoryState.aiTestCategoryFactors.values()].map(cloneAiTestCategoryFactor)
+}
+
+export async function createAiTestPromptVersion(env: any, input: {
+  templateKey?: string
+  title: string
+  promptBody: string
+  negativePrompt?: string
+  directions?: AiTestDirection[]
+  variables?: string[]
+  notes?: string
+  createdByUserId?: string | null
+}): Promise<AiTestPromptVersionRecord> {
+  const templateKey = String(input.templateKey || 'children_main_image')
+  const db = dbFor(env)
+  const now = nowIso()
+  const directions = normalizeAiTestDirections(input.directions || DEFAULT_AI_TEST_TEMPLATE.directions)
+  const variables = normalizeAiTestVariables(input.variables || DEFAULT_AI_TEST_TEMPLATE.variables)
+  if (db) {
+    const template = await db.prepare('SELECT * FROM ai_test_prompt_templates WHERE key = ? OR id = ? LIMIT 1').bind(templateKey, templateKey).first<any>()
+    if (!template) throw new Error(`AI test prompt template not found: ${templateKey}`)
+    const maxRow = await db.prepare('SELECT COALESCE(MAX(version), 0) AS max_version FROM ai_test_prompt_versions WHERE template_id = ?').bind(template.id).first<any>()
+    const version = Number(maxRow?.max_version || 0) + 1
+    const record: AiTestPromptVersionRecord = {
+      templateId: String(template.id),
+      versionId: createId('aitver'),
+      version,
+      title: String(input.title || `Draft version ${version}`),
+      promptBody: String(input.promptBody || DEFAULT_AI_TEST_TEMPLATE.promptBody),
+      negativePrompt: input.negativePrompt === undefined ? '' : String(input.negativePrompt),
+      directions,
+      variables,
+    }
+    await db.prepare(`
+      INSERT INTO ai_test_prompt_versions (
+        id, template_id, version, status, title, prompt_body, negative_prompt,
+        direction_json, variables_json, created_by_user_id, created_at, activated_at, notes
+      )
+      VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+    `).bind(
+      record.versionId,
+      record.templateId,
+      record.version,
+      record.title,
+      record.promptBody,
+      record.negativePrompt,
+      stringifyJson(record.directions),
+      stringifyJson(record.variables),
+      input.createdByUserId || null,
+      now,
+      String(input.notes || ''),
+    ).run()
+    return record
+  }
+
+  ensureMemoryAiTestDefaults()
+  const template = memoryAiTestTemplateByKeyOrId(templateKey)
+  if (!template) throw new Error(`AI test prompt template not found: ${templateKey}`)
+  const versions = memoryState.aiTestVersions.get(template.id) || []
+  const version = Math.max(0, ...versions.map((item) => Number(item.version || 0))) + 1
+  const record: AiTestPromptVersionRecord = {
+    templateId: template.id,
+    versionId: createId('aitver'),
+    version,
+    title: String(input.title || `Draft version ${version}`),
+    promptBody: String(input.promptBody || DEFAULT_AI_TEST_TEMPLATE.promptBody),
+    negativePrompt: input.negativePrompt === undefined ? '' : String(input.negativePrompt),
+    directions,
+    variables,
+  }
+  memoryState.aiTestVersions.set(template.id, [...versions, cloneAiTestPromptVersion(record)])
+  return cloneAiTestPromptVersion(record)
+}
+
+export async function activateAiTestPromptVersion(env: any, templateKeyOrId: string, versionId: string): Promise<AiTestPromptTemplateRecord> {
+  const db = dbFor(env)
+  const now = nowIso()
+  if (db) {
+    const template = await db.prepare('SELECT * FROM ai_test_prompt_templates WHERE key = ? OR id = ? LIMIT 1').bind(templateKeyOrId, templateKeyOrId).first<any>()
+    if (!template) throw new Error(`AI test prompt template not found: ${templateKeyOrId}`)
+    const version = await db.prepare('SELECT * FROM ai_test_prompt_versions WHERE template_id = ? AND id = ? LIMIT 1').bind(template.id, versionId).first<any>()
+    if (!version) throw new Error(`AI test prompt version not found: ${versionId}`)
+    const updateVersions = db.prepare(`
+      UPDATE ai_test_prompt_versions
+      SET status = CASE WHEN id = ? THEN 'active' WHEN status = 'active' THEN 'archived' ELSE status END,
+          activated_at = CASE WHEN id = ? THEN ? ELSE activated_at END
+      WHERE template_id = ?
+    `).bind(versionId, versionId, now, template.id)
+    const updateTemplate = db.prepare('UPDATE ai_test_prompt_templates SET active_version_id = ?, updated_at = ? WHERE id = ?').bind(versionId, now, template.id)
+    if (typeof db.batch === 'function') {
+      await db.batch([updateVersions, updateTemplate])
+    } else {
+      await updateTemplate.run()
+      await updateVersions.run()
+    }
+    return rowToAiTestPromptTemplate(
+      { ...template, active_version_id: versionId, updated_at: now },
+      { ...version, status: 'active', activated_at: now },
+    )
+  }
+
+  ensureMemoryAiTestDefaults()
+  const template = memoryAiTestTemplateByKeyOrId(templateKeyOrId)
+  if (!template) throw new Error(`AI test prompt template not found: ${templateKeyOrId}`)
+  const versions = memoryState.aiTestVersions.get(template.id) || []
+  const activeVersion = versions.find((version) => version.versionId === versionId)
+  if (!activeVersion) throw new Error(`AI test prompt version not found: ${versionId}`)
+  const activeVersionRecord = cloneAiTestPromptVersion(activeVersion)
+  memoryState.aiTestActiveVersionIds.set(template.id, versionId)
+  memoryState.aiTestTemplates.set(template.id, { ...template, activeVersion: activeVersionRecord })
+  return cloneAiTestPromptTemplate({ ...template, activeVersion: activeVersionRecord })
 }

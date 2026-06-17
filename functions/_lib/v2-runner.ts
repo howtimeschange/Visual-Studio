@@ -9,6 +9,7 @@ import { buildOutfitLooks } from '../../packages/core/outfit-looks'
 import { createId, nowIso } from '../../packages/core/id'
 import { stableHash } from '../../packages/core/hash'
 import { sealJson, unsealJson } from '../../packages/core/crypto'
+import { expandAiTestItems, normalizeAiTestRequest } from '../../packages/core/ai-test'
 import {
   createAsset,
   createConversation,
@@ -26,7 +27,9 @@ import {
   getConversation,
   getConversationTurn,
   getJob,
+  getActiveAiTestPromptTemplate,
   getSealedCredential,
+  listAiTestCategoryFactors,
   listConversationTurns,
   listJobItems,
   listJobsByStatus,
@@ -65,6 +68,8 @@ const DEFAULT_OUTFIT_TASK_MAX_POLLS_PER_RUN = 1
 const DEFAULT_TRANSLATE_ITEMS_PER_RUN = 10
 const DEFAULT_OUTFIT_ITEMS_PER_RUN = 2
 const DEFAULT_OUTFIT_EXISTING_TASK_ITEMS_PER_RUN = 20
+const DEFAULT_AI_TEST_ITEMS_PER_RUN = 2
+const DEFAULT_AI_TEST_EXISTING_TASK_ITEMS_PER_RUN = 20
 const MAX_JOB_ITEM_ATTEMPTS = AUTO_RETRY_LIMIT + 1
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'partial_failed', 'failed', 'cancelled'])
 const STOPPED_JOB_STATUSES = new Set(['paused', 'cancelled'])
@@ -1380,6 +1385,330 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
   await finalizeCredentialForStatus(env, String(initialJob.configJson?.sealedCredentialId || ''), status)
 }
 
+function selectAiTestCategoryFactor(request: any, factors: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  const categoryKey = String(request?.fields?.categoryKey || '').trim()
+  const byKey = factors.find((factor) => String(factor.categoryKey || '').trim() === categoryKey)
+  if (byKey) return byKey
+
+  const haystack = [
+    categoryKey,
+    request?.fields?.sellingPoint,
+    request?.fields?.modelProfile,
+    request?.fields?.pose,
+    request?.fields?.background,
+  ].map((value) => String(value || '').toLowerCase()).join(' ')
+
+  return factors.find((factor) => {
+    const key = String(factor.categoryKey || '').toLowerCase()
+    const label = String(factor.categoryLabel || '').toLowerCase()
+    return Boolean((key && haystack.includes(key)) || (label && haystack.includes(label)))
+  }) || factors[0]
+}
+
+export async function submitAiTestBatch(
+  env: Env,
+  body: any,
+  waitUntil?: WaitUntil,
+) {
+  const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
+  const session = await ensureSession(env, body?.sessionId, userId)
+  const request = normalizeAiTestRequest(body || {})
+  if (request.images.length === 0) throw createRunnerError('AI test images required', 400)
+
+  const activeTemplate = await getActiveAiTestPromptTemplate(env, 'children_main_image')
+  if (!activeTemplate.activeVersion) throw createRunnerError('AI test prompt template is not active', 400)
+  const categoryFactors = await listAiTestCategoryFactors(env)
+  const categoryFactor = selectAiTestCategoryFactor(request, categoryFactors)
+  const expandedItems = expandAiTestItems(request, activeTemplate.activeVersion, categoryFactor as any)
+  if (expandedItems.length === 0) throw createRunnerError('AI test items required', 400)
+
+  const jobId = createId('job')
+  const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
+  const configJson = {
+    request,
+    templateId: activeTemplate.id,
+    templateKey: activeTemplate.key,
+    activeTemplateVersionId: activeTemplate.activeVersion.versionId,
+    templateVersionId: request.templateVersionId || activeTemplate.activeVersion.versionId,
+    categoryKey: request.fields.categoryKey,
+    count: request.count,
+    concurrency: clampInt(
+      request.concurrency,
+      1,
+      MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+      DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+    ),
+    sealedCredentialId,
+    configHash: await stableHash({
+      request,
+      templateId: activeTemplate.id,
+      activeTemplateVersionId: activeTemplate.activeVersion.versionId,
+      categoryFactor,
+    }),
+  }
+
+  const job = await createJob(env, {
+    id: jobId,
+    sessionId: session.id,
+    userId,
+    type: 'ai_test_batch',
+    status: 'queued',
+    configJson,
+    summaryJson: {
+      imageCount: request.images.length,
+      itemCount: expandedItems.length,
+      categoryKey: request.fields.categoryKey,
+    },
+    progressTotal: expandedItems.length,
+    progressDone: 0,
+    progressFailed: 0,
+  })
+
+  const items = await createJobItems(env, job.id, expandedItems.map((item) => ({
+    jobId: job.id,
+    itemType: 'ai_test_cell',
+    status: 'queued',
+    inputJson: {
+      image: item.image,
+      imageAssetId: item.image.assetId,
+      imageIndex: item.imageIndex,
+      groupIndex: item.groupIndex,
+      groupTotal: item.groupTotal,
+      direction: item.direction,
+      prompt: item.prompt,
+      modelId: item.modelId,
+      aspectRatio: item.aspectRatio,
+      resolution: item.resolution,
+      templateVersionId: item.templateVersionId || activeTemplate.activeVersion?.versionId,
+      categoryKey: request.fields.categoryKey,
+    },
+    outputJson: {},
+    attemptCount: 0,
+    errorCode: null,
+    errorMessage: null,
+    startedAt: null,
+    finishedAt: null,
+  })))
+
+  await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type })
+  await publishJobProgress(env, job)
+
+  await scheduleJobExecution(env, job, waitUntil, 'submit', body?.clientKeys || {})
+
+  return { jobId: job.id, sessionId: session.id, itemCount: items.length }
+}
+
+export async function runAiTestBatchJob(env: Env, jobId: string) {
+  const initialJob = await getJob(env, jobId)
+  if (!initialJob) return
+  if (STOPPED_JOB_STATUSES.has(initialJob.status)) return
+  const clientKeys = await loadJobClientKeys(env, initialJob)
+  await updateJob(env, jobId, { status: 'running' })
+  await publishEvent(env, 'job', jobId, 'status', { status: 'running', type: initialJob.type })
+
+  const items = (await listJobItems(env, jobId)).filter((item) => item.status === 'queued' && item.itemType === 'ai_test_cell')
+  const existingTaskItems = items.filter(hasRecoverableImageTask)
+  const newTaskItems = items.filter((item) => !hasRecoverableImageTask(item))
+  const maxExistingTaskItemsPerRun = resolveItemsPerRun(
+    env.VS_AI_TEST_EXISTING_TASK_ITEMS_PER_RUN,
+    DEFAULT_AI_TEST_EXISTING_TASK_ITEMS_PER_RUN,
+  )
+  const maxNewTaskItemsPerRun = resolveItemsPerRun(env.VS_AI_TEST_ITEMS_PER_RUN, DEFAULT_AI_TEST_ITEMS_PER_RUN)
+  const runItems = [
+    ...existingTaskItems.slice(0, maxExistingTaskItemsPerRun),
+    ...newTaskItems.slice(0, maxNewTaskItemsPerRun),
+  ].slice(0, MAX_JOB_ITEMS_PER_RUN)
+  const concurrency = Math.min(
+    runItems.length || 1,
+    clampInt(
+      initialJob.configJson?.concurrency,
+      1,
+      MAX_ASYNC_IMAGE_JOB_CONCURRENCY,
+      DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
+    ),
+  )
+  const progress = queueProgressPublisher(env, jobId)
+
+  await runPool(runItems, concurrency, async (queuedItem) => {
+    const job = await getJob(env, jobId)
+    if (!job || STOPPED_JOB_STATUSES.has(job.status)) return
+
+    const queuedExistingTask = getRecoverableImageTask(queuedItem)
+    const item = await claimQueuedJobItem(env, jobId, queuedItem.id, {
+      attemptCount: queuedExistingTask ? queuedItem.attemptCount : queuedItem.attemptCount + 1,
+      startedAt: nowIso(),
+      errorCode: null,
+      errorMessage: null,
+    })
+    if (!item) return
+    await publishEvent(env, 'item', item.id, 'item_started', { jobId, itemType: item.itemType })
+
+    try {
+      const image = item.inputJson.image && typeof item.inputJson.image === 'object'
+        ? item.inputJson.image as Record<string, unknown>
+        : {}
+      const imageAssetId = String(item.inputJson.imageAssetId || image.assetId || '').trim()
+      const request = normalizeDirectGenerateRequest({
+        prompt: item.inputJson.prompt,
+        aspectRatio: item.inputJson.aspectRatio,
+        resolution: item.inputJson.resolution,
+        modelId: item.inputJson.modelId,
+        referenceImages: [{
+          assetId: imageAssetId,
+          role: 'subject',
+          label: String(image.label || `image-${item.inputJson.imageIndex || ''}` || imageAssetId),
+        }],
+      })
+      const existingTask = getRecoverableImageTask(item)
+      const maxPollAttempts = clampNonNegativeInt(
+        env.VS_GENERATE_TASK_MAX_POLLS_PER_RUN,
+        DEFAULT_GENERATE_TASK_MAX_POLLS_PER_RUN,
+        20,
+      )
+      const result = await executeDirectGenerateTaskStep(env, request, clientKeys, {
+        existingTask: existingTask || undefined,
+        finalPrompt: String(item.outputJson?.finalPrompt || item.inputJson.prompt || ''),
+        maxPollAttempts,
+        returnAfterCreate: true,
+        skipInitialPollDelay: Boolean(existingTask),
+      })
+
+      if (result.pending) {
+        await updateJobItem(env, jobId, item.id, {
+          status: 'queued',
+          outputJson: {
+            ...item.outputJson,
+            imageTask: result.task,
+            imageTaskPollTarget: result.pollTarget,
+            imageTaskPollUrl: result.pollUrl,
+            imageTaskStatus: result.taskStatus,
+            nextPollAfterMs: result.nextPollAfterMs,
+            finalPrompt: result.finalPrompt,
+          },
+          errorCode: null,
+          errorMessage: null,
+          startedAt: null,
+          finishedAt: null,
+        })
+        await publishEvent(env, 'item', item.id, 'progress', {
+          jobId,
+          imageTaskStatus: result.taskStatus,
+        })
+        progress.publish()
+        return
+      }
+
+      const resultAsset = await createAsset(env, {
+        sessionId: job.sessionId,
+        userId: job.userId || null,
+        kind: 'result',
+        source: 'ai_test_batch',
+        dataUrl: result.dataUrl,
+        filename: `ai-test-${item.inputJson.imageIndex || 0}-${item.inputJson.groupIndex || 0}.png`,
+        width: result.width,
+        height: result.height,
+        bucketKind: 'result',
+      })
+
+      await updateJobItem(env, jobId, item.id, {
+        status: 'completed',
+        outputJson: {
+          ...item.outputJson,
+          resultAssetId: resultAsset.id,
+          finalPrompt: result.finalPrompt,
+          direction: item.inputJson.direction || null,
+          imageAssetId,
+          imageTaskStatus: 'succeeded',
+        },
+        finishedAt: nowIso(),
+      })
+      await publishEvent(env, 'item', item.id, 'item_completed', {
+        jobId,
+        resultAssetId: resultAsset.id,
+      })
+      await createUsageEvent(env, {
+        userId: job.userId || null,
+        sessionId: job.sessionId,
+        jobId,
+        eventType: 'ai_test_result',
+        amount: 1,
+        provider: '1xm.ai',
+        modelId: String(item.inputJson.modelId || job.configJson?.request?.modelId || ''),
+      })
+    } catch (error: any) {
+      const message = String(error?.message || 'AI test failed')
+      await updateJobItem(env, jobId, item.id, {
+        status: 'failed',
+        attemptCount: Number(error?.attempts || item.attemptCount || 1),
+        errorCode: 'ai_test_failed',
+        errorMessage: message,
+        outputJson: clearImageTaskOutput(item.outputJson, {
+          imageTaskStatus: 'failed',
+          lastImageTaskError: message.slice(0, 500),
+        }),
+        finishedAt: nowIso(),
+      })
+      await publishEvent(env, 'item', item.id, 'item_failed', {
+        jobId,
+        error: message,
+      })
+    }
+
+    progress.publish()
+  })
+
+  await progress.drain()
+
+  const latestJob = await getJob(env, jobId)
+  if (latestJob?.status === 'paused') {
+    return
+  }
+  if (latestJob?.status === 'cancelled') {
+    await markRemainingItemsCancelled(env, jobId)
+    await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
+    return
+  }
+
+  const finalItems = await listJobItems(env, jobId)
+  const failed = finalItems.filter((item) => item.status === 'failed').length
+  const completed = finalItems.filter((item) => item.status === 'completed').length
+  const pendingStatus = getPendingJobStatus(finalItems)
+  if (pendingStatus) {
+    const nextJob = await updateJob(env, jobId, {
+      status: pendingStatus,
+      progressDone: completed,
+      progressFailed: failed,
+      summaryJson: {
+        ...initialJob.summaryJson,
+        ...createJobSummary(finalItems),
+        pending: countPendingItems(finalItems),
+      },
+    })
+    if (nextJob) await publishJobProgress(env, nextJob)
+    await scheduleJobExecution(env, nextJob || { ...initialJob, status: pendingStatus }, undefined, 'recover', {}, getNextPendingPollDelayMs(finalItems))
+    return
+  }
+  const status = completed === 0 ? 'failed' : failed > 0 ? 'partial_failed' : 'completed'
+  const finalJob = await updateJob(env, jobId, {
+    status,
+    progressDone: completed,
+    progressFailed: failed,
+    summaryJson: {
+      ...createJobSummary(finalItems),
+      imageCount: initialJob.summaryJson.imageCount || 0,
+      categoryKey: initialJob.configJson.categoryKey || '',
+    },
+  })
+  if (finalJob) {
+    await publishEvent(env, 'job', jobId, 'job_completed', {
+      status: finalJob.status,
+      summary: finalJob.summaryJson,
+    })
+  }
+
+  await finalizeCredentialForStatus(env, String(initialJob.configJson?.sealedCredentialId || ''), status)
+}
+
 export async function submitGenerateTurn(
   env: Env,
   body: any,
@@ -1898,6 +2227,8 @@ export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: C
       await runOutfitBatchJob(env, job.id)
     } else if (job.type === 'style_transfer_batch') {
       await runStyleTransferBatchJob(env, job.id)
+    } else if (job.type === 'ai_test_batch') {
+      await runAiTestBatchJob(env, job.id)
     } else if (job.type === 'generate_turn') {
       await runGenerateTurnJob(env, job.id)
     } else if (job.type === 'generate_batch') {
@@ -2054,7 +2385,7 @@ export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
     return { jobId: job.id, type: job.type }
   }
 
-  if (job.type === 'outfit_batch' || job.type === 'style_transfer_batch') {
+  if (job.type === 'outfit_batch' || job.type === 'style_transfer_batch' || job.type === 'ai_test_batch') {
     const items = (await listJobItems(env, job.id)).filter((item) => item.status === 'failed')
     await requeueItems(env, job.id, items)
     await updateJob(env, job.id, { status: 'queued' })
@@ -2104,7 +2435,7 @@ export async function retryJobItem(env: Env, jobId: string, itemId: string, wait
   if (!job) throw createRunnerError('Job not found', 404)
   const item = (await listJobItems(env, job.id)).find((entry) => entry.id === itemId)
   if (!item) throw createRunnerError('Job item not found', 404)
-  if (!['translate_batch', 'outfit_batch', 'style_transfer_batch'].includes(job.type)) {
+  if (!['translate_batch', 'outfit_batch', 'style_transfer_batch', 'ai_test_batch'].includes(job.type)) {
     throw createRunnerError(`Item retry not supported for ${job.type}`, 400)
   }
   if (item.status !== 'failed') {
