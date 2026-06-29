@@ -3194,7 +3194,7 @@ button.ghost:disabled,
 
 .ai-sidebar-controls {
   display: grid;
-  grid-template-columns: minmax(64px, 0.85fr) minmax(110px, 1.55fr) minmax(54px, 0.7fr) minmax(48px, 0.6fr);
+  grid-template-columns: minmax(120px, 1.55fr) minmax(58px, 0.7fr) minmax(52px, 0.6fr);
   align-items: center;
   gap: 5px;
   padding: var(--space-sm) var(--space-lg) 4px;
@@ -3215,10 +3215,6 @@ button.ghost:disabled,
   text-overflow: ellipsis;
 }
 
-.ai-sidebar-mode {
-  font-weight: 600;
-}
-
 .ai-sidebar-attach-btn:hover {
   border-color: color-mix(in oklch, var(--accent) 35%, var(--line-strong));
   background: var(--bg-4);
@@ -3233,22 +3229,9 @@ button.ghost:disabled,
   line-height: 1.25;
 }
 
-.msg-mode-badge {
-  justify-self: start;
-  margin: 0 0 4px;
-  padding: 3px 7px;
-  border: 1px solid color-mix(in oklch, var(--accent) 35%, var(--line-strong));
-  border-radius: 999px;
-  color: var(--text-soft);
-  background: color-mix(in oklch, var(--accent) 10%, transparent);
-  font-size: 0.66rem;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
 @media (max-width: 380px) {
   .ai-sidebar-controls {
-    grid-template-columns: minmax(60px, 0.85fr) minmax(96px, 1.45fr) minmax(48px, 0.65fr) minmax(44px, 0.58fr);
+    grid-template-columns: minmax(96px, 1.6fr) minmax(54px, 0.7fr) minmax(48px, 0.6fr);
     gap: 4px;
   }
 }

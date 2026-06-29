@@ -123,6 +123,7 @@ async function createAuthRedirectHarness() {
     'setAuthReturnTarget',
     'showAuthView',
     'setActiveView',
+    'normalizeAppView',
     'routeForView',
     'redirectToLoginForApi',
     'createHttpError',

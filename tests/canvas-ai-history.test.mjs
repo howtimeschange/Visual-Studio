@@ -117,10 +117,6 @@ async function createHistoryHarness() {
     'clearCurrentAiSession',
     'renderAiSessionControls',
     'normalizeCanvasCreativeMode',
-    'inferPosterHeadline',
-    'normalizeCanvasPosterLayout',
-    'getDefaultPosterCopySafeArea',
-    'normalizeCanvasPosterBrief',
     'serializeAiMessage',
     'serializeAiMessageImage',
     'serializeAiWorkflowItem',
@@ -311,7 +307,7 @@ test('canvas AI history preserves prompt suggestions and style intent metadata',
   })
 })
 
-test('canvas AI history preserves poster banner composition metadata', async () => {
+test('canvas AI history strips legacy poster banner composition metadata', async () => {
   const harness = await createHistoryHarness()
 
   const saved = harness.serializeAiMessage({
@@ -348,15 +344,15 @@ test('canvas AI history preserves poster banner composition metadata', async () 
     }],
   })
 
-  assert.equal(saved.creativeMode, 'poster_banner')
-  assert.equal(saved.images[0].creativeMode, 'poster_banner')
-  assert.equal(saved.images[0].promptStyle, 'visual_base')
-  assert.equal(saved.images[0].posterBrief.headline, '夏促新品')
+  assert.equal(saved.creativeMode, 'image')
+  assert.equal(saved.images[0].creativeMode, 'image')
+  assert.ok(!('promptStyle' in saved.images[0]))
+  assert.ok(!('posterBrief' in saved.images[0]))
   assert.equal(saved.images[0].baseAssetId, 'asset-base')
-  assert.equal(saved.workflow[0].posterBrief.headline, '夏促新品')
+  assert.ok(!('posterBrief' in saved.workflow[0]))
 
   const sanitized = harness.sanitizeAiMessages([saved])
-  assert.equal(sanitized[0].creativeMode, 'poster_banner')
-  assert.equal(sanitized[0].images[0].posterBrief.cta, '立即查看')
-  assert.equal(sanitized[0].workflow[0].creativeMode, 'poster_banner')
+  assert.equal(sanitized[0].creativeMode, 'image')
+  assert.ok(!('posterBrief' in sanitized[0].images[0]))
+  assert.equal(sanitized[0].workflow[0].creativeMode, 'image')
 })

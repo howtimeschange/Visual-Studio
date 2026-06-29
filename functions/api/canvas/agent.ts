@@ -4,22 +4,7 @@ import {
 } from '../../_shared'
 import { getAuthContext } from '../../_lib/auth'
 import { mergeUserClientKeys } from '../../_lib/user-api-keys'
-import { ensureSession } from '../../_lib/v2-store'
-
-type CreativeMode = 'image' | 'poster_banner'
-
-type PosterBrief = {
-  format: string
-  headline: string
-  subheadline: string
-  cta: string
-  badges: string[]
-  layout: string
-  copySafeArea: string
-  aspectRatio: string
-  resolution: string
-  sourceRequest: string
-}
+import { ensureSession, getAsset, getAssetDataUrl } from '../../_lib/v2-store'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
@@ -39,9 +24,7 @@ type AgentAction = {
   prompt: string
   aspectRatio: string
   resolution: string
-  creativeMode: CreativeMode
-  promptStyle: string
-  posterBrief: PosterBrief | null
+  creativeMode: 'image'
 }
 
 type AgentResult = {
@@ -54,6 +37,29 @@ type AgentResult = {
   suggestions: string[]
   needsClarification: boolean
   styleIntent: StyleIntent
+}
+
+type ReferenceImageEntry = {
+  assetId: string
+  role: string
+  label: string
+}
+
+type ResolvedReferenceImage = ReferenceImageEntry & {
+  dataUrl: string
+  mime: string
+  base64: string
+}
+
+type ReferenceBrief = {
+  product: Record<string, unknown>
+  sellingPoints: string[]
+  copyHierarchy: Record<string, unknown>
+  pageStructure: string[]
+  visualStyle: Record<string, unknown>
+  materialDetails: string[]
+  evidence: string[]
+  missingEvidence: string[]
 }
 
 const DEFAULT_STYLE_INTENT: StyleIntent = {
@@ -77,20 +83,45 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!message) return json({ error: 'message required' }, 400)
 
   const modelId = String(body?.modelId || 'nano-banana-2')
-  const creativeMode = normalizeCreativeMode(body?.creativeMode)
-  const posterBrief = normalizePosterBrief({
-    ...(body?.posterBrief || {}),
-    aspectRatio: body?.aspectRatio || body?.posterBrief?.aspectRatio,
-    resolution: body?.resolution || body?.posterBrief?.resolution,
-    sourceRequest: message,
-  })
   const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
   const clientKeys = await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
   const { visionKey } = resolveKeys(modelId, env, clientKeys)
-  const passthrough = buildPassthroughAgentResult(body, message)
+  const referenceImages = normalizeReferenceImages(body?.referenceImages)
+  let referenceBrief = normalizeReferenceBrief(body?.referenceBrief)
+  let referenceAnalysisSource = referenceBrief ? 'request' : ''
+  let referenceAnalysisReason = ''
+
+  if (visionKey && referenceImages.length && !referenceBrief) {
+    const resolvedReferenceImages = await loadReferenceImages(env, referenceImages, session.id, auth.user?.id || null)
+    if (resolvedReferenceImages.length) {
+      try {
+        referenceBrief = await analyzeReferenceImages(baseUrl, visionKey, message, resolvedReferenceImages)
+        referenceAnalysisSource = referenceBrief ? 'vision' : ''
+        referenceAnalysisReason = referenceBrief ? '' : 'empty_reference_brief'
+      } catch (error: any) {
+        referenceAnalysisReason = String(error?.message || 'reference_analysis_failed').slice(0, 240)
+      }
+    } else {
+      referenceAnalysisReason = 'no_readable_reference_images'
+    }
+  } else if (referenceImages.length && !visionKey) {
+    referenceAnalysisReason = 'missing_vision_key'
+  }
+
+  const passthrough = buildPassthroughAgentResult({ ...body, referenceBrief }, message)
 
   if (!visionKey) {
-    return json({ sessionId: session.id, ...passthrough, usedModel: false, agentPassthrough: true, passthroughReason: 'missing_vision_key' })
+    return json({
+      sessionId: session.id,
+      ...passthrough,
+      referenceBrief,
+      referenceAnalysisUsed: Boolean(referenceBrief),
+      referenceAnalysisSource,
+      referenceAnalysisReason: referenceAnalysisReason || 'missing_vision_key',
+      usedModel: false,
+      agentPassthrough: true,
+      passthroughReason: 'missing_vision_key',
+    })
   }
 
   const raw = await callTextModel(
@@ -125,17 +156,7 @@ Return strict JSON only:
       "title": "short Chinese image title",
       "prompt": "complete image-generation prompt for this one output",
       "aspectRatio": "1:1",
-      "resolution": "1k",
-      "creativeMode": "image|poster_banner",
-      "promptStyle": "visual_base",
-      "posterBrief": {
-        "headline": "short exact local overlay headline",
-        "subheadline": "short exact local overlay subheadline",
-        "cta": "short CTA",
-        "badges": ["short badge"],
-        "layout": "left|right|top|bottom|center",
-        "copySafeArea": "left 42%"
-      }
+      "resolution": "1k"
     }
   ]
 }
@@ -144,6 +165,7 @@ Rules:
 - If the user asks for analysis, advice, planning, critique, or project organization and says not to generate, set shouldGenerate=false.
 - If the user asks to create, generate, make, extend, redraw, or produce a poster/image, set shouldGenerate=true.
 - First classify the request type: ecommerce main image, campaign poster, social post, editorial photography, illustration, packaging, 3D render, infographic/UI, art concept, or other.
+- If referenceBrief is present, treat it as primary evidence extracted from uploaded reference images. Use it to infer product type, selling points, copy hierarchy, page structure, visual style, material details, and whether the output should be a main image, PDP/detail-page visual, KV, selling-point card, long-page section, infographic, or another format. Do not ignore it and do not reduce it to a generic subject reference.
 - Choose a distinct visual language from the user's words, canvas context, references, and purpose. Do not default to ecommerce styling unless the user explicitly asks for ecommerce, product listing, main image, white background, marketplace, SKU, or product detail visuals.
 - Avoid unsupported default phrases such as "clean background", "ecommerce-ready", "polished commercial", "centered product", or "soft studio lighting" unless the user specifically requests that direction.
 - If the user wants an image but the style/medium is missing and the choice would strongly affect the result, set needsClarification=true, shouldGenerate=false, prompt="", actions=[], ask one short Chinese question, and provide 2-4 complete clickable suggestions with different style directions.
@@ -151,27 +173,14 @@ Rules:
 - Do not combine multiple requested outputs into one image unless the user explicitly asks for a collage, contact sheet, grid, or one combined image.
 - Each action must describe exactly one image output and be independently generatable.
 - When generating, reply in Chinese with one concise sentence naming the chosen style direction.
-- The prompt must be concrete, complete, and image-model-ready. Reflect the user's intent, medium, visual language, composition, palette, material/texture, lighting, and typography/copy-space when relevant; do not force a short prompt when useful detail matters.
-- If creativeMode is "poster_banner", behave like the local banner-generation and 大森运营图 workflows: create a unified, text-free visual base prompt for each action and a posterBrief for local composition. The image prompt must reserve the requested copy safe area and must say no readable words, no numbers, no letter-like marks, no pseudo-text, no watermark, no border, and no UI chrome. Put actual headline/subheadline/CTA/badges into posterBrief, not into the image prompt.
-- Poster/banner visual bases must be one coherent hero scene with one clear focal subject, not a collage. Avoid split-screen composition, contact sheets, tiled panels, multiple unrelated scenes, before/after layouts, floating sticker clusters, frame-within-frame graphics, and decorative card piles. Use depth, lighting, architecture, props, silhouettes, and restrained abstract shapes instead.
-- The reserved copy-safe area is a real layout region. Keep faces, hands, logos, high-contrast props, and the primary subject out of it. Make that region calm, dark or low-detail enough for crisp local typography.
-- In poster_banner mode, avoid all text-bearing objects in the visual base: no signboards, billboards, posters, street signs, store signs, license plates, newspaper pages, documents, interface panels, captions, subtitles, logos, chip labels, or screen text. If the scene normally has signage or screens, render blank glowing panels or abstract light shapes with zero glyphs. Do not describe neon signage; describe abstract neon reflections, architecture, color, and lighting instead.
-- In poster_banner mode, use the user's selected aspectRatio and resolution unless the request explicitly names a different output format. Do not turn multiple posters/banners into one collage.
+- The prompt must be concrete, complete, and image-model-ready. Reflect the user's intent, medium, visual language, composition, palette, material/texture, lighting, typography, readable copy, iconography, and product evidence when relevant; do not force a short prompt when useful detail matters.
+- Do not add blanket "no text" or "empty copy-space" restrictions. If the user's goal needs visible titles, selling points, icons, labels, or detail-page typography, plan those directly in the image prompt.
 - Return raw JSON only, without Markdown fences.
 - Do not mention internal JSON, tools, APIs, or model limitations.`,
       },
       {
         role: 'user',
-        content: JSON.stringify({
-          message,
-          history: Array.isArray(body?.history) ? body.history.slice(-8) : [],
-          canvasContext: body?.canvasContext || {},
-          aspectRatio: body?.aspectRatio || '1:1',
-          resolution: body?.resolution || '1k',
-          hasReferenceImages: Boolean(body?.hasReferenceImages),
-          creativeMode,
-          posterBrief,
-        }),
+        content: JSON.stringify(buildAgentPlanningInput(body, message, referenceImages, referenceBrief)),
       },
     ],
     { maxTokens: 4000, temperature: 0.45 },
@@ -182,6 +191,10 @@ Rules:
   return json({
     sessionId: session.id,
     ...parsed,
+    referenceBrief,
+    referenceAnalysisUsed: Boolean(referenceBrief),
+    referenceAnalysisSource,
+    referenceAnalysisReason,
     usedModel: true,
     agentPassthrough: !parsedJson,
     passthroughReason: parsedJson ? '' : (raw ? 'invalid_agent_json' : 'empty_agent_response'),
@@ -192,19 +205,11 @@ export function buildPassthroughAgentResult(body: any, message: string): AgentRe
   const shouldGenerate = inferShouldGenerate(message)
   const aspectRatio = String(body?.aspectRatio || '1:1')
   const resolution = String(body?.resolution || '1k')
-  const creativeMode = normalizeCreativeMode(body?.creativeMode)
-  const posterBrief = normalizePosterBrief({
-    ...(body?.posterBrief || {}),
-    aspectRatio,
-    resolution,
-    sourceRequest: message,
-  })
   const styleRoute = resolveFallbackStyleRoute(message)
   const needsClarification = shouldGenerate && styleRoute.needsClarification
+  const referenceBrief = normalizeReferenceBrief(body?.referenceBrief)
   const prompt = shouldGenerate && !needsClarification
-    ? (creativeMode === 'poster_banner'
-        ? buildPosterBannerBasePrompt(message, posterBrief, aspectRatio, resolution)
-        : buildFallbackPrompt(message, styleRoute, aspectRatio, resolution))
+    ? buildFallbackPrompt(message, styleRoute, aspectRatio, resolution, referenceBrief)
     : ''
   const actions: AgentAction[] = shouldGenerate && !needsClarification
     ? [{
@@ -214,9 +219,7 @@ export function buildPassthroughAgentResult(body: any, message: string): AgentRe
         prompt,
         aspectRatio,
         resolution,
-        creativeMode,
-        promptStyle: creativeMode === 'poster_banner' ? 'visual_base' : '',
-        posterBrief: creativeMode === 'poster_banner' ? posterBrief : null,
+        creativeMode: 'image',
       }]
     : []
   return {
@@ -224,9 +227,7 @@ export function buildPassthroughAgentResult(body: any, message: string): AgentRe
       ? '我先按当前画布上下文给出设计判断，不会立即生成图片。'
       : needsClarification
         ? '这个需求可以走几种完全不同的视觉方向，你想先选哪一种？'
-        : (creativeMode === 'poster_banner'
-            ? `我会按${styleRoute.chineseLabel}方向生成无字主视觉，并在本地合成海报文案。`
-            : `我会按${styleRoute.chineseLabel}方向来做，并根据 ${aspectRatio} / ${resolution} 生成一版。`),
+        : `我会按${styleRoute.chineseLabel}方向来做，并根据 ${aspectRatio} / ${resolution} 生成一版。`,
     shouldGenerate: shouldGenerate && !needsClarification,
     prompt,
     actions,
@@ -355,14 +356,248 @@ function buildFallbackPrompt(
   styleRoute: ReturnType<typeof resolveFallbackStyleRoute>,
   aspectRatio: string,
   resolution: string,
+  referenceBrief: ReferenceBrief | null = null,
 ) {
-  return [
+  const parts = [
     `Create an image based on this request: ${message}.`,
     `Visual language: ${styleRoute.visualLanguage}.`,
     `Visual direction: ${styleRoute.promptDirection}.`,
+  ]
+  const referenceSummary = formatReferenceBriefForPrompt(referenceBrief)
+  if (referenceSummary) {
+    parts.push(`Use this visual understanding from the uploaded references as product evidence: ${referenceSummary}.`)
+  }
+  parts.push(
     'Make the style choice specific to the requested purpose; avoid generic default polish.',
     `Aspect ratio ${aspectRatio}, ${resolution} class output.`,
-  ].join(' ')
+  )
+  return parts.join(' ')
+}
+
+export function buildAgentPlanningInput(
+  body: any,
+  message: string,
+  referenceImages: ReferenceImageEntry[] = normalizeReferenceImages(body?.referenceImages),
+  referenceBrief: ReferenceBrief | null = normalizeReferenceBrief(body?.referenceBrief),
+) {
+  return {
+    message,
+    history: Array.isArray(body?.history) ? body.history.slice(-8) : [],
+    canvasContext: body?.canvasContext || {},
+    aspectRatio: body?.aspectRatio || '1:1',
+    resolution: body?.resolution || '1k',
+    hasReferenceImages: Boolean(body?.hasReferenceImages) || referenceImages.length > 0,
+    referenceImages: referenceImages.map((entry, index) => ({
+      index: index + 1,
+      assetId: entry.assetId,
+      role: entry.role,
+      label: entry.label,
+    })),
+    referenceBrief,
+  }
+}
+
+function normalizeReferenceImages(value: unknown): ReferenceImageEntry[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry: any) => {
+      const assetId = String(entry?.assetId || entry?.id || '').trim()
+      if (!assetId) return null
+      return {
+        assetId,
+        role: cleanShortText(entry?.role, 'reference'),
+        label: cleanShortText(entry?.label || entry?.name, ''),
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 6) as ReferenceImageEntry[]
+}
+
+async function loadReferenceImages(
+  env: Env,
+  entries: ReferenceImageEntry[],
+  sessionId: string,
+  userId: string | null,
+): Promise<ResolvedReferenceImage[]> {
+  const images: ResolvedReferenceImage[] = []
+  for (const entry of entries) {
+    const asset = await getAsset(env, entry.assetId)
+    if (!asset) continue
+    const canRead = asset.userId
+      ? asset.userId === userId
+      : asset.sessionId === sessionId
+    if (!canRead) continue
+
+    const dataUrl = await getAssetDataUrl(env, entry.assetId)
+    if (!dataUrl) continue
+    const image = splitDataUrl(dataUrl)
+    if (!image.base64) continue
+    images.push({
+      ...entry,
+      dataUrl,
+      mime: image.mime,
+      base64: image.base64,
+    })
+  }
+  return images
+}
+
+async function analyzeReferenceImages(
+  baseUrl: string,
+  visionKey: string,
+  message: string,
+  images: ResolvedReferenceImage[],
+): Promise<ReferenceBrief | null> {
+  const raw = await callTextModel(
+    baseUrl,
+    visionKey,
+    VISION_MODEL,
+    buildReferenceAnalysisMessages(message, images),
+    { maxTokens: 3000, temperature: 0.2 },
+  )
+  return normalizeReferenceBrief(parseJsonObject(raw))
+}
+
+export function buildReferenceAnalysisMessages(message: string, images: ResolvedReferenceImage[]) {
+  const referenceList = images
+    .map((image, index) => `Image ${index + 1}: role=${image.role || 'reference'}${image.label ? `, label=${image.label}` : ''}, mime=${image.mime}`)
+    .join('\n')
+  const content: any[] = [{
+    type: 'text',
+    text: [
+      `用户目标：${message}`,
+      '',
+      '请先理解这些上传参考图，抽取商品、卖点、文案层级、画面结构、素材风格，再输出结构化 JSON。不要生成图片 prompt，不要写解释。',
+      '',
+      '需要抽取：',
+      '- product: 商品类型、目标人群、场景、款式/品类等',
+      '- sellingPoints: 从图中能看出的核心卖点，优先保留原文或接近原文',
+      '- copyHierarchy: 主标题、副标题、卖点短句、角标/标签、CTA 等层级',
+      '- pageStructure: 首屏、卖点区、icon 组、特写、对比、场景图、长图局部等结构',
+      '- visualStyle: 配色、构图、字体气质、图标风格、背景/光线/材质风格',
+      '- materialDetails: 面料、工艺、纹理、功能证明、细节特写',
+      '- evidence: 每个判断来自哪些可见证据',
+      '- missingEvidence: 看不清或缺失但会影响生图的关键信息',
+      '',
+      '返回严格 JSON，字段为 product, sellingPoints, copyHierarchy, pageStructure, visualStyle, materialDetails, evidence, missingEvidence。',
+      '',
+      `参考图列表：\n${referenceList}`,
+    ].join('\n'),
+  }]
+  for (const image of images) {
+    content.push({
+      type: 'image_url',
+      image_url: { url: image.dataUrl },
+    })
+  }
+  return [
+    {
+      role: 'system',
+      content: `You are an ecommerce reference-image understanding agent.
+Analyze uploaded marketplace/PDP/detail-page images as evidence for a downstream autonomous image-design agent.
+Extract only what is visible or strongly implied. Preserve useful Chinese copy exactly when legible.
+Return strict JSON only. Do not return Markdown.`,
+    },
+    {
+      role: 'user',
+      content,
+    },
+  ]
+}
+
+export function normalizeReferenceBrief(value: any): ReferenceBrief | null {
+  const source = value?.referenceBrief || value?.reference_brief || value?.brief || value?.analysis || value
+  if (!source || typeof source !== 'object') return null
+  const brief: ReferenceBrief = {
+    product: normalizeRecord(source.product || source.productInfo || source.product_info),
+    sellingPoints: normalizeStringList(source.sellingPoints || source.selling_points || source.keySellingPoints || source.key_selling_points),
+    copyHierarchy: normalizeRecord(source.copyHierarchy || source.copy_hierarchy || source.textHierarchy || source.text_hierarchy),
+    pageStructure: normalizeStringList(source.pageStructure || source.page_structure || source.layoutStructure || source.structure),
+    visualStyle: normalizeRecord(source.visualStyle || source.visual_style || source.style),
+    materialDetails: normalizeStringList(source.materialDetails || source.material_details || source.details),
+    evidence: normalizeStringList(source.evidence || source.visualEvidence || source.visual_evidence),
+    missingEvidence: normalizeStringList(source.missingEvidence || source.missing_evidence || source.unknowns),
+  }
+  const hasSignal = Object.keys(brief.product).length > 0
+    || brief.sellingPoints.length > 0
+    || Object.keys(brief.copyHierarchy).length > 0
+    || brief.pageStructure.length > 0
+    || Object.keys(brief.visualStyle).length > 0
+    || brief.materialDetails.length > 0
+    || brief.evidence.length > 0
+  return hasSignal ? brief : null
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const output: Record<string, unknown> = {}
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const cleanKey = cleanShortText(key, '')
+    if (!cleanKey) continue
+    const cleanValue = sanitizeBriefValue(raw)
+    if (cleanValue === '' || cleanValue === null) continue
+    if (Array.isArray(cleanValue) && cleanValue.length === 0) continue
+    if (typeof cleanValue === 'object' && !Array.isArray(cleanValue) && Object.keys(cleanValue).length === 0) continue
+    output[cleanKey] = cleanValue
+  }
+  return output
+}
+
+function sanitizeBriefValue(value: unknown): unknown {
+  if (Array.isArray(value)) return normalizeStringList(value)
+  if (value && typeof value === 'object') return normalizeRecord(value)
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  return text.slice(0, 500)
+}
+
+function normalizeStringList(value: unknown): string[] {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[,\n，、;；]/)
+      : []
+  return source
+    .map((item) => String(item || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 16)
+}
+
+function formatReferenceBriefForPrompt(brief: ReferenceBrief | null): string {
+  if (!brief) return ''
+  const parts: string[] = []
+  const product = Object.entries(brief.product)
+    .map(([key, value]) => `${key}: ${formatBriefValue(value)}`)
+    .filter(Boolean)
+    .join('; ')
+  if (product) parts.push(`Product (${product})`)
+  if (brief.sellingPoints.length) parts.push(`Selling points: ${brief.sellingPoints.join(', ')}`)
+  const copy = Object.entries(brief.copyHierarchy)
+    .map(([key, value]) => `${key}: ${formatBriefValue(value)}`)
+    .filter(Boolean)
+    .join('; ')
+  if (copy) parts.push(`Copy hierarchy (${copy})`)
+  if (brief.pageStructure.length) parts.push(`Page structure: ${brief.pageStructure.join(', ')}`)
+  if (brief.materialDetails.length) parts.push(`Material/detail evidence: ${brief.materialDetails.join(', ')}`)
+  return parts.join(' | ').slice(0, 1800)
+}
+
+function formatBriefValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(formatBriefValue).filter(Boolean).join(', ')
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) => `${key}: ${formatBriefValue(nested)}`)
+      .filter(Boolean)
+      .join(', ')
+  }
+  return String(value || '').trim()
+}
+
+function splitDataUrl(dataUrl: string): { mime: string; base64: string } {
+  const match = String(dataUrl || '').match(/^data:([^;,]+);base64,(.+)$/i)
+  return {
+    mime: match?.[1] || 'image/png',
+    base64: match?.[2] || '',
+  }
 }
 
 function inferShouldGenerate(message: string) {
@@ -371,115 +606,6 @@ function inferShouldGenerate(message: string) {
   const planningOnly = /(分析|建议|方案|计划|思路|评价|检查|review|不要出图|先不要生成|不生成|如何|怎么)/i.test(message)
   const generate = /(生成|出图|做一张|画一张|创建|延展|改成|重绘|海报|主图|banner|poster|generate|create|make|render)/i.test(text)
   return generate || !planningOnly
-}
-
-export function normalizeCreativeMode(value: unknown): CreativeMode {
-  return String(value || '') === 'poster_banner' ? 'poster_banner' : 'image'
-}
-
-export function normalizePosterBrief(value: any = {}): PosterBrief {
-  const layout = ['left', 'right', 'top', 'bottom', 'center'].includes(String(value?.layout || ''))
-    ? String(value.layout)
-    : defaultPosterLayout(value?.aspectRatio)
-  const aspectRatio = normalizeAgentAspectRatio(value?.aspectRatio) || '1:1'
-  const resolution = normalizeAgentResolution(value?.resolution) || '1k'
-  return {
-    format: ['poster', 'banner'].includes(String(value?.format || '')) ? String(value.format) : defaultPosterFormat(aspectRatio),
-    headline: cleanPosterText(value?.headline || inferPosterHeadline(value?.sourceRequest), 36),
-    subheadline: cleanPosterText(value?.subheadline, 72),
-    cta: cleanPosterText(value?.cta, 18),
-    badges: Array.isArray(value?.badges)
-      ? value.badges.map((item: any) => cleanPosterText(item, 16)).filter(Boolean).slice(0, 4)
-      : [],
-    layout,
-    copySafeArea: cleanPosterText(value?.copySafeArea, 32) || defaultCopySafeArea(layout),
-    aspectRatio,
-    resolution,
-    sourceRequest: cleanPosterText(value?.sourceRequest, 200),
-  }
-}
-
-export function buildPosterBannerBasePrompt(message: string, brief: PosterBrief, aspectRatio: string, resolution: string): string {
-  const safeArea = brief.copySafeArea || defaultCopySafeArea(brief.layout)
-  const format = brief.format === 'poster' ? 'poster' : 'banner'
-  return hardenPosterBannerBasePrompt([
-    'Use case: ads-marketing',
-    `Asset type: text-free visual base for a ${format} that will receive local typography overlays`,
-    `Primary request: ${message}`,
-    `Scene/backdrop: create one coherent commercial hero scene that supports the request, with a clear focal subject and campaign-ready production quality.`,
-    `Scene safety: if the request references Hong Kong, city streets, cinema neon, chips, data centers, or screens, express them through blank light panels, architecture, reflections, cables, glow, and silhouettes; do not use signs, written labels, or readable displays.`,
-    `Composition/framing: reserve clean, low-detail copy space in the ${safeArea}; keep the focal subject, face, hands, logos, and high-contrast props outside that text-safe region; use a single cinematic camera viewpoint.`,
-    `Lighting/mood: coherent cinematic/commercial lighting, controlled contrast, refined color harmony, restrained premium finish.`,
-    `Aspect ratio: ${aspectRatio}; ${resolution} class output.`,
-    'Text: render no readable words, no numbers, no letter-like marks, no pseudo-text; all typography will be added locally after image generation.',
-    'Avoid: watermark, border, UI chrome, fake captions, cluttered collage, split-screen, tiled panels, multiple unrelated vignettes, decorative card piles, distorted logos, unreadable tiny text, and any object that normally carries writing.',
-  ].join('\n'))
-}
-
-export function hardenPosterBannerBasePrompt(prompt: string): string {
-  const text = sanitizePosterBannerBasePrompt(prompt)
-  const hardRules = [
-    'Hard text-free base constraints:',
-    '- Do not include signboards, billboards, posters-within-poster, street signs, store signs, road markings, license plates, newspapers, documents, captions, subtitles, labels, logos, emblems, badges, screen UI, terminal code, chip labels, product labels, or any written marks.',
-    '- If the scene would normally contain signage, screens, chips, storefronts, or documents, make those surfaces completely blank, blurred, abstract, or out of focus with zero glyph-like strokes.',
-    '- Use architecture, lighting, silhouettes, props, facial expression, color, and composition to communicate the idea; reserve every real word for the local compositor.',
-  ]
-  return `${text}\n\n${getPosterBannerCompositionRules()}\n\n${hardRules.join('\n')}`
-}
-
-export function sanitizePosterBannerBasePrompt(prompt: string): string {
-  return String(prompt || '')
-    .replace(/\bneon-lit\s+(hong kong\s+)?street(s)?\b/gi, 'abstract neon-lit architecture with blank light panels and no signage')
-    .replace(/\bneon\s+sign(age|s)?\b/gi, 'abstract neon reflections with no glyphs')
-    .replace(/\bsignboards?\b/gi, 'blank light panels')
-    .replace(/\bbillboards?\b/gi, 'blank architectural light panels')
-    .replace(/\bstreet signs?\b/gi, 'unmarked street fixtures')
-    .replace(/\bstore signs?\b/gi, 'blank storefront glow')
-    .replace(/\bscreen text\b/gi, 'blank screen glow')
-    .replace(/\bchip labels?\b/gi, 'unmarked chip surfaces')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-export function getPosterBannerCompositionRules(): string {
-  return [
-    'Unified poster/banner composition rules:',
-    '- Build one integrated hero image, not a puzzle, collage, grid, moodboard, contact sheet, or multi-panel layout.',
-    '- Use one primary focal subject and one continuous environment; secondary details must support depth and atmosphere instead of becoming separate mini-scenes.',
-    '- Keep the reserved copy area calm, low-detail, and contrast-controlled so local typography sits naturally on top.',
-    '- Keep faces, hands, logos, high-contrast props, and the primary subject out of the reserved copy area.',
-    '- For Hong Kong, street, cinema, technology, chip, or data-center themes, use blank luminous surfaces, abstract circuitry, architecture, atmosphere, and reflections; avoid neon signboards entirely.',
-    '- Avoid split-screen, before-after comparisons, repeated portraits, floating stickers, nested frames, isolated cards, and unrelated object clusters.',
-  ].join('\n')
-}
-
-function inferPosterHeadline(value: unknown): string {
-  const text = cleanPosterText(value, 80)
-  if (!text) return '主题海报'
-  return cleanPosterText(text.split(/[，。！？,.!?；;：:\n]/)[0], 28) || '主题海报'
-}
-
-function cleanPosterText(value: unknown, maxLength: number): string {
-  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength)
-}
-
-function defaultPosterFormat(aspectRatio: string): string {
-  return ['9:16', '3:4', '1:4', '1:8'].includes(aspectRatio) ? 'poster' : 'banner'
-}
-
-function defaultPosterLayout(aspectRatio: unknown): string {
-  const ratio = normalizeAgentAspectRatio(aspectRatio) || '1:1'
-  return ['9:16', '3:4', '1:4', '1:8'].includes(ratio) ? 'bottom' : 'left'
-}
-
-function defaultCopySafeArea(layout: string): string {
-  return ({
-    left: 'left 42%',
-    right: 'right 42%',
-    top: 'top 32%',
-    bottom: 'bottom 35%',
-    center: 'center 52%',
-  })[layout] || 'left 42%'
 }
 
 function parseJsonObject(raw: string | null): any {
@@ -565,9 +691,6 @@ function normalizeAgentActions(value: any, passthrough: AgentResult) {
       prompt: value.prompt,
       aspectRatio: value.aspectRatio,
       resolution: value.resolution,
-      creativeMode: value.creativeMode,
-      promptStyle: value.promptStyle,
-      posterBrief: value.posterBrief,
     }, 0, fallbackAction)].filter(Boolean)
   }
   return passthrough.actions
@@ -586,22 +709,14 @@ function normalizeAgentAction(action: any, index: number, fallbackAction: any = 
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80)
-  const creativeMode = normalizeCreativeMode(action?.creativeMode || fallbackAction?.creativeMode)
   return {
     id,
     type,
     title,
-    prompt: creativeMode === 'poster_banner' ? hardenPosterBannerBasePrompt(prompt) : prompt,
+    prompt,
     aspectRatio,
     resolution,
-    creativeMode,
-    promptStyle: action?.promptStyle === 'visual_base' || (creativeMode === 'poster_banner' && fallbackAction?.promptStyle === 'visual_base') ? 'visual_base' : '',
-    posterBrief: creativeMode === 'poster_banner' ? normalizePosterBrief({
-      ...(fallbackAction?.posterBrief || {}),
-      ...(action?.posterBrief || action?.brief || {}),
-      aspectRatio: aspectRatio || fallbackAction?.aspectRatio,
-      resolution: resolution || fallbackAction?.resolution,
-    }) : null,
+    creativeMode: 'image',
   }
 }
 
