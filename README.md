@@ -1,7 +1,5 @@
 # Visual Studio · 品牌视觉工作台
 
-**[访问抓虾 Harness 官网 · 查看介绍与下载](https://harness.crawshrimp.com/)**
-
 Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告素材运营的 Cloudflare Pages 应用。它把多图批处理、无限画布、AI 生图和项目管理整合在一个原生 HTML/CSS/JavaScript 单页工作台里。
 
 仓库地址：<https://github.com/howtimeschange/Visual-Studio>
