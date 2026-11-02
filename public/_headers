@@ -7,14 +7,14 @@
 /lovart*
   Cache-Control: no-cache
 /app.js
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: no-cache
 /styles.css
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: no-cache
 /js/*
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: no-cache
 /css/*
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: no-cache
 /admin/*
   Cache-Control: no-cache
 /icons.svg
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: no-cache
