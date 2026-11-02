@@ -56,6 +56,7 @@ MODELJETTY_ORIGIN = "https://modeljetty.com"
 MODELJETTY_CLIENT_ID = "visual-studio"
 MODELJETTY_AGENT_MODEL = "gemini-3.8-flash-medium"
 MODELJETTY_VISION_MODEL = "gemini-3.8-flash-medium"
+MODELJETTY_IMAGE_TASKS_ENABLED = "true"
 
 [triggers]
 crons = ["*/1 * * * *"]

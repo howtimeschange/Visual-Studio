@@ -51,6 +51,7 @@ MODELJETTY_CLIENT_ID = "visual-studio"
 MODELJETTY_REDIRECT_URI = "https://image.crawshrimp.com/api/auth/modeljetty/callback"
 MODELJETTY_AGENT_MODEL = "gemini-3.8-flash-medium"
 MODELJETTY_VISION_MODEL = "gemini-3.8-flash-medium"
+MODELJETTY_IMAGE_TASKS_ENABLED = "true"
 # RELAY_BASE_URL = "https://api.1xm.ai/v1"
 # ADMIN_USER_IDS = "user_<id>" # comma-separated trusted account IDs for /admin
 # VS_IMAGE_REQUEST_TIMEOUT_MS = "600000"
