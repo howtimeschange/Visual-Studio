@@ -223,7 +223,7 @@ test('OIDC start uses PKCE S256, nonce, server-side single-use state and safe re
 test('OIDC callback verifies signature and subject, creates a separate local identity and never returns credentials', async () => withFetch(async () => {
   const { mod, cleanup } = await harness()
   const signer = await signing()
-  const env = { ...environment(), CREDENTIAL_KEK: undefined, VS_JOB_CREDENTIAL_KEK: 'shared-flow-and-token-key' }
+  const env = { ...environment(), CREDENTIAL_KEK: undefined, MODELJETTY_CREDENTIAL_KEK: 'dedicated-flow-and-token-key' }
   try {
     const existing = await mod.createUser(env, { email: 'same@example.com', name: 'Existing', passwordHash: 'hash', passwordSalt: 'salt' })
     const flow = await begin(mod, env)
@@ -577,3 +577,16 @@ test('unavailable managed image model is rejected by read-only catalog before pa
     assert.equal(calls.length,1)
   }finally{await cleanup()}
 }))
+
+test('dedicated shared credential key executes queued credentials without requiring the legacy account key', async () => {
+  const {mod,cleanup}=await harness()
+  const env={MODELJETTY_CREDENTIAL_KEK:'dedicated-production-fixture',VS_JOBS_QUEUE:{send:async()=>{}}}
+  try {
+    const submitted=await mod.submitGenerateDirectJob(env,{prompt:'credential boundary only',clientKeys:{gptImageApiKey:'server-only-fixture'}})
+    const job=await mod.getJob(env,submitted.jobId)
+    const keys=await mod.loadJobClientKeys({MODELJETTY_CREDENTIAL_KEK:env.MODELJETTY_CREDENTIAL_KEK},job)
+    assert.equal(keys.gptImageApiKey,'server-only-fixture')
+    const sealed=await mod.getSealedCredential(env,job.configJson.sealedCredentialId)
+    await assert.rejects(mod.unsealJson(sealed.ciphertext,undefined))
+  }finally{await cleanup()}
+})

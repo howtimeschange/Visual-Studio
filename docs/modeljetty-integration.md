@@ -49,6 +49,7 @@
 | `MODELJETTY_ALLOW_LOCAL_HTTP` | 仅本地显式设为 `true` 时允许 `127.0.0.1` / `localhost` HTTP，不允许其他 HTTP host |
 | `MODELJETTY_CLIENT_ID` | ModelJetty 已登记的专用 Web client |
 | `MODELJETTY_CLIENT_SECRET` | 若登记机密客户端，配置对应 secret |
+| `MODELJETTY_CREDENTIAL_KEK` | Pages 与 Queue 共享的专用强随机 secret，保护联合登录状态、托管令牌和新队列凭据；不替换旧账户密钥 |
 | `MODELJETTY_REDIRECT_URI` | 精确 callback，必须与当前站点 origin 一致 |
 | `CREDENTIAL_KEK` | Pages 账号 API Key 和授权 state 的加密 secret；保留旧值，避免现存账号配置不可读。未配置独立共享作业密钥时也作为连接封装的兼容值 |
 | `VS_JOB_CREDENTIAL_KEK` | Pages/Queue 必须一致的共享作业密钥；配置后也以独立用途封装新 ModelJetty 连接，使 Queue 无需读取旧账号 API Key 密钥即可使用托管算力 |

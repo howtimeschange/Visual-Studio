@@ -13,22 +13,23 @@ type Tokens = { accessToken: string; refreshToken: string; expiresAt: number }
 const fault = (message: string, status = 503) => Object.assign(new Error(message), { status })
 
 function flowSealSecret(env: Env): string {
+  if (env.MODELJETTY_CREDENTIAL_KEK) return `visual-studio/modeljetty-flow/v1:${env.MODELJETTY_CREDENTIAL_KEK}`
   if (env.VS_JOB_CREDENTIAL_KEK) return `visual-studio/modeljetty-flow/v1:${env.VS_JOB_CREDENTIAL_KEK}`
   if (env.CREDENTIAL_KEK) return env.CREDENTIAL_KEK
   throw fault('ModelJetty 连接加密密钥未配置', 503)
 }
 
-// Managed account connections are used by Pages and Queue. Reuse their existing
-// shared job key with a separate encryption purpose, without rotating the Pages
-// account-key secret or making old user API-key records unreadable.
+// Pages and Queue share the dedicated managed-credential key. Existing shared
+// job/account keys remain readable without rotating historical account secrets.
 function tokenSealSecret(env: Env): string {
+  if (env.MODELJETTY_CREDENTIAL_KEK) return `visual-studio/modeljetty-token/v1:${env.MODELJETTY_CREDENTIAL_KEK}`
   if (env.VS_JOB_CREDENTIAL_KEK) return `visual-studio/modeljetty-token/v1:${env.VS_JOB_CREDENTIAL_KEK}`
   if (env.CREDENTIAL_KEK) return env.CREDENTIAL_KEK
   throw fault('ModelJetty 连接加密密钥未配置', 503)
 }
 
 async function readTokens(env: Env, ciphertext: string): Promise<Tokens> {
-  const secrets = [...new Set([tokenSealSecret(env), env.CREDENTIAL_KEK].filter(Boolean))]
+  const secrets = [...new Set([tokenSealSecret(env), env.VS_JOB_CREDENTIAL_KEK && `visual-studio/modeljetty-token/v1:${env.VS_JOB_CREDENTIAL_KEK}`, env.CREDENTIAL_KEK].filter(Boolean))]
   for (const secret of secrets) {
     try { return await unsealJson<Tokens>(ciphertext, secret) } catch { /* Legacy Pages-encrypted connection. */ }
   }
@@ -115,7 +116,7 @@ export async function verifyModeljettyIdToken(env: Env, raw: string, nonce: stri
 
 export async function startModeljettyLogin(env: Env, request: Request) {
   const config = modeljettyConfig(env)
-  if (!config.clientId || !config.redirectUri || !(env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)) throw fault('ModelJetty 联合登录尚未配置')
+  if (!config.clientId || !config.redirectUri || !(env.MODELJETTY_CREDENTIAL_KEK || env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)) throw fault('ModelJetty 联合登录尚未配置')
   if (!env.VS_DB && new URL(request.url).protocol === 'https:') throw fault('ModelJetty 联合登录需要 D1 持久化')
   const callback = new URL(config.redirectUri)
   const requestUrl = new URL(request.url)
@@ -132,19 +133,19 @@ export async function startModeljettyLogin(env: Env, request: Request) {
 
 export async function finishModeljettyLogin(env: Env, request: Request) {
   const config = modeljettyConfig(env)
-  if (!config.clientId || !config.redirectUri || !(env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)) throw fault('ModelJetty 联合登录尚未配置')
+  if (!config.clientId || !config.redirectUri || !(env.MODELJETTY_CREDENTIAL_KEK || env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)) throw fault('ModelJetty 联合登录尚未配置')
   const url = new URL(request.url)
   const state = url.searchParams.get('state') || ''
   const cookie = /(?:^|;\s*)vs_modeljetty_flow=([A-Za-z0-9_-]+)/.exec(request.headers.get('Cookie') || '')?.[1]
   if (!state || state !== cookie) throw fault('ModelJetty state mismatch，请重新登录', 400)
   const encrypted = await consumeOAuthFlow(env, await sha256Hex(state))
   if (!encrypted) throw fault('ModelJetty 授权已过期或已使用', 400)
-  let flow: Flow
-  try { flow = await unsealJson<Flow>(encrypted, flowSealSecret(env)) }
-  catch (error) {
-    if (!env.CREDENTIAL_KEK) throw error
-    flow = await unsealJson<Flow>(encrypted, env.CREDENTIAL_KEK)
+  const flowSecrets = [...new Set([flowSealSecret(env), env.VS_JOB_CREDENTIAL_KEK && `visual-studio/modeljetty-flow/v1:${env.VS_JOB_CREDENTIAL_KEK}`, env.CREDENTIAL_KEK].filter(Boolean))]
+  let flow: Flow | undefined
+  for (const secret of flowSecrets) {
+    try { flow = await unsealJson<Flow>(encrypted, secret); break } catch { /* Flow started before deployment. */ }
   }
+  if (!flow) throw fault('ModelJetty 登录状态已失效，请重新登录', 401)
   const auth = await getAuthContext(env, request)
   if ((auth.user?.id || null) !== flow.userId) throw fault('授权期间账号发生变化，请重新登录', 409)
   if (url.searchParams.get('error') || !url.searchParams.get('code') || (url.searchParams.has('iss') && url.searchParams.get('iss') !== config.issuer)) throw fault('ModelJetty 授权未完成', 400)

@@ -336,11 +336,12 @@ export async function maybeSealClientKeys(env: Env, jobId: string, clientKeys: C
 }
 
 function jobCredentialSecret(env: Env): string | undefined {
-  return env.VS_JOB_CREDENTIAL_KEK || env.CREDENTIAL_KEK
+  return env.MODELJETTY_CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK || env.CREDENTIAL_KEK
 }
 
 function jobCredentialSecrets(env: Env): string[] {
   return [...new Set([
+    String(env.MODELJETTY_CREDENTIAL_KEK || '').trim(),
     String(env.VS_JOB_CREDENTIAL_KEK || '').trim(),
     String(env.CREDENTIAL_KEK || '').trim(),
   ].filter(Boolean))]

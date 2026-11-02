@@ -3900,7 +3900,7 @@ function renderModeljettyAccount() {
     $('#account-modeljetty-disconnect').disabled = activeWork
     $('#account-modeljetty-disconnect').title = activeWork ? '请先等已受理任务完成后断开授权' : '撤销 Visual Studio 的 ModelJetty 访问授权'
   }
-  if (!state.account.modeljettyUsage) status.textContent = info?.connected
+  if (!state.account.modeljettyUsage) status.textContent = !info ? '正在检查 ModelJetty 连接…' : info.connected
     ? info.imageTasksEnabled ? '已关联 ModelJetty，可使用账号算力生图。' : '已关联 ModelJetty，可读取账号余额。生图需开通异步任务。'
     : info?.loginEnabled ? '授权后关联 ModelJetty 账户与算力。' : 'ModelJetty 联合登录尚未开放，当前可在设置中配置 API Key。'
 }
