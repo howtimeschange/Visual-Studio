@@ -15,7 +15,7 @@
 
 ## 发布顺序与基线
 
-先 ModelJetty 最小账号服务配套，再 VS Queue，最后 Pages 指纹资源。没有 schema migration 或新密钥配置；不变更 Codex 授权方式、sub2api 或计费价格。
+先 ModelJetty 最小账号服务配套，再 VS Queue，最后 Pages 指纹资源。VS 无新增 schema migration；ModelJetty 兼容新增原始响应分块表 `account_image_raw_chunks`，保留旧记录。两端均无新密钥配置，不变更 Codex 授权方式、sub2api 或计费价格。
 
 - VS 发布前 main / origin/main：`8de7171c4dd793f0538b3df10bac31cf7fb0d004`。
 - Pages 发布前 production：`2a720ad1-6837-477e-a802-cdda36287386`。
@@ -24,8 +24,29 @@
 
 ## 发布与线上验收
 
-待执行后回填版本和线上验收证据，不以构建成功替代已上线。
+发布已完成，正式站点 [image.crawshrimp.com](https://image.crawshrimp.com)。
+
+| 组件 | 已发布版本 | 验收 |
+| --- | --- | --- |
+| ModelJetty accounts | `visual-studio-image-20261102-v2`，镜像 `sha256:255fe92936b5371ad0d8e00425a3dd0b8c9372619865638d37a7d7a625d13d4a` | 独立候选19项零skip；真实HTTPS目录v2和5个原任务四种读取哈希一致，零新增付费推理 |
+| VS Queue | `458fc334-d97a-4fe1-91cc-3bdbb2fee7b3`，源码 `1ca72d8` | deployments 回读100%，三路 producer/consumer 与定时恢复已发布 |
+| VS Pages 最终版本 | `4fa9b4b7-fc5c-4d03-b2ae-9d9dde13528a`，源码 `7e86fe6d4ff3ab80e4924aaa98767cde991b496f` | production/main 元数据及正式域名资源逐字节匹配 |
+
+核心功能提交 `1ca72d8b98ee0774a936c5c241b65ad65c1d9728`，初次 Pages deployment `7208a346-45cc-4bc2-9d82-8898327efda8`。线上走查发现 Chrome 仍复用旧 SVG sprite：新增发送箭头未显示，但 DOM 样式正常、服务端 SVG 含新 symbol。补丁 `7e86fe6` 为静态和动态图标引用加版本，重新跑全量352/352后仅更新 Pages；同一 Chrome 页面刷新后箭头恢复。Queue 源码没有因此变化，不重复发布 worker。
+
+正式域名最终资源回读：
+
+- `/_runtime/app-ZFCU62TG.js` SHA256 `211bba18eee7dcd5fd0da7d8de2cc79b4baec58bc5f24ee215130e06c24bac9f`。
+- `/_runtime/styles-4QXTTYDJ.css` SHA256 `d7c5956e105f24b3b9bb6c9464b4a7592d470baa70b0e085637390c1056d912e`。
+- `/css/workspace-layout.css` SHA256 `835e6d75d3bfac113501ac2336b6a39b5998c9f2703599f9775a45e9b0bcdcf0`。
+- `/icons.svg?v=20261102-workspace` SHA256 `e956fdf36587958f2f8c2b5a113a774c715d84f3340402dfd7a51274af4ce510`。
+
+以上均与实际发布临时产物一致，见 `/tmp/vs-pixel-20261102/public-final-release.json`、`pages-final-release.txt`、`queue-after-release.txt` 和发布日志。GitHub main 已回读为功能及图标补丁源码；本记录后续单独提交，不需要重发运行代码。
+
+登录后的正式画布已实际查看：原2张作品与对话可读，左侧Agent和左对齐标签生效；模型浮层完整显示三款模型；GPT4K方形显示实际2880×2880，实验提示正常；自定义4097宽度显示校验错误、禁用应用并给出建议值，取消后恢复尺寸；验证后还原原有Nano Banana 2 / 1:1 / 4K偏好。没有发送生成请求，旧失败记录保留且未重试。`production-workspace-final.png`、`production-size-invalid.png` 保存于本地证据目录；本次检查未见 ReferenceError、SyntaxError 或 TypeError。
+
+ModelJetty 的完整最小发布、备份、容器身份、19项检查、生产回读及回滚记录在关联仓库 `docs/verification/visual-studio-image-release-2026-11-02/README.md`。其源码身份为原不可变生产镜像加7文件补丁和manifest，未将大量dirty源码整体提交或推送。仅账号服务切换，New API、sub2api、Bot API/worker和PostgreSQL镜像及StartedAt均保持不变。旧图片任务不追补delivery，新任务才写交付审计；本次没有证明Codex精确4K/high质量遵从已恢复。
 
 ## 回滚
 
-Queue 可回到发布前 `c2bdefa3-bbb8-44cd-ba8f-b9e694834951` 版本；Pages 可在 Cloudflare 部署管理页回滚至上述 production deployment。发布日志保存于本地证据目录。ModelJetty 的独立镜像回滚由配套发布记录提供。回滚不能删除在途任务、作业收据或已生成原图，未知调用仍只回查。
+Queue 可通过 `npx wrangler rollback c2bdefa3-bbb8-44cd-ba8f-b9e694834951 --config wrangler.queue.toml` 回滚。Pages 可在 Cloudflare 部署管理页回滚至上述发布前 production deployment；不要把首次上线但缺图标缓存修正的7208版本作为首选。ModelJetty 独立镜像回滚使用配套记录中的原3份Compose，仅重建账号服务，不恢复整库、不删分块表。回滚不能删除在途任务、作业收据或已生成原图，未知调用仍只回查。
