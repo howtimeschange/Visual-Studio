@@ -201,6 +201,7 @@ npm run dev:local-queue
 node --check public/app.js
 node --check public/js/shared.js
 node --test tests/*.test.mjs
+npm run build:public
 npx wrangler pages functions build --outdir /tmp/image-translator-functions-check
 npx wrangler deploy --config wrangler.queue.toml --dry-run
 git diff --check
@@ -213,12 +214,16 @@ npm run deploy
 npm run deploy:queue
 ```
 
-脚本会执行：
+`npm run deploy` 先将 `public/` 复制到临时目录，合并并压缩应用和后台的 JS/CSS，生成带内容指纹的文件名，再改写临时 HTML 的入口并发布。子模块或导入样式变化也会改变入口指纹，避免正式域名 CDN 的浏览器缓存保留旧版本；源码和本地开发目录保持不变。`npm run build:public` 可单独检查构建，输出临时目录和入口大小。
+
+发布最终执行：
 
 ```bash
-wrangler pages deploy public --project-name=image-translator
+wrangler pages deploy <构建输出的临时目录> --project-name=image-translator
 wrangler deploy --config wrangler.queue.toml
 ```
+
+生产发布使用 `npm run deploy`，不要绕过资源指纹构建直接上传 `public/`。修改 Queue 后先发布 Queue，再发布 Pages。
 
 ## 配置与密钥
 

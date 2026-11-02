@@ -31,12 +31,13 @@ Use the current implementation as the source of truth. `README.md`, `wrangler.to
 - Check workspace helpers: `node --check public/js/workspace-ui.js`
 - Run tests: `node --test tests/*.test.mjs`
 - Build Pages Functions: `npx wrangler pages functions build --outdir /tmp/image-translator-functions-check`
+- Build fingerprinted production assets: `npm run build:public` (temporary output; source stays unchanged)
 - Queue worker dry run: `npx wrangler deploy --config wrangler.queue.toml --dry-run`
 - Whitespace check: `git diff --check`
 - Deploy Pages: `npm run deploy`
 - Deploy queue worker: `npm run deploy:queue`
 
-There are no dedicated npm scripts for test, lint, typecheck, build, or format at the time of this guide. Prefer the explicit commands above unless package scripts are added later.
+There are no dedicated npm scripts for test, lint, typecheck, or format. Use `npm run deploy` for Pages so the fingerprinted asset build is not bypassed; local development continues to serve `public/` directly.
 
 ## Working Rules
 
