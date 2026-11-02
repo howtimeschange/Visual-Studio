@@ -37,8 +37,8 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 - 图片元素支持移动、缩放、删除、下载，以及“用此图生成”。
 - 生图卡片支持模型、画幅比例、分辨率 `1k / 2k / 4k`、参考图和 Agent 开关。
 - AI 助手会读取当前画布上下文，判断是只做分析建议，还是生成图片并添加回画布；当需求缺少关键风格方向时，会先给出可点击的风格建议。
-- AI 助手是单一智能体入口，不再提供固定海报/banner 模式；用户可以直接描述主图、详情页、海报、KV、Icon 卖点图等目标，由 Agent 判断是否生成、拆分几个 action、以及如何组织最终 prompt。
-- 当用户上传参考图时，Agent 会先通过视觉理解抽取商品、核心卖点、文案层级、画面结构、素材风格和细节证据，再把这份 `referenceBrief` 作为规划依据生成 `actions[].prompt`；参考图随后仍会作为图像输入传给生图模型。
+- AI 助手是单一智能体入口，统一使用自动创作，支持自动匹配、商品三图、品牌海报、参考图延展工作流。规划、图片生成与独立质检由服务端 D1 + Queue 持续执行，关闭页面后可继续并恢复记录。执行记录按会话、运行、任务和作品组织，支持参考图角色、停止后续和安全回查原任务。架构及 OpenDesign 参考来源见 [Design Agent harness](docs/design-agent-harness.md)。
+- 当用户上传或引用参考图时，Agent 将视觉理解与规划合并为一次多模态请求，结合商品、文案、画面结构和素材细节生成 `actions[].prompt`；参考图随后仍作为图像输入传给生图模型。未发送的文字与参考图按账号和画布保存为草稿。
 - 选中图片可导出 PSD：默认保留原图尺寸底层，也可通过 Vision / Design Agent 识别文字、规划语义图层、生成透明主体层和修补背景。
 - 首次进入画布默认展开 AI 助手。
 - 画布项目通过 `/api/canvas/projects` 系列接口保存；localStorage 作为快速缓存和恢复兜底。
@@ -232,15 +232,15 @@ wrangler pages secret put BANANA_PRO_API_KEY --project-name=image-translator
 wrangler pages secret put GPT_IMAGE_API_KEY  --project-name=image-translator
 wrangler pages secret put RELAY_BASE_URL     --project-name=image-translator
 wrangler pages secret put CREDENTIAL_KEK     --project-name=image-translator
-wrangler pages secret put ADMIN_EMAILS       --project-name=image-translator
+wrangler pages secret put ADMIN_USER_IDS     --project-name=image-translator
 ```
 
-`ADMIN_EMAILS` 支持逗号分隔的管理员邮箱；也可使用 `ADMIN_USER_IDS` 指定用户 id。未配置管理员白名单时，`/admin` 和 `/api/admin/*` 会返回 403。
+`ADMIN_USER_IDS`（或 `VS_ADMIN_USER_IDS`）支持逗号分隔的可信用户 ID。邮箱尚未经过验证，`ADMIN_EMAILS` / `VS_ADMIN_EMAILS` 不再授予管理员权限；旧配置需迁移到用户 ID。未配置管理员时，`/admin` 和 `/api/admin/*` 会返回 403。
 
 本地调试后台时可以临时注入管理员白名单：
 
 ```bash
-npm run dev -- --binding ADMIN_EMAILS=owner@example.com
+npm run dev -- --binding 'ADMIN_USER_IDS=user_<id>'
 ```
 
 ### 可选 R2 绑定
@@ -282,3 +282,13 @@ npm run deploy:queue
 - Workflow、Durable Object 尚未落地；当前任务可靠性由 D1 + R2 + Queue consumer + 恢复端点承担。
 - `public/app.js` 已开始拆分纯工具模块，页面状态机和大部分 DOM 逻辑仍在主文件内，后续可继续按视图拆分。
 - 不配置 D1 / R2 时，服务端内存数据不具备跨进程持久性。
+
+## ModelJetty（本地链路已验收，生产发布另行执行）
+
+设置中可切换 1xm / ModelJetty，并分别保存 API Key。ModelJetty Agent 默认使用 `gemini-3.8-flash-medium` 负责规划、看图分析和提示词整理，可在设置中从按厂商分组的平台目录选择默认 Agent 模型，`MODELJETTY_AGENT_MODEL` 提供服务端默认值；生图模型独立选择，GPT 两档显示为“GPT Image 快速”和“GPT Image 精细”。普通 OCR/翻译视觉默认使用 `gemini-3.8-flash-medium`。文本请求固定请求 ID 且不自动重发；图片保持异步任务契约，未开通时明确返回不可用。原有 1xm 链路保持独立。
+
+联合登录使用 OIDC Authorization Code + PKCE，账号和算力连接凭据加密保存于服务端 D1。需要先在 ModelJetty 登记 Visual Studio Web client、开放相应账户/推理权限，并配置 callback、客户端凭据和 Visual Studio 服务端用于加密连接信息的 `CREDENTIAL_KEK`。当前实现不表示这些外部能力已经上线。
+
+详细配置、服务端开通要求与验收边界：[ModelJetty 接入说明](docs/modeljetty-integration.md)。审查结论：[代码与性能审查](docs/review-2026-11-01.md)。
+
+最新稳定性修复、三模型真实生图、任务恢复、账号续期和本地验收边界见 [稳定性验收记录](docs/stability-acceptance-2026-11-02.md)。

@@ -1,3 +1,4 @@
+import { assertInputAssetAccess } from '../../_lib/permissions'
 import { Env, json, corsPreflight } from '../../_shared'
 import { requireAuth } from '../../_lib/auth'
 import { submitGenerateDirectJob } from '../../_lib/v2-runner'
@@ -15,6 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUnti
 
   try {
     const user = await requireAuth(env, request)
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
     return json(await submitGenerateDirectJob(env, { ...body, clientKeys, _authUserId: user.id }, waitUntil))
   } catch (error: any) {

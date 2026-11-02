@@ -4,11 +4,11 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>视觉工作台 · Visual Studio</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20261101-artboard" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="/styles.css?v=20260506-3" />
+<link rel="stylesheet" href="/styles.css?v=20261102-ui-audit" />
 </head>
 <body>
 <div id="app-notice" class="app-notice hidden" role="status" aria-live="polite">
@@ -16,116 +16,29 @@
   <button type="button" id="app-notice-close" aria-label="关闭提示">×</button>
 </div>
 <div class="shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="logo">◆</div>
-      <div class="brand-text">
-        <div class="brand-title">Visual Studio</div>
-        <div class="brand-sub">品牌视觉工作台</div>
-      </div>
-    </div>
-
-    <nav class="nav">
-      <button class="nav-item active" data-view="home">
-        <span class="nav-label">首页</span>
-        <span class="nav-hint">对话入口 · 最近项目</span>
-      </button>
-      <button class="nav-item" data-view="generate">
-        <span class="nav-label">画布</span>
-        <span class="nav-hint">无限画布 · 参考图 · 生成流</span>
-      </button>
-      <button class="nav-item" data-view="projects">
-        <span class="nav-label">项目管理</span>
-        <span class="nav-hint">打开 · 新建 · 自动保存</span>
-      </button>
-      <button class="nav-item" data-view="translate">
-        <span class="nav-label">图片批量翻译</span>
-        <span class="nav-hint">商品图多语言本地化</span>
-      </button>
-      <button class="nav-item" data-view="outfit">
-        <span class="nav-label">批量换装</span>
-        <span class="nav-hint">模特 × 服装矩阵</span>
-      </button>
-      <button class="nav-item" data-view="style">
-        <span class="nav-label">风格迁移</span>
-        <span class="nav-hint">提取风格 · 仿图生成</span>
-      </button>
-      <button class="nav-item" data-view="ai-test">
-        <span class="nav-label">AI 测图</span>
-        <span class="nav-hint">多图 × 多方向测款</span>
-      </button>
-    </nav>
-
+  <aside class="sidebar" aria-label="主导航">
+    <a class="brand" href="/lovart" aria-label="Visual Studio 首页"><span class="brand-title">Visual<span class="brand-punctuation">.</span><br>Studio</span><span class="brand-sub">视觉创作工作台</span></a>
+    <nav class="nav"><div class="nav-group-label">工作空间</div><button type="button" class="nav-item active" data-view="home" title="工作台"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#house"></use></svg><span class="nav-copy"><span class="nav-label">工作台</span><span class="nav-hint">灵感与最近项目</span></span></button><button type="button" class="nav-item" data-view="generate" title="创作画布"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#panels-top-left"></use></svg><span class="nav-copy"><span class="nav-label">创作画布</span><span class="nav-hint">自由组织你的想法</span></span></button><button type="button" class="nav-item" data-view="projects" title="我的项目"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#folder-open"></use></svg><span class="nav-copy"><span class="nav-label">我的项目</span><span class="nav-hint">继续未完成的创作</span></span></button><div class="nav-group-label">批量工具</div><button type="button" class="nav-item" data-view="translate" title="图片翻译"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#languages"></use></svg><span class="nav-copy"><span class="nav-label">图片翻译</span><span class="nav-hint">让好内容跨越语言</span></span></button><button type="button" class="nav-item" data-view="outfit" title="模特换装"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#shirt"></use></svg><span class="nav-copy"><span class="nav-label">模特换装</span><span class="nav-hint">批量搭配与试穿</span></span></button><button type="button" class="nav-item" data-view="style" title="风格迁移"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#sliders-horizontal"></use></svg><span class="nav-copy"><span class="nav-label">风格迁移</span><span class="nav-hint">延续你的视觉语言</span></span></button><button type="button" class="nav-item" data-view="ai-test" title="AI 测图"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#scan-line"></use></svg><span class="nav-copy"><span class="nav-label">AI 测图</span><span class="nav-hint">探索更多视觉方向</span></span></button></nav>
     <div class="sidebar-footer">
-      <button id="account-btn" class="ghost full">
-        <span class="settings-mark">账号</span> 登录 / 注册
-      </button>
-      <button id="settings-btn" class="ghost full">
-        <span class="settings-mark">系统</span> 设置
-      </button>
-      <div class="footer-hint">Key 与界面风格仅存浏览器本地</div>
+      <button type="button" id="account-btn" class="sidebar-account" title="账号"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#user-round"></use></svg><span class="sidebar-account-label">登录 / 注册</span></button>
+      <button type="button" id="settings-btn" class="sidebar-settings" title="设置"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#settings2"></use></svg><span>偏好与模型设置</span></button>
+      <div class="footer-hint">为每一个好想法，留一块画布。</div>
     </div>
   </aside>
 
-  <main class="main">
-    <!-- ═══════════════ HOME VIEW ═══════════════ -->
-    <section class="view active home-view" id="view-home">
-      <header class="home-topbar">
-        <div class="home-brand">
-          <div class="logo">◆</div>
-          <div>
-            <strong>Visual Studio</strong>
-            <span>品牌视觉工作台</span>
-          </div>
-        </div>
-        <div class="home-top-actions">
-          <button type="button" id="h-account" class="ghost">账号</button>
-          <button type="button" id="h-projects" class="ghost">项目管理</button>
-          <button type="button" id="h-settings" class="ghost">系统设置</button>
-        </div>
-      </header>
-
-      <div class="home-hero">
-        <div class="home-title">
-          <h1>输入想法，进入视觉工作台</h1>
-        </div>
-        <p>从一个设计需求开始创建画布，或直接进入已经落地的批处理工具。</p>
-
-        <div class="home-prompt-card">
-          <textarea id="h-prompt" rows="2" placeholder="例如：为春季新品生成一张社媒主图，保留品牌留白和清爽光线"></textarea>
-          <button type="button" id="h-start" class="primary">打开画布</button>
-        </div>
-
-        <div class="home-tools" id="h-tools">
-          <button type="button" class="home-tool" data-view="translate">
-            <strong>图片批量翻译</strong>
-            <span>商品图多语言本地化</span>
-          </button>
-          <button type="button" class="home-tool" data-view="outfit">
-            <strong>批量换装</strong>
-            <span>模特 × 服装矩阵</span>
-          </button>
-          <button type="button" class="home-tool" data-view="style">
-            <strong>风格迁移</strong>
-            <span>提取风格并仿图生成</span>
-          </button>
-          <button type="button" class="home-tool" data-view="ai-test">
-            <strong>AI 测图</strong>
-            <span>商品图多方向批量测试</span>
-          </button>
-        </div>
+  <main class="main" id="main-content">
+    <section class="view active home-view" id="view-home" aria-label="工作台">
+      <header class="home-topbar"><div class="page-breadcrumb"><span>工作空间</span><span>/</span><strong>工作台</strong></div><div class="home-top-actions"><button type="button" id="h-projects" class="ghost"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#folder-open"></use></svg><span>我的项目</span></button><button type="button" id="h-settings" class="icon-button" title="偏好与模型设置" aria-label="偏好与模型设置"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#settings2"></use></svg></button><button type="button" id="h-account" class="account-pill">账号</button></div></header>
+      <div class="home-content">
+        <section class="home-hero">
+          <div class="home-intro"><span class="eyebrow">从想法，到作品</span><h1>好创意，<br><span>在这里成形。</span></h1><p>用一句话开启创作。让 AI 理解你的想法，<br class="desktop-break">在自由画布上，完成下一张品牌视觉。</p><div class="home-intro-note"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#layers"></use></svg><span>构思、生成、编排，在同一块画布。</span></div></div>
+          <div class="home-prompt-card"><div class="composer-heading"><span>今天，想创作什么？</span><span class="composer-tag">CANVAS</span></div><textarea id="h-prompt" rows="4" aria-label="描述创作需求" placeholder="为一款蓝色陶瓷茶壶设计电商主图，
+自然窗光，干净的背景，保留材质细节…"></textarea><div class="home-prompt-footer"><span>先聊想法，也可以直接开始。</span><button type="button" id="h-start" class="primary">进入画布 <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-right"></use></svg></button></div><div class="home-starters" aria-label="创作灵感"><button type="button" data-home-prompt="为春季新品规划三套电商主图方案，分别说明构图、场景和光线。先做方案，不生成图片。">电商主图</button><button type="button" data-home-prompt="为一个自然风格的生活方式品牌策划社媒视觉方向，先给出三个可执行的创意。">社媒视觉</button><button type="button" data-home-prompt="帮我分析产品参考图的材质、色彩和光线，先给出优化建议。">产品精修</button></div></div>
+        </section>
+        <section class="home-tools-section"><div class="section-label"><span>把重复工作，交给工具</span><span>批量生产</span></div><div class="home-tools" id="h-tools"><button type="button" class="home-tool" data-view="translate"><span class="home-tool-top"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#languages"></use></svg></span><strong>图片翻译</strong><span class="home-tool-description">一张商品图，走向更多市场</span><span class="home-tool-arrow"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-up-right"></use></svg></span></button><button type="button" class="home-tool" data-view="outfit"><span class="home-tool-top"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#shirt"></use></svg></span><strong>模特换装</strong><span class="home-tool-description">人、衣、搭配，批量组合</span><span class="home-tool-arrow"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-up-right"></use></svg></span></button><button type="button" class="home-tool" data-view="style"><span class="home-tool-top"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#sliders-horizontal"></use></svg></span><strong>风格迁移</strong><span class="home-tool-description">让每一张图保持同种气质</span><span class="home-tool-arrow"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-up-right"></use></svg></span></button><button type="button" class="home-tool" data-view="ai-test"><span class="home-tool-top"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#scan-line"></use></svg></span><strong>AI 测图</strong><span class="home-tool-description">多方向探索，找到下一张好图</span><span class="home-tool-arrow"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-up-right"></use></svg></span></button></div></section>
+        <section class="home-recent"><div class="home-section-head"><div><h2>接着上次的灵感</h2><p id="h-recent-status">读取已保存的画布项目</p></div><button type="button" id="h-see-all" class="text-button">全部项目 <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-right"></use></svg></button></div><div class="home-recent-grid" id="h-recent-list"></div></section>
+        <footer class="workspace-footer"><span>Visual Studio</span><span>让创作，自然发生。</span></footer>
       </div>
-
-      <section class="home-recent">
-        <div class="home-section-head">
-          <div>
-            <h2>最近项目</h2>
-            <p id="h-recent-status">读取已保存的画布项目</p>
-          </div>
-          <button type="button" id="h-see-all" class="ghost">查看全部</button>
-        </div>
-        <div class="home-recent-grid" id="h-recent-list"></div>
-      </section>
     </section>
 
     <!-- ═══════════════ AUTH VIEW ═══════════════ -->
@@ -137,13 +50,11 @@
 
       <div class="auth-layout">
         <section class="auth-copy">
-          <div class="auth-mark">VS</div>
-          <h1>登录 Visual Studio</h1>
-          <p>项目、素材、任务历史和共享权限会归属到当前账号。</p>
+          <div class="auth-mark">Visual Studio</div>
+          <span class="eyebrow">你的创作空间</span><h1>一个账号，<br>连接创作与算力。</h1>
+          <p>登录后继续你的项目、保存每一次灵感，<br>也可以连接 ModelJetty，直接使用账户算力。</p>
           <div class="auth-points">
-            <span>项目 owner / viewer / editor</span>
-            <span>共享项目列表</span>
-            <span>用量统计</span>
+            <span>项目与素材自动保存</span><span>与团队共享创作</span><span>ModelJetty 账户算力</span>
           </div>
         </section>
 
@@ -156,9 +67,15 @@
             <button type="button" id="account-logout" class="ghost">退出登录</button>
           </div>
 
+          <div class="modeljetty-account">
+            <button type="button" id="account-modeljetty" class="ghost" disabled>使用 ModelJetty 登录</button>
+            <button type="button" id="account-modeljetty-refresh" class="ghost hidden">刷新算力余额</button>
+            <button type="button" id="account-modeljetty-disconnect" class="ghost hidden">断开 ModelJetty 授权</button>
+            <p id="account-modeljetty-status" class="hint">正在检查 ModelJetty 连接…</p>
+          </div>
+          <div class="auth-divider"><span>或使用邮箱账号</span></div>
           <div class="auth-form-head" id="account-form-head">
-            <h2>账号</h2>
-            <p>没有账号时可直接注册并登录。</p>
+            <h2>欢迎回到工作台</h2><p>登录你的账号，继续创作。</p>
           </div>
 
           <div class="dialog-grid" id="account-form">
@@ -190,7 +107,7 @@
     <section class="view" id="view-translate">
       <header class="view-head">
         <div>
-          <h1>图片批量翻译</h1>
+          <span class="eyebrow">批量工具</span><h1>图片批量翻译</h1>
           <p class="subtitle">先识别，再重绘。适合商品图与品牌素材的多语言本地化处理。</p>
         </div>
       </header>
@@ -260,7 +177,7 @@
               <div class="color-swatches" id="t-headline-swatches"></div>
               <div class="color-input-row">
                 <input id="t-headline-color-picker" type="color" class="color-picker" value="#111827" />
-                <input id="t-headline-color" type="text" class="input color-code-input" maxlength="7" value="#111827" placeholder="#111827" />
+                <input id="t-headline-color" aria-label="主标题颜色值" type="text" class="input color-code-input" maxlength="7" value="#111827" placeholder="#111827" />
               </div>
             </div>
           </div>
@@ -270,7 +187,7 @@
               <div class="color-swatches" id="t-body-swatches"></div>
               <div class="color-input-row">
                 <input id="t-body-color-picker" type="color" class="color-picker" value="#374151" />
-                <input id="t-body-color" type="text" class="input color-code-input" maxlength="7" value="#374151" placeholder="#374151" />
+                <input id="t-body-color" aria-label="正文颜色值" type="text" class="input color-code-input" maxlength="7" value="#374151" placeholder="#374151" />
               </div>
             </div>
           </div>
@@ -322,11 +239,11 @@
         <div class="projects-actions">
           <button type="button" id="p-shared" class="ghost">共享项目</button>
           <button type="button" id="p-refresh" class="ghost">刷新</button>
-          <button type="button" id="p-new" class="primary">新建画布</button>
+          <button type="button" id="p-new" class="primary"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg> 新建画布</button>
         </div>
       </header>
 
-      <div class="projects-summary">
+      <div class="projects-summary"><label class="project-search"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#search"></use></svg><input id="p-search" type="search" placeholder="搜索画布名称…" aria-label="搜索项目" /></label>
         <div>
           <span class="projects-kicker">Canvas Projects</span>
           <strong id="p-count">0 个项目</strong>
@@ -334,7 +251,7 @@
         <span id="p-status" class="muted"></span>
       </div>
 
-      <div class="projects-grid" id="p-list"></div>
+      <div class="projects-grid" id="p-list"></div><div class="search-empty hidden" id="p-search-empty" role="status">没有找到匹配的画布，试试其他关键词。</div>
       <div class="projects-empty hidden" id="p-empty">
         <div class="projects-empty-mark">＋</div>
         <h3>还没有画布项目</h3>
@@ -348,23 +265,15 @@
       <!-- Canvas Header -->
       <header class="canvas-header">
         <div class="canvas-header-left">
+          <button type="button" id="g-home" class="icon-button canvas-home" aria-label="返回工作台" title="返回工作台"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-left"></use></svg></button><span class="canvas-breadcrumb">画布 <span>/</span></span>
           <input id="g-project-title" class="canvas-project-title" type="text" value="未命名画布" aria-label="画布标题" />
           <span id="g-project-status" class="canvas-project-status"></span>
         </div>
         <div class="canvas-header-right">
-          <button type="button" id="g-share" class="canvas-header-btn" title="共享项目">
-            <span>共享</span>
-          </button>
-          <button type="button" id="g-projects" class="canvas-header-btn" title="项目管理">
-            <span>项目</span>
-          </button>
-          <button type="button" id="g-ai-toggle" class="canvas-header-btn" title="AI 助手">
-            <span class="canvas-btn-icon">&#x2726;</span>
-            <span>AI</span>
-          </button>
-          <button type="button" id="g-new" class="canvas-header-btn" title="新画布">
-            <span>新画布</span>
-          </button>
+<button type="button" id="g-share" class="canvas-header-btn" title="共享" aria-label="共享"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#share2"></use></svg><span>共享</span></button>
+<button type="button" id="g-projects" class="canvas-header-btn" title="项目" aria-label="项目"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#folder-open"></use></svg><span>项目</span></button>
+<button type="button" id="g-ai-toggle" class="canvas-header-btn" title="Agent" aria-label="AI 助手"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#message-square"></use></svg><span>Agent</span></button>
+<button type="button" id="g-new" class="canvas-header-btn" title="新画布" aria-label="新画布"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg><span>新画布</span></button>
         </div>
       </header>
 
@@ -376,14 +285,14 @@
 
         <!-- Empty State -->
         <div class="canvas-empty" id="g-canvas-empty">
-          <div class="canvas-empty-icon">&#x25CE;</div>
-          <div class="canvas-empty-title">开始创作</div>
+          <div class="canvas-empty-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#panels-top-left"></use></svg></div>
+          <div class="canvas-empty-title">这一块，留给你的想法。</div>
           <div class="canvas-empty-desc">用左侧工具栏添加图片或 AI 生图卡片，也可以拖拽文件到画布上。</div>
         </div>
 
         <div class="canvas-guide hidden" id="g-guide">
-          <div class="canvas-guide-kicker">首次进入</div>
-          <div class="canvas-guide-title">从左侧工具开始搭建生成流</div>
+          <div class="canvas-guide-kicker">YOUR FIRST CANVAS</div>
+          <div class="canvas-guide-title">从一张图，或一个想法开始。</div>
           <div class="canvas-guide-steps">
             <span>上传参考图</span>
             <span>放置 AI 生图卡</span>
@@ -404,41 +313,24 @@
       <!-- AI Sidebar -->
       <aside class="ai-sidebar hidden" id="g-ai-sidebar">
         <div class="ai-sidebar-head">
-          <h3>AI 助手</h3>
-          <div class="ai-sidebar-head-actions">
-            <select id="g-ai-session" class="ai-sidebar-session" aria-label="AI 会话"></select>
-            <button type="button" id="g-ai-new-session" class="ai-sidebar-head-btn" title="新会话">新会话</button>
-            <button type="button" id="g-ai-clear-session" class="ai-sidebar-head-btn" title="清空当前会话">清空</button>
-            <button type="button" id="g-ai-close" class="ai-sidebar-close" title="关闭 AI 助手">&times;</button>
-          </div>
+          <div class="ai-sidebar-title"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#message-square"></use></svg><h3>创作助手</h3><span>AGENT</span></div>
+          <button type="button" id="g-ai-close" class="icon-button" aria-label="关闭 AI 助手" title="收起助手"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#panel-right-close"></use></svg></button>
+          <div class="ai-sidebar-head-actions"><select id="g-ai-session" class="ai-sidebar-session" aria-label="AI 会话"></select><button type="button" id="g-ai-new-session" class="ai-sidebar-head-btn" title="新会话"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg><span>新会话</span></button><button type="button" id="g-ai-clear-session" class="icon-button" aria-label="清空当前会话" title="清空当前会话"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#trash2"></use></svg></button></div>
+          <div class="agent-workspace-context" id="g-ai-context"><strong id="g-ai-context-title" class="agent-sr-only">当前画布</strong><span id="g-ai-context-count">读取上下文…</span></div>
         </div>
-        <div class="ai-sidebar-messages" id="g-ai-messages"></div>
+        <div class="ai-sidebar-messages" id="g-ai-messages" role="log" aria-label="Agent 对话"></div>
         <div class="ai-sidebar-bottom">
           <div class="ai-sidebar-refs" id="g-ai-ref-list"></div>
-          <div class="ai-sidebar-controls" aria-describedby="g-ai-controls-help">
-            <select id="g-ai-model" class="input ai-sidebar-select" aria-label="图像模型"></select>
-            <select id="g-ai-ratio" class="input ai-sidebar-select" aria-label="画幅比例">
-              <option value="1:1">1:1</option>
-              <option value="4:3">4:3</option>
-              <option value="3:4">3:4</option>
-              <option value="16:9">16:9</option>
-              <option value="9:16">9:16</option>
-              <option value="1:4">1:4</option>
-              <option value="1:8">1:8</option>
-            </select>
-            <select id="g-ai-resolution" class="input ai-sidebar-select" aria-label="生成分辨率">
-              <option value="1k">1k</option>
-              <option value="2k">2k</option>
-              <option value="4k">4k</option>
-            </select>
-            <input type="file" id="g-ai-file-input" accept="image/*" multiple hidden />
-          </div>
-          <p class="ai-sidebar-help" id="g-ai-controls-help">模型 / 比例 / 清晰度控制出图；参考图用于本轮生成。</p>
-          <div class="ai-sidebar-input">
-            <button type="button" id="g-ai-upload" class="input ai-sidebar-attach-btn" title="上传参考图" aria-label="上传参考图">+</button>
-            <textarea id="g-input" placeholder="描述你想要的画面，AI 会生成并放到画布上…" rows="2"></textarea>
-            <button id="g-send" class="primary ai-sidebar-send">发送</button>
-          </div>
+          <p class="agent-reference-status" id="g-ai-ref-status" role="status"></p>
+          <div class="ai-sidebar-input"><textarea id="g-input" aria-label="与 Agent 对话" placeholder="描述想法，或加入图片继续创作…" rows="2"></textarea><div class="ai-composer-actions"><button type="button" id="g-ai-upload" class="icon-button ai-sidebar-attach-btn" title="上传参考图" aria-label="上传参考图"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#paperclip"></use></svg></button><button type="button" id="g-ai-add-selected" class="agent-context-attach" disabled>添加选中图</button><button type="button" id="g-ai-stop" class="agent-stop hidden" title="当前请求继续读取，之后不再提交新的图片任务。">停止后续</button><button id="g-send" class="primary ai-sidebar-send">发送</button></div></div>
+          <div class="agent-image-bar"><span>生图</span><div class="ai-sidebar-controls" aria-describedby="g-ai-controls-help"><select id="g-ai-model" class="input ai-sidebar-select" aria-label="图像模型"></select><select id="g-ai-ratio" class="input ai-sidebar-select" aria-label="画幅比例"><option>1:1</option><option>4:3</option><option>3:4</option><option>16:9</option><option>9:16</option><option>1:4</option><option>1:8</option></select><select id="g-ai-resolution" class="input ai-sidebar-select" aria-label="生成分辨率"><option value="1k">1k</option><option value="2k">2k</option><option value="4k">4k</option></select></div></div>
+          <details class="ai-image-settings"><summary><span>Agent 设置</span><span id="g-ai-settings-summary">自动创作 · 自动匹配 · 1:1</span><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#chevron-down"></use></svg></summary>
+            <div class="agent-composer-modes"><label><span class="agent-field-label">设计能力</span><select id="g-ai-skill" aria-label="Agent 设计能力"><option value="auto">自动匹配</option><option value="reference-product">商品三图</option><option value="brand-campaign">品牌海报</option><option value="reference-edit">参考图延展</option></select></label></div>
+            <div class="agent-mode-note"><p id="g-ai-mode-help">按你的需求规划，再逐张生成并保存。</p></div>
+
+            <p class="ai-sidebar-agent-model" id="g-ai-agent-model">正在读取 Agent 模型…</p><p class="ai-sidebar-help" id="g-ai-controls-help">图像模型负责生图，Agent 负责理解与规划。Enter 发送，Shift + Enter 换行。</p>
+          </details>
+          <input type="file" id="g-ai-file-input" accept="image/*" multiple hidden />
         </div>
       </aside>
 
@@ -488,40 +380,23 @@
 
       <!-- Floating Toolbar -->
       <div class="canvas-toolbar" id="g-toolbar">
-        <button type="button" class="toolbar-btn active" data-tool="select" title="选择">
-          <span class="toolbar-icon">&#x2197;</span>
-          <span class="toolbar-label">选择</span>
-        </button>
-        <button type="button" class="toolbar-btn" data-tool="hand" title="手型移动">
-          <span class="toolbar-icon">&#x270B;</span>
-          <span class="toolbar-label">移动</span>
-        </button>
+<button type="button" class="toolbar-btn active" data-tool="select" title="选择 (V)" aria-label="选择"><span class="toolbar-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#mouse-pointer2"></use></svg></span><span class="toolbar-label">选择</span></button>
+<button type="button" class="toolbar-btn" data-tool="hand" title="移动 (H)" aria-label="移动"><span class="toolbar-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#hand"></use></svg></span><span class="toolbar-label">移动</span></button>
         <div class="toolbar-sep"></div>
-        <button type="button" class="toolbar-btn" data-tool="image" title="上传图片">
-          <span class="toolbar-icon">&#x1F5BC;</span>
-          <span class="toolbar-label">图片</span>
-        </button>
-        <button type="button" class="toolbar-btn" data-tool="text" title="添加文字">
-          <span class="toolbar-icon">T</span>
-          <span class="toolbar-label">文字</span>
-        </button>
-        <button type="button" class="toolbar-btn" data-tool="draw" title="自由绘制">
-          <span class="toolbar-icon">&#x270E;</span>
-          <span class="toolbar-label">画笔</span>
-        </button>
-        <button type="button" class="toolbar-btn" data-tool="ai-gen" title="AI 生图">
-          <span class="toolbar-icon">&#x2726;</span>
-          <span class="toolbar-label">生图</span>
-        </button>
+<button type="button" class="toolbar-btn" data-tool="image" title="图片" aria-label="图片"><span class="toolbar-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#image"></use></svg></span><span class="toolbar-label">图片</span></button>
+<button type="button" class="toolbar-btn" data-tool="text" title="文字 (T)" aria-label="文字"><span class="toolbar-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#type"></use></svg></span><span class="toolbar-label">文字</span></button>
+<button type="button" class="toolbar-btn" data-tool="draw" title="画笔 (P)" aria-label="画笔"><span class="toolbar-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#pencil"></use></svg></span><span class="toolbar-label">画笔</span></button>
+<button type="button" class="toolbar-btn" data-tool="ai-gen" title="生图" aria-label="生图"><span class="toolbar-icon"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#panels-top-left"></use></svg></span><span class="toolbar-label">生图</span></button>
         <div class="toolbar-sep"></div>
         <input type="file" id="g-file-input" accept="image/*" multiple hidden />
       </div>
 
       <!-- Zoom Controls -->
+      <div class="canvas-caption">空格拖动画布<span>·</span>滚轮缩放</div><button type="button" id="g-shortcuts" class="canvas-shortcuts icon-button" title="快捷键" aria-label="查看画布快捷键"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#keyboard"></use></svg></button>
       <div class="zoom-controls" id="g-zoom">
-        <button type="button" id="g-zoom-out" class="zoom-btn">&minus;</button>
+        <button type="button" id="g-fit" class="zoom-btn" title="适应全部内容" aria-label="适应全部内容"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#maximize2"></use></svg></button><span class="zoom-divider"></span><button type="button" id="g-zoom-out" class="zoom-btn" aria-label="缩小"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#minus"></use></svg></button>
         <span class="zoom-value" id="g-zoom-value">100%</span>
-        <button type="button" id="g-zoom-in" class="zoom-btn">&#43;</button>
+        <button type="button" id="g-zoom-in" class="zoom-btn" aria-label="放大"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg></button>
       </div>
 
       <!-- Context menu for image elements -->
@@ -536,7 +411,7 @@
     <section class="view" id="view-outfit">
       <header class="view-head">
         <div>
-          <h1>批量换装</h1>
+          <span class="eyebrow">批量工具</span><h1>批量换装</h1>
           <p class="subtitle">兼容单张整套直换，也支持上衣 / 下装 / 外套 / 鞋品等多单品自动组合。</p>
         </div>
         <div class="head-right">
@@ -656,7 +531,7 @@
     <section class="view" id="view-style">
       <header class="view-head">
         <div>
-          <h1>风格迁移</h1>
+          <span class="eyebrow">批量工具</span><h1>风格迁移</h1>
           <p class="subtitle">上传一张风格源图，AI 提取其视觉 DNA，再用这套风格生成任意新主题的图像。</p>
         </div>
         <div class="head-right">
@@ -681,7 +556,7 @@
           <div id="s-source-preview" class="style-source-preview hidden">
             <div id="s-source-upload" class="style-source-upload hidden"></div>
             <img id="s-source-img" alt="风格源图" />
-            <button type="button" id="s-clear-source" class="style-source-clear" title="移除源图">×</button>
+            <button type="button" id="s-clear-source" aria-label="移除风格源图" class="style-source-clear" title="移除源图">×</button>
           </div>
           <div id="s-analyze-progress" class="style-progress hidden">
             <span class="spinner"></span>
@@ -695,7 +570,7 @@
             <div id="s-summary" class="style-summary"></div>
             <div id="s-palette" class="style-palette"></div>
             <div id="s-tags" class="style-tags"></div>
-            <details class="style-json" open>
+            <details class="style-json">
               <summary id="s-json-toggle">查看完整 JSON</summary>
               <div class="style-json-actions">
                 <button type="button" id="s-json-copy" class="ghost style-json-copy">复制 JSON</button>
@@ -716,8 +591,8 @@
               <div class="style-ref-list" id="s-ref-list"></div>
             </div>
             <div class="style-generate-row">
-              <input id="s-subject" type="text" class="input" placeholder="输入新主题，如：赛博朋克街头、森林里的猫咪、极简办公桌面…" />
-              <button id="s-generate" class="primary" disabled>生成 ▸</button>
+              <input id="s-subject" aria-label="新图主题" type="text" class="input" placeholder="输入新主题，如：赛博朋克街头、森林里的猫咪、极简办公桌面…" />
+              <button id="s-generate" class="primary" disabled>生成</button>
             </div>
           </div>
 
@@ -739,8 +614,17 @@
             </div>
           </div>
 
-          <div id="s-error" class="style-error hidden"></div>
+          <div id="s-error" role="alert" class="style-error hidden"></div>
 
+          <div id="s-history-section" class="style-history-section hidden">
+            <div class="style-history-head">
+              <h3 class="style-section-title">历史记录</h3>
+              <button type="button" id="s-clear-history" class="ghost" style="min-height:32px;padding:0 10px;font-size:var(--text-xs)">清空历史</button>
+            </div>
+            <div id="s-history" class="style-history-grid"></div>
+          </div>
+        </div>
+      </div>
           <div class="job-panel style-job-panel">
             <div class="job-panel-head">
               <h3 class="style-section-title">风格迁移任务</h3>
@@ -753,22 +637,13 @@
             <div id="s-job-empty" class="job-empty">暂无当前任务</div>
           </div>
 
-          <div id="s-history-section" class="style-history-section hidden">
-            <div class="style-history-head">
-              <h3 class="style-section-title">历史记录</h3>
-              <button type="button" id="s-clear-history" class="ghost" style="min-height:32px;padding:0 10px;font-size:var(--text-xs)">清空历史</button>
-            </div>
-            <div id="s-history" class="style-history-grid"></div>
-          </div>
-        </div>
-      </div>
     </section>
 
     <!-- ═══════════════ AI TEST VIEW ═══════════════ -->
     <section class="view" id="view-ai-test">
       <header class="view-head">
         <div>
-          <h1>AI 测图</h1>
+          <span class="eyebrow">批量工具</span><h1>AI 测图</h1>
           <p class="subtitle">上传商品图，按品类因子和测试方向批量生成主图候选；每一行都可以单独选择方向并改 prompt。</p>
         </div>
         <div class="head-right">
@@ -879,17 +754,72 @@
   </main>
 </div>
 
-<dialog id="settings-dialog">
-  <form method="dialog" id="settings-form">
-    <div class="dialog-copy">
-      <h3>设置</h3>
-      <p class="hint">API Key 可保存在当前浏览器；登录后也可以加密保存到账号，换设备后继续使用。</p>
-    </div>
+<dialog id="settings-dialog" aria-label="偏好与模型设置">
+  <button type="button" id="settings-close" class="icon-button dialog-close" aria-label="关闭设置" title="关闭设置"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#x"></use></svg></button>
+  <form method="dialog" id="settings-form" class="settings-shell">
+    <aside class="settings-nav"><div class="settings-brand"><span class="eyebrow">WORKSPACE</span><h2>设置</h2></div>
+      <div role="tablist" aria-label="设置分类" class="settings-tabs">
+        <button type="button" role="tab" id="settings-tab-models" data-settings-tab="models" aria-controls="settings-panel-models" aria-selected="true">默认模型</button>
+        <button type="button" role="tab" id="settings-tab-connection" data-settings-tab="connection" aria-controls="settings-panel-connection" aria-selected="false" tabindex="-1">服务连接</button>
+        <button type="button" role="tab" id="settings-tab-appearance" data-settings-tab="appearance" aria-controls="settings-panel-appearance" aria-selected="false" tabindex="-1">外观</button>
+      </div><p class="settings-nav-note">让工具适应你的创作习惯。</p>
+    </aside>
+    <div class="settings-main">
+      <section id="settings-panel-models" role="tabpanel" aria-labelledby="settings-tab-models" data-settings-panel="models" class="settings-panel">
+        <div class="dialog-copy"><h3>默认模型</h3><p class="hint">Agent 理解需求、分析参考图和规划作品。图像模型在画布中单独选择。</p></div>
+        <p id="settings-model-provider" class="settings-provider-pill">当前使用 ModelJetty</p>
+        <div class="settings-fields">
+          <div class="settings-model-directory"><div class="settings-model-search-row"><label class="dialog-field"><span class="dialog-label">搜索厂商或模型</span><input id="settings-model-search" type="search" placeholder="例如 OpenAI、Google、DeepSeek、Gemini…" /></label><button type="button" id="settings-refresh-models" class="ghost">刷新目录</button></div>
+            <div id="settings-model-vendors" class="settings-model-vendors" role="group" aria-label="按厂商筛选模型"></div>
+            <label class="dialog-field"><span class="dialog-label">ModelJetty 默认 Agent 模型</span><select id="k-agent-modeljetty" aria-describedby="settings-model-catalog-status"><option value="gemini-3.8-flash-medium">Gemini 3.8 Flash · Medium（当前配置）</option></select></label>
+            <p id="settings-model-catalog-status" class="hint" role="status">正在读取 ModelJetty 模型目录…</p>
+          </div>
+          <label class="dialog-field"><span class="dialog-label">1xm 默认 Agent 模型</span><input id="k-agent-1xm" type="text" list="agent-1xm-options" maxlength="160" pattern="[A-Za-z0-9_][A-Za-z0-9_.:\/\-]{0,159}" autocomplete="off" spellcheck="false" placeholder="gemini-3-flash-preview" /><small class="hint">切换服务商后使用对应的默认模型。</small></label>
+          <datalist id="agent-1xm-options"><option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option></datalist>
+        </div>
+        <div class="settings-explanation"><strong>保存后用于下一轮创作</strong><p>模型设置与当前运行互不干扰。参考图分析和规划采用同一 Agent 模型；生图模型、比例与清晰度在输入框下方直接调整。</p><small id="settings-agent-model" class="hint"></small></div>
+      </section>
+      <section id="settings-panel-connection" role="tabpanel" aria-labelledby="settings-tab-connection" data-settings-panel="connection" class="settings-panel hidden">
+        <div class="dialog-copy"><h3>服务连接</h3><p class="hint">选择服务商。关联 ModelJetty 账号后，可直接使用账号算力；也支持使用自己的 API Key。</p></div>
+        <div class="settings-connection-heading"><span>本机凭据优先于账号凭据</span><a id="settings-api-link" class="settings-api-link" href="https://modeljetty.com/console" target="_blank" rel="noopener noreferrer">获取 API Key ↗</a></div>
+      <div class="dialog-grid">
+        <label class="dialog-field">
+          <span class="dialog-label">模型服务商</span>
+          <select id="k-provider">
+            <option value="1xm">1xm</option>
+            <option value="modeljetty">ModelJetty</option>
+          </select>
+        </label>
+        <label class="dialog-field" data-provider-fields="modeljetty">
+          <span class="dialog-label">ModelJetty API Key <span class="muted">（已关联账号时可留空，使用账号算力）</span></span>
+          <input id="k-modeljetty" type="password" autocomplete="off" placeholder="sk-..." />
+          <small id="modeljetty-image-hint" class="hint">ModelJetty 图片生成暂未开放；如需生图，请使用 1xm。</small>
+        </label>
+        <label class="dialog-field" data-provider-fields="1xm">
+          <span class="dialog-label">Vision / Design Agent Key <span class="muted">（OCR · 参考图分析 · 设计 Agent · gemini-3-flash-preview）</span></span>
+          <input id="k-vision" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
 
-    <section class="settings-section">
-      <div class="settings-section-head">
-        <h4>页面风格</h4>
+        <label class="dialog-field" data-provider-fields="1xm">
+          <span class="dialog-label">Nano Banana 2 Key <span class="muted">（gemini-3.1-flash-image-preview）</span></span>
+          <input id="k-banana2" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
+
+        <label class="dialog-field" data-provider-fields="1xm">
+          <span class="dialog-label">Nano Banana Pro Key <span class="muted">（gemini-3-pro-image-preview）</span></span>
+          <input id="k-bananapro" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
+
+        <label class="dialog-field" data-provider-fields="1xm">
+          <span class="dialog-label">GPT Image 2 Key <span class="muted">（gpt-image-2）</span></span>
+          <input id="k-gptimage" type="password" autocomplete="off" placeholder="sk-..." />
+        </label>
       </div>
+
+        <div class="settings-danger-actions"><button type="button" id="settings-clear" class="ghost">清空本机 Key</button><button type="button" id="settings-clear-account" class="ghost" title="清空账号保存的 Key 与默认模型配置">清空账号配置</button></div>
+      </section>
+      <section id="settings-panel-appearance" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-panel="appearance" class="settings-panel hidden">
+        <div class="dialog-copy"><h3>外观</h3><p class="hint">选择适合你工作环境的页面风格。</p></div>
       <div class="theme-options" role="radiogroup" aria-label="页面风格">
         <label class="theme-option">
           <input type="radio" name="settings-theme" value="dark" />
@@ -899,7 +829,7 @@
             </span>
             <span class="theme-meta">
               <strong>深色</strong>
-              <small>Visual Studio</small>
+              <small>石墨深色空间</small>
             </span>
           </span>
         </label>
@@ -911,53 +841,14 @@
             </span>
             <span class="theme-meta">
               <strong>浅色</strong>
-              <small>OpenLovart</small>
+              <small>暖白创作空间</small>
             </span>
           </span>
         </label>
       </div>
-    </section>
 
-    <section class="settings-section">
-      <div class="settings-section-head settings-section-head-inline">
-        <div>
-          <h4>API Keys</h4>
-          <p>本机 Key 会优先于账号 Key；账号 Key 只显示保存状态，不回传完整内容。</p>
-        </div>
-        <a class="settings-api-link" href="https://1xm.ai/register?aff=Bkzj" target="_blank" rel="noopener noreferrer">获取API KEY</a>
-      </div>
-      <div id="settings-account-status" class="settings-key-status"></div>
-      <div class="dialog-grid">
-        <label class="dialog-field">
-          <span class="dialog-label">Vision / Design Agent Key <span class="muted">（OCR · 参考图分析 · 设计 Agent · gemini-3.5-flash）</span></span>
-          <input id="k-vision" type="password" autocomplete="off" placeholder="sk-..." />
-        </label>
-
-        <label class="dialog-field">
-          <span class="dialog-label">Nano Banana 2 Key <span class="muted">（gemini-3.1-flash-image-preview）</span></span>
-          <input id="k-banana2" type="password" autocomplete="off" placeholder="sk-..." />
-        </label>
-
-        <label class="dialog-field">
-          <span class="dialog-label">Nano Banana Pro Key <span class="muted">（gemini-3-pro-image-preview）</span></span>
-          <input id="k-bananapro" type="password" autocomplete="off" placeholder="sk-..." />
-        </label>
-
-        <label class="dialog-field">
-          <span class="dialog-label">GPT Image 2 Key <span class="muted">（gpt-image-2）</span></span>
-          <input id="k-gptimage" type="password" autocomplete="off" placeholder="sk-..." />
-        </label>
-      </div>
-      <label class="settings-account-save">
-        <input id="settings-save-account" type="checkbox" />
-        <span>登录后同时加密保存到账号</span>
-      </label>
-    </section>
-
-    <div class="dialog-actions">
-      <button type="button" id="settings-clear" class="ghost">清空本机 Key</button>
-      <button type="button" id="settings-clear-account" class="ghost">清空账号 Key</button>
-      <button type="submit" class="primary">保存</button>
+      </section>
+      <footer class="settings-footer"><label class="settings-account-save"><input id="settings-save-account" type="checkbox" /><span>同步配置到账号</span></label><div id="settings-account-status" class="settings-key-status" role="status"></div><button type="submit" class="primary">保存设置</button></footer>
     </div>
   </form>
 </dialog>
@@ -1072,7 +963,7 @@
   </div>
 </dialog>
 
-<script src="/vendor/ag-psd/ag-psd.bundle.js?v=30.1.1"></script>
-<script type="module" src="/app.js?v=20260515-psd-decompose"></script>
+<dialog id="shortcuts-dialog" class="shortcuts-dialog"><form method="dialog"><div class="dialog-copy"><span class="eyebrow">CANVAS SHORTCUTS</span><h3>让灵感跟上手速。</h3></div><div class="shortcut-list"><div><span>选择工具</span><kbd>V</kbd></div><div><span>移动工具</span><kbd>H</kbd></div><div><span>添加文字</span><kbd>T</kbd></div><div><span>画笔</span><kbd>P</kbd></div><div><span>临时移动画布</span><kbd>Space + 拖动</kbd></div><div><span>删除所选元素</span><kbd>Delete</kbd></div><div><span>缩放画布</span><kbd>滚轮</kbd></div></div><div class="dialog-actions"><button type="submit" class="primary">知道了</button></div></form></dialog>
+<script type="module" src="/app.js?v=20261102-ui-audit"></script>
 </body>
 </html>

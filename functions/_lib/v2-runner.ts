@@ -1,3 +1,4 @@
+import { assertCanReadAsset, getAuthorizedAssetDataUrl } from './permissions'
 import type { Env } from '../_shared'
 import type {
   ConversationRecord,
@@ -39,16 +40,35 @@ import {
 } from './v2-store'
 import { publishEvent } from './v2-events'
 import { createJobQueueMessage, dispatchQueuedJob } from './v2-queue'
-import { loadUserClientKeys, sanitizeClientKeys } from './user-api-keys'
-import { executeTranslate, prepareTranslatePlan } from '../api/translate'
+import { loadUserClientKeys, loadLinkedModeljettyClientKeys } from './user-api-keys'
+import { resolveProvider, resolveRelayBaseUrl } from './model-provider'
+import { executeTranslate, executeTranslateTaskStep, prepareTranslatePlan } from '../api/translate'
 import { executeOutfitSwapTaskStep, prepareOutfitAnalysis } from '../api/outfit-swap'
 import { executeStyleTransferGenerate } from '../api/style-transfer'
 import { buildGenerateExecutionContext, executeGenerateTaskStep } from '../api/generate'
 import { executeDirectGenerate, executeDirectGenerateTaskStep, normalizeDirectGenerateRequest } from '../api/generate-direct'
+import { runCanvasAgentJob, recoverCanvasAgentJob } from './canvas-agent-runner'
 
 type WaitUntil = (promise: Promise<unknown>) => void
 
 type ClientKeys = Record<string, unknown>
+
+function imageSubmissionHooks(env: Env, job: JobRecord, item: JobItemRecord, clientKeys: ClientKeys = {}) {
+  return {
+    requestId: item.id,
+    async beforeSubmit() {
+      await updateJobItem(env, job.id, item.id, { outputJson: { ...item.outputJson,
+        submitIntent: { requestId: item.id, provider: resolveProvider(env, clientKeys), createdAt: nowIso() } } })
+    },
+    async onAccepted(task: any) {
+      const id = String(task?.id || task?.task_id || task?.taskId || '')
+      if (!id) return
+      await updateJobItem(env, job.id, item.id, { outputJson: { ...item.outputJson,
+        imageTask: { id, status: 'running', poll_url: task.poll_url || task.pollUrl },
+        imageTaskStatus: String(task.status || 'queued') } })
+    },
+  }
+}
 type TranslateFontMode = 'match_original' | 'reference'
 type TranslateTextColorMode = 'match_original' | 'custom'
 type RunQueuedJobResult = { jobId: string; status: string; skipped?: boolean; retryAfterMs?: number }
@@ -207,12 +227,12 @@ function normalizeOutfitModels(body: any): Array<{ assetId: string; label: strin
     }))
 }
 
-function createAssetDataUrlCache(env: Env) {
+function createAssetDataUrlCache(env: Env, userId?: string | null, projectId = '') {
   const cache = new Map<string, Promise<string | null>>()
   return (assetId: string) => {
     const id = String(assetId || '').trim()
     if (!id) return Promise.resolve(null)
-    if (!cache.has(id)) cache.set(id, getAssetDataUrl(env, id))
+    if (!cache.has(id)) cache.set(id, getAuthorizedAssetDataUrl(env, id, userId, projectId))
     return cache.get(id) as Promise<string | null>
   }
 }
@@ -282,11 +302,15 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 
 function queueProgressPublisher(env: Env, jobId: string) {
   let chain = Promise.resolve()
+  let scheduled = false
   return {
     publish() {
+      if (scheduled) return
+      scheduled = true
       chain = chain
         .catch(() => undefined)
         .then(async () => {
+          scheduled = false
           const nextJob = await updateJobCounts(env, jobId)
           if (nextJob) await publishJobProgress(env, nextJob)
         })
@@ -297,10 +321,17 @@ function queueProgressPublisher(env: Env, jobId: string) {
   }
 }
 
-async function maybeSealClientKeys(env: Env, jobId: string, clientKeys: ClientKeys): Promise<string | null> {
-  if (!clientKeys || Object.keys(clientKeys).length === 0) return null
-  const ciphertext = await sealJson(clientKeys, jobCredentialSecret(env))
-  const record = await createSealedCredential(env, jobId, ciphertext, addMinutes(30))
+export async function maybeSealClientKeys(env: Env, jobId: string, clientKeys: ClientKeys, ttlMinutes = 30): Promise<string | null> {
+  if (env.VS_DB && !jobCredentialSecret(env)) throw createRunnerError('A shared credential encryption key is required for queued jobs', 503)
+  const provider = resolveProvider(env, clientKeys)
+  const defaults = provider === 'modeljetty'
+    ? { modeljettyApiKey: env.MODELJETTY_API_KEY }
+    : { visionApiKey: env.VISION_API_KEY, banana2ApiKey: env.BANANA2_API_KEY, bananaProApiKey: env.BANANA_PRO_API_KEY, gptImageApiKey: env.GPT_IMAGE_API_KEY, gptImageGroup: env.GPT_IMAGE_GROUP }
+  const keys: ClientKeys = { ...Object.fromEntries(Object.entries(defaults).filter(([, value]) => value)), ...clientKeys, provider }
+  // Refresh managed credentials when executing; do not queue a short-lived bearer.
+  if (keys.modeljettyManaged === 'true') delete keys.modeljettyApiKey
+  const ciphertext = await sealJson(keys, jobCredentialSecret(env))
+  const record = await createSealedCredential(env, jobId, ciphertext, addMinutes(ttlMinutes))
   return record.id
 }
 
@@ -336,8 +367,17 @@ async function loadClientKeys(env: Env, credentialId?: string | null): Promise<C
   throw lastError
 }
 
-async function loadJobClientKeys(env: Env, job: JobRecord): Promise<ClientKeys> {
+export async function loadJobClientKeys(env: Env, job: JobRecord): Promise<ClientKeys> {
   const sealedKeys = await loadClientKeys(env, String(job.configJson?.sealedCredentialId || ''))
+  if (job.configJson?.sealedCredentialId && !Object.keys(sealedKeys).length) {
+    throw createRunnerError('Job credentials unavailable; reconcile provider tasks before creating a new job', 401)
+  }
+  if (sealedKeys.modeljettyManaged === 'true') {
+    if (!job.userId) throw createRunnerError('ModelJetty account required', 401)
+    const managed = await loadLinkedModeljettyClientKeys(env, job.userId)
+    if (!managed.modeljettyApiKey) throw createRunnerError('Reconnect ModelJetty before resuming this job', 401)
+    return { ...sealedKeys, ...managed }
+  }
   if (Object.keys(sealedKeys).length > 0) return sealedKeys
   return loadUserClientKeys(env, job.userId || null)
 }
@@ -398,6 +438,7 @@ function resolveItemsPerRun(value: unknown, fallback: number): number {
 }
 
 function isRetryableError(error: any): boolean {
+  if (/UNKNOWN_SUBMIT_RESULT/.test(String(error?.message || ''))) return false
   const status = Number(error?.status || error?.payload?.status || 0)
   return [408, 409, 425, 429].includes(status) || status >= 500 || status === 0
 }
@@ -516,7 +557,7 @@ function hasRecoverableImageTask(item: JobItemRecord): boolean {
   return Boolean(getRecoverableImageTask(item))
 }
 
-async function scheduleJobExecution(
+export async function scheduleJobExecution(
   env: Env,
   job: JobRecord,
   waitUntil: WaitUntil | undefined,
@@ -531,7 +572,7 @@ async function scheduleJobExecution(
       jobId: job.id,
       jobType: job.type,
       reason,
-      clientKeys: Object.keys(clientKeys || {}).length ? sanitizeClientKeys(clientKeys) : undefined,
+      // Credentials are already encrypted in D1; queue payloads contain identifiers only.
       delaySeconds: Math.max(0, Math.ceil(delayMs / 1000)) || undefined,
     }),
     () => runQueuedJob(env, job.id),
@@ -554,6 +595,7 @@ export async function submitTranslateBatch(
   const fontConfig = normalizeTranslateFontConfig(body)
   const modelId = body?.modelId || DEFAULT_TRANSLATE_MODEL_ID
   const configJson = {
+    inputProjectId: String(body?.projectId || ''),
     modelId,
     sourceLanguage: body?.sourceLanguage || 'auto',
     targetLanguages,
@@ -630,7 +672,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
     DEFAULT_ASYNC_IMAGE_JOB_CONCURRENCY,
   )
   const progress = queueProgressPublisher(env, jobId)
-  const getCachedAssetDataUrl = createAssetDataUrlCache(env)
+  const getCachedAssetDataUrl = createAssetDataUrlCache(env, initialJob.userId, String(initialJob.configJson.inputProjectId || ''))
   const getCachedTranslatePlan = createTranslationPlanCache(env, initialJob, clientKeys, getCachedAssetDataUrl)
 
   await runPool(runItems, concurrency, async (queuedItem) => {
@@ -653,13 +695,13 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
       const [sourceAsset, dataUrl, ocrPlan, fontReferenceDataUrl] = await Promise.all([
         getAsset(env, assetId),
         getCachedAssetDataUrl(assetId),
-        getCachedTranslatePlan(assetId),
+        queuedExistingTask ? Promise.resolve(null) : getCachedTranslatePlan(assetId),
         fontReferenceAssetId ? getCachedAssetDataUrl(fontReferenceAssetId) : Promise.resolve(null),
       ])
       if (!dataUrl) throw createRunnerError(`Asset not found: ${assetId}`, 404)
       const { mime, base64 } = splitDataUrl(dataUrl)
       const fontReferenceImage = fontReferenceDataUrl ? splitDataUrl(fontReferenceDataUrl) : null
-      const { result, attempts } = await runWithAutoRetry(() => executeTranslate({
+      const result = await executeTranslateTaskStep({
         imageBase64: base64,
         mime,
         sourceLanguage: job.configJson.sourceLanguage,
@@ -677,7 +719,23 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
         sourceHeight: sourceAsset?.height || null,
         ocrPlan,
         clientKeys,
-      }, env))
+      }, env, {
+        ...imageSubmissionHooks(env, job, item, clientKeys),
+        existingTask: queuedExistingTask || undefined,
+        maxPollAttempts: 1,
+        returnAfterCreate: true,
+        skipInitialPollDelay: Boolean(queuedExistingTask),
+      })
+      if (result.pending) {
+        await updateJobItem(env, job.id, item.id, { status: 'queued', outputJson: { ...item.outputJson,
+          imageTask: result.task, imageTaskPollTarget: result.pollTarget, imageTaskPollUrl: result.pollUrl,
+          imageTaskStatus: result.taskStatus, nextPollAfterMs: result.nextPollAfterMs, ocr: result.ocr },
+          startedAt: null, finishedAt: null })
+        progress.publish()
+        return
+      }
+      const attempts = item.attemptCount
+
 
       const resultAsset = await createAsset(env, {
         sessionId: job.sessionId,
@@ -709,7 +767,7 @@ async function runTranslateBatchJob(env: Env, jobId: string) {
         jobId,
         eventType: 'translate_result',
         amount: 1,
-        provider: '1xm.ai',
+        provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
         modelId: String(job.configJson.modelId || ''),
       })
     } catch (error: any) {
@@ -817,6 +875,7 @@ export async function submitOutfitBatch(
     type: 'outfit_batch',
     status: 'queued',
     configJson: {
+      inputProjectId: String(body?.projectId || ''),
       modelId: body?.modelId || 'nano-banana-2',
       instructions: cleanInstruction(body?.instructions),
       modelInstructions: models.map((item) => `${item.assetId}:${item.instructions}`).sort(),
@@ -909,7 +968,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
     20,
   )
   const progress = queueProgressPublisher(env, jobId)
-  const getCachedAssetDataUrl = createAssetDataUrlCache(env)
+  const getCachedAssetDataUrl = createAssetDataUrlCache(env, initialJob.userId, String(initialJob.configJson.inputProjectId || ''))
   const getCachedOutfitAnalysis = createOutfitAnalysisCache(env, initialJob, clientKeys)
 
   await runPool(runItems, concurrency, async (queuedItem) => {
@@ -936,6 +995,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
           modelId: job.configJson.modelId,
           clientKeys,
         }, env, {
+        ...imageSubmissionHooks(env, job, item, clientKeys),
           existingTask,
           maxPollAttempts,
           skipInitialPollDelay: true,
@@ -979,6 +1039,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
           analysis,
           clientKeys,
         }, env, {
+          ...imageSubmissionHooks(env, job, item, clientKeys),
           maxPollAttempts,
           returnAfterCreate: true,
         })
@@ -1039,7 +1100,7 @@ async function runOutfitBatchJob(env: Env, jobId: string) {
         jobId,
         eventType: 'outfit_result',
         amount: 1,
-        provider: '1xm.ai',
+        provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
         modelId: String(job.configJson.modelId || ''),
       })
     } catch (error: any) {
@@ -1161,6 +1222,7 @@ export async function submitStyleTransferBatch(
   const modelId = body?.modelId || 'nano-banana-2'
   const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
   const configJson = {
+    inputProjectId: String(body?.projectId || ''),
     modelId,
     sourceAssetId,
     visualStyle,
@@ -1255,7 +1317,9 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
         : []
       const { result, attempts } = await runWithAutoRetry(() => executeStyleTransferGenerate(env, {
         sessionId: job.sessionId,
+        _submissionHooks: imageSubmissionHooks(env, job, item, clientKeys),
         _authUserId: job.userId || null,
+        projectId: job.configJson.inputProjectId || '',
         assetId: String(job.configJson.sourceAssetId || item.inputJson.sourceAssetId || ''),
         visualStyle: job.configJson.visualStyle,
         subject: String(item.inputJson.subject || ''),
@@ -1349,7 +1413,7 @@ async function runStyleTransferBatchJob(env: Env, jobId: string) {
         jobId,
         eventType: 'style_transfer_result',
         amount: 1,
-        provider: '1xm.ai',
+        provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
         modelId: String(job.configJson.modelId || ''),
       })
     } catch (error: any) {
@@ -1489,6 +1553,7 @@ export async function submitAiTestBatch(
   const jobId = createId('job')
   const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
   const configJson = {
+    inputProjectId: String(body?.projectId || ''),
     request,
     templateId: activeTemplate.id,
     templateKey: activeTemplate.key,
@@ -1613,6 +1678,8 @@ export async function runAiTestBatchJob(env: Env, jobId: string) {
         : {}
       const imageAssetId = String(item.inputJson.imageAssetId || image.assetId || '').trim()
       const request = normalizeDirectGenerateRequest({
+        _authUserId: initialJob.userId || null,
+        projectId: initialJob.configJson.inputProjectId || '',
         prompt: item.inputJson.prompt,
         aspectRatio: item.inputJson.aspectRatio,
         resolution: item.inputJson.resolution,
@@ -1630,6 +1697,7 @@ export async function runAiTestBatchJob(env: Env, jobId: string) {
         20,
       )
       const result = await executeDirectGenerateTaskStep(env, request, clientKeys, {
+      ...imageSubmissionHooks(env, initialJob, item, clientKeys),
         existingTask: existingTask || undefined,
         finalPrompt: String(item.outputJson?.finalPrompt || item.inputJson.prompt || ''),
         maxPollAttempts,
@@ -1696,7 +1764,7 @@ export async function runAiTestBatchJob(env: Env, jobId: string) {
         jobId,
         eventType: 'ai_test_result',
         amount: 1,
-        provider: '1xm.ai',
+        provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
         modelId: String(item.inputJson.modelId || job.configJson?.request?.modelId || ''),
       })
     } catch (error: any) {
@@ -1784,6 +1852,11 @@ export async function submitGenerateTurn(
     ? await getConversation(env, String(body.conversationId))
     : await createConversation(env, session.id, userId)
   if (!conversation) throw createRunnerError('Conversation not found', 404)
+  if (userId && conversation.userId !== userId) throw createRunnerError('No access to this conversation', 403)
+  if (body?.previousTurnId) {
+    const previous = await getConversationTurn(env, String(body.previousTurnId))
+    if (!previous || previous.conversationId !== conversation.id) throw createRunnerError('Previous turn must belong to this conversation', 403)
+  }
 
   const jobId = createId('job')
   const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
@@ -1815,6 +1888,7 @@ export async function submitGenerateTurn(
     type: 'generate_turn',
     status: 'queued',
     configJson: {
+      inputProjectId: String(body?.projectId || ''),
       turnId: turn.id,
       conversationId: conversation.id,
       sealedCredentialId,
@@ -1900,7 +1974,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   const referenceImages = (await Promise.all(referenceAssets.map(async (entry: any) => {
     const assetId = String(entry?.assetId || '')
     if (!assetId) return null
-    const dataUrl = await getAssetDataUrl(env, assetId)
+    const dataUrl = await getAuthorizedAssetDataUrl(env, assetId, job.userId, String(job.configJson.inputProjectId || ''))
     if (!dataUrl) return null
     const image = splitDataUrl(dataUrl)
     return {
@@ -1916,7 +1990,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
   if (turn.previousTurnId) {
     const previousTurn = await getConversationTurn(env, String(turn.previousTurnId))
     if (previousTurn?.resultAssetId) {
-      const previousDataUrl = await getAssetDataUrl(env, previousTurn.resultAssetId)
+      const previousDataUrl = await getAuthorizedAssetDataUrl(env, previousTurn.resultAssetId, job.userId, String(job.configJson.inputProjectId || ''))
       if (previousDataUrl) previousResult = splitDataUrl(previousDataUrl)
     }
   }
@@ -1944,6 +2018,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       }
       await publishEvent(env, 'turn', turn.id, event.type, { ...event })
     }, {
+      ...imageSubmissionHooks(env, job, item, clientKeys),
       existingTask,
       finalPrompt: String(item.outputJson?.finalPrompt || turn.requestJson?.refinedPrompt || ''),
       agentNotes: String(item.outputJson?.agentNotes || turn.requestJson?.agentNotes || ''),
@@ -2095,7 +2170,7 @@ async function runGenerateTurnJob(env: Env, jobId: string) {
       jobId,
       eventType: 'generate_result',
       amount: 1,
-      provider: '1xm.ai',
+      provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
       modelId: turn.modelId,
     })
     await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
@@ -2136,21 +2211,29 @@ export async function submitGenerateDirectJob(
   env: Env,
   body: any,
   waitUntil?: WaitUntil,
+  stableJobId?: string,
 ) {
   const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
   const session = await ensureSession(env, body?.sessionId, userId)
   const request = normalizeDirectGenerateRequest(body)
   if (!request.prompt) throw createRunnerError('prompt required', 400)
 
-  const jobId = createId('job')
-  const sealedCredentialId = await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
-  const job = await createJob(env, {
+  const jobId = stableJobId || createId('job')
+  const existing = stableJobId ? await getJob(env, stableJobId) : null
+  if (existing) {
+    if (existing.userId !== userId || existing.type !== 'generate_batch') throw createRunnerError('Job identity conflict', 409)
+    if ((await listJobItems(env, existing.id)).length) return { jobId: existing.id, sessionId: existing.sessionId, itemCount: 1 }
+  }
+  const sealedCredentialId = existing?.configJson.sealedCredentialId || await maybeSealClientKeys(env, jobId, body?.clientKeys || {})
+  let job = existing
+  if (!job) try { job = await createJob(env, {
     id: jobId,
     sessionId: session.id,
     userId,
     type: 'generate_batch',
     status: 'queued',
     configJson: {
+      inputProjectId: String(body?.projectId || ''),
       ...request,
       referenceAssetIds: request.referenceEntries.map((entry) => entry.assetId),
       sealedCredentialId,
@@ -2163,9 +2246,13 @@ export async function submitGenerateDirectJob(
     progressTotal: 1,
     progressDone: 0,
     progressFailed: 0,
-  })
+  }) } catch (error) {
+    job = stableJobId ? await getJob(env, jobId) : null
+    if (!job || job.userId !== userId || job.type !== 'generate_batch') throw error
+  }
 
-  await createJobItems(env, job.id, [{
+  try { await createJobItems(env, job.id, [{
+    ...(stableJobId ? { id: `item_${job.id}` } : {}),
     jobId: job.id,
     itemType: 'generate_batch_item',
     status: 'queued',
@@ -2181,7 +2268,9 @@ export async function submitGenerateDirectJob(
     errorMessage: null,
     startedAt: null,
     finishedAt: null,
-  }])
+  }]) } catch (error) {
+    if (!stableJobId || !(await listJobItems(env, job.id)).length) throw error
+  }
 
   await publishEvent(env, 'job', job.id, 'status', { status: 'queued', type: job.type })
   await publishJobProgress(env, job)
@@ -2215,6 +2304,8 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
   try {
     const request = normalizeDirectGenerateRequest({
       ...initialJob.configJson,
+      _authUserId: initialJob.userId || null,
+      projectId: initialJob.configJson.inputProjectId || '',
       referenceImages: initialJob.configJson.referenceEntries,
     })
     const maxPollAttempts = clampNonNegativeInt(
@@ -2224,6 +2315,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
     )
     const existingTask = claimedItem.outputJson?.imageTask
     const result = await executeDirectGenerateTaskStep(env, request, clientKeys, {
+      ...imageSubmissionHooks(env, initialJob, claimedItem, clientKeys),
       existingTask,
       finalPrompt: String(claimedItem.outputJson?.finalPrompt || ''),
       maxPollAttempts,
@@ -2269,7 +2361,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       kind: 'result',
       source: 'generate_direct',
       dataUrl: result.dataUrl,
-      filename: `${initialJob.id}.png`,
+      filename: `${initialJob.id}.${/image\/jpe?g/i.test(splitDataUrl(result.dataUrl).mime) ? 'jpg' : /image\/webp/i.test(splitDataUrl(result.dataUrl).mime) ? 'webp' : 'png'}`,
       width: result.width,
       height: result.height,
       bucketKind: 'result',
@@ -2288,7 +2380,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
     await updateJob(env, jobId, {
       status: 'completed',
       progressDone: 1,
-      summaryJson: { resultAssetId: resultAsset.id },
+      summaryJson: { resultAssetId: resultAsset.id, timings:result.timings },
     })
     await publishEvent(env, 'item', claimedItem.id, 'item_completed', {
       jobId,
@@ -2304,7 +2396,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       jobId,
       eventType: 'generate_direct_result',
       amount: 1,
-      provider: '1xm.ai',
+      provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
       modelId: String(initialJob.configJson.modelId || ''),
     })
     await finalizeCredential(env, String(initialJob.configJson?.sealedCredentialId || ''))
@@ -2379,7 +2471,9 @@ async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {
     })
   }
 
-  await finalizeCredential(env, String(job.configJson?.sealedCredentialId || ''))
+  // Failed jobs may still have a live provider task. Keep the encrypted connection
+  // marker so reauthorization can resume polling without submitting another image.
+  await finalizeCredentialForStatus(env, String(job.configJson?.sealedCredentialId || ''), finalJob?.status || 'failed')
 }
 
 export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: ClientKeys): Promise<RunQueuedJobResult> {
@@ -2430,6 +2524,8 @@ export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: C
       await runAiTestBatchJob(env, job.id)
     } else if (job.type === 'generate_turn') {
       await runGenerateTurnJob(env, job.id)
+    } else if (job.type === 'canvas_agent') {
+      await runCanvasAgentJob(env, job.id)
     } else if (job.type === 'generate_batch') {
       await runGenerateBatchJob(env, job.id)
     } else {
@@ -2438,19 +2534,29 @@ export async function runQueuedJob(env: Env, jobId: string, inlineClientKeys?: C
         summaryJson: { error: `No runner registered for ${job.type}` },
       })
     }
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.code === 'MODELJETTY_REFRESH_BUSY') {
+      // Another job is rotating this account's token. Retain the queued job and its sealed credentials.
+      return { jobId: job.id, status: job.status, retryAfterMs: 5_000 }
+    }
+    if (job.type === 'canvas_agent' && [401, 403].includes(Number(error?.status))) {
+      const latest = await getJob(env, job.id)
+      await updateJob(env, job.id, { status: 'paused', summaryJson: { ...latest?.summaryJson, error: String(error.message || '请重新连接账号后继续') } })
+      return { jobId: job.id, status: 'paused' }
+    }
     await failQueuedJobSetup(env, job, error)
   }
 
   return { jobId: job.id, status: (await getJob(env, job.id))?.status || job.status }
 }
 
-export async function recoverJobs(env: Env, waitUntil?: WaitUntil) {
+export async function recoverJobs(env: Env, waitUntil?: WaitUntil, userId?: string) {
   const jobs = await listJobsByStatus(env, ['queued', 'running'])
   const scheduled: Array<Record<string, unknown>> = []
   const staleAfterMs = clampMs((env as Env & { VS_JOB_ITEM_TIMEOUT_MS?: string }).VS_JOB_ITEM_TIMEOUT_MS, DEFAULT_STALE_JOB_ITEM_MS)
 
   for (const job of jobs) {
+    if (userId && job.userId !== userId) continue
     const recovered = job.status === 'running'
       ? await recoverRunningJob(env, job, staleAfterMs)
       : { shouldSchedule: true, previousStatus: job.status }
@@ -2480,6 +2586,7 @@ export async function recoverJobs(env: Env, waitUntil?: WaitUntil) {
 }
 
 async function recoverRunningJob(env: Env, job: JobRecord, staleAfterMs: number): Promise<{ shouldSchedule: boolean; previousStatus: string }> {
+  if (job.type === 'canvas_agent') return recoverCanvasAgentJob(env, job, staleAfterMs)
   const items = await listJobItems(env, job.id)
   const runningItems = items.filter((item) => item.status === 'running')
   const staleItems = runningItems.filter((item) => isRecoverableRunningItemReady(item) || isStaleItem(item, job, staleAfterMs))
@@ -2491,15 +2598,13 @@ async function recoverRunningJob(env: Env, job: JobRecord, staleAfterMs: number)
   for (const item of staleItems) {
     if (hasRecoverableImageTask(item)) {
       await requeueImageTaskItems(env, job.id, [item])
-    } else if (item.attemptCount >= MAX_JOB_ITEM_ATTEMPTS) {
+    } else {
       await updateJobItem(env, job.id, item.id, {
         status: 'failed',
-        errorCode: 'job_item_timeout',
-        errorMessage: `Job item timed out after ${MAX_JOB_ITEM_ATTEMPTS} attempts.`,
+        errorCode: 'unknown_submit_result',
+        errorMessage: 'UNKNOWN_SUBMIT_RESULT: 执行中断且缺少供应商回执，请先回查，禁止自动重发。',
         finishedAt: nowIso(),
       })
-    } else {
-      await requeueItems(env, job.id, [item])
     }
   }
 
@@ -2574,6 +2679,10 @@ function getRunningJobRetryAfterMs(job: JobRecord, staleAfterMs: number): number
 export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
   const job = await getJob(env, jobId)
   if (!job) throw createRunnerError('Job not found', 404)
+  if ((await listJobItems(env, job.id)).some(item => /UNKNOWN_SUBMIT_RESULT/.test(item.errorMessage || ''))) {
+    throw createRunnerError('提交结果未知，请先回查服务商任务，不能直接重试', 409)
+  }
+  await restoreManagedPollingCredential(env, job)
 
   if (job.type === 'translate_batch') {
     const items = (await listJobItems(env, job.id)).filter((item) => item.status === 'failed')
@@ -2629,11 +2738,29 @@ export async function retryJob(env: Env, jobId: string, waitUntil?: WaitUntil) {
   throw createRunnerError(`Retry not supported for ${job.type}`, 400)
 }
 
+async function restoreManagedPollingCredential(env: Env, job: JobRecord) {
+  const credentialId = String(job.configJson?.sealedCredentialId || '')
+  if (!credentialId || await getSealedCredential(env, credentialId)) return
+  const items = (await listJobItems(env, job.id)).filter(item => item.status !== 'completed')
+  const base = `${resolveRelayBaseUrl(env, { provider: 'modeljetty', modeljettyManaged: 'true' })}/images/tasks/`
+  // Upgrade older jobs that deleted their connection marker on authentication failure.
+  // Only saved, owner-scoped ModelJetty managed receipts authorize restoring it.
+  if (!job.userId || !items.length || !items.every(item => {
+    const task = getRecoverableImageTask(item)
+    return task && String(task.poll_url || task.pollUrl || '').startsWith(base)
+  })) throw createRunnerError('Job credentials unavailable; reconcile provider tasks before retrying', 401)
+  const keys = await loadLinkedModeljettyClientKeys(env, job.userId)
+  if (!keys.modeljettyApiKey) throw createRunnerError('Reconnect ModelJetty before resuming this job', 401)
+  const restoredId = await maybeSealClientKeys(env, job.id, keys)
+  await updateJob(env, job.id, { configJson: { ...job.configJson, sealedCredentialId: restoredId } })
+}
+
 export async function retryJobItem(env: Env, jobId: string, itemId: string, waitUntil?: WaitUntil) {
   const job = await getJob(env, jobId)
   if (!job) throw createRunnerError('Job not found', 404)
   const item = (await listJobItems(env, job.id)).find((entry) => entry.id === itemId)
   if (!item) throw createRunnerError('Job item not found', 404)
+  if (/UNKNOWN_SUBMIT_RESULT/.test(item.errorMessage || '')) throw createRunnerError('提交结果未知，请先回查服务商任务，不能直接重试', 409)
   if (!['translate_batch', 'outfit_batch', 'style_transfer_batch', 'ai_test_batch'].includes(job.type)) {
     throw createRunnerError(`Item retry not supported for ${job.type}`, 400)
   }

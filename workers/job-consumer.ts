@@ -5,6 +5,7 @@ type QueueMessageBody = {
   kind?: string
   jobId?: string
   clientKeys?: Record<string, string>
+  delaySeconds?: number
 }
 
 type QueueMessageLike = {
@@ -84,17 +85,29 @@ export default {
       : [payload as QueueMessageBody]
     let acked = 0
     let retried = 0
+    const retries: QueueMessageBody[] = []
     const messages = bodies.map((body) => ({
       body,
       ack: () => {
         acked += 1
       },
-      retry: () => {
+      retry: (options?: { delaySeconds?: number }) => {
         retried += 1
+        retries.push({ ...body, delaySeconds: options?.delaySeconds || 5 })
       },
     }))
 
-    const run = processQueueMessages(messages, env)
+    const run = (async () => {
+      // Cloudflare Queue applies delivery delays itself. The local HTTP bridge
+      // must do the same, otherwise a monitoring parent spins in a tight loop.
+      const delay = Math.min(20, Math.max(0, ...bodies.map(body => Number(body.delaySeconds) || 0)))
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay * 1000))
+      await processQueueMessages(messages, env)
+      for (const body of ctx?.waitUntil ? retries : []) {
+        const response = await fetch(url.href, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        if (!response.ok) throw new Error('Local queue redelivery unavailable; recover persisted job')
+      }
+    })()
     if (ctx?.waitUntil) {
       ctx.waitUntil(run)
       return json({ ok: true, accepted: messages.length, acked, retried, mode: 'background' })

@@ -1,5 +1,7 @@
+import { getAuthorizedAssetDataUrl } from '../../_lib/permissions'
+import { assertInputAssetAccess } from '../../_lib/permissions'
 import {
-  Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
+  Env, resolveRelayBaseUrl, resolveVisionModel, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
 } from '../../_shared'
 import { requireAuth } from '../../_lib/auth'
@@ -86,6 +88,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   try {
     const user = await requireAuth(env, request)
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
     return json(await analyzeCanvasPsdOcr(env, { ...body, clientKeys, _authUserId: user.id }))
   } catch (error: any) {
@@ -106,9 +109,9 @@ export async function analyzeCanvasPsdOcr(env: Env, body: any): Promise<CanvasPs
   if (!width || !height) throw createError('width and height required', 400)
 
   const raw = await callTextModel(
-    env.RELAY_BASE_URL || DEFAULT_BASE,
+    resolveRelayBaseUrl(env, clientKeys),
     visionKey,
-    VISION_MODEL,
+    resolveVisionModel(env, clientKeys),
     [
       {
         role: 'user',
@@ -139,6 +142,7 @@ export async function decomposeCanvasPsdImage(env: Env, body: any): Promise<Canv
   if (!visionKey) throw createError('缺少 Vision Key，无法分析 PSD 图层', 400)
   if (!MODEL_MAP[modelId]) throw createError(`Unknown modelId: ${modelId}`, 400)
   if (!genKey) throw createError(`Missing API key for ${modelId}`, 400)
+  const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
 
   const image = await resolveOcrImage(env, body)
   const width = normalizeDimension(body?.width || image.width)
@@ -158,8 +162,7 @@ export async function decomposeCanvasPsdImage(env: Env, body: any): Promise<Canv
   const source = splitDataUrl(image.dataUrl)
   if (!source) throw createError('dataUrl must be an image data URL', 400)
 
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
-  const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   imageModelOptions.size = buildImageModelSize(width, height)
   imageModelOptions.quality = 'high'
   const targets = selectCanvasPsdExtractionTargets(analysis.semanticLayers, normalizeLayerLimit(body?.maxLayers), width, height)
@@ -221,9 +224,9 @@ async function analyzeCanvasPsdImage(env: Env, body: any): Promise<CanvasPsdOcrR
   if (!width || !height) throw createError('width and height required', 400)
 
   const raw = await callTextModel(
-    env.RELAY_BASE_URL || DEFAULT_BASE,
+    resolveRelayBaseUrl(env, clientKeys),
     visionKey,
-    VISION_MODEL,
+    resolveVisionModel(env, clientKeys),
     [
       {
         role: 'user',
@@ -694,7 +697,7 @@ async function resolveOcrImage(env: Env, body: any): Promise<{ dataUrl: string; 
 
   const assetId = String(body?.assetId || '').trim()
   if (!assetId) throw createError('dataUrl or assetId required', 400)
-  const assetDataUrl = await getAssetDataUrl(env, assetId)
+  const assetDataUrl = await getAuthorizedAssetDataUrl(env, assetId, body?._authUserId, String(body?.projectId || ''))
   if (!assetDataUrl) throw createError(`Asset not found: ${assetId}`, 404)
   return {
     dataUrl: assetDataUrl,

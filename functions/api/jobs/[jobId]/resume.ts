@@ -11,7 +11,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, params, 
     const jobId = String(params?.jobId || '')
     const job = await getJob(env, jobId)
     if (!job) return json({ error: 'Job not found' }, 404)
-    if (job.userId && job.userId !== user.id) return json({ error: 'No access to this job' }, 403)
+    if (job.userId !== user.id) return json({ error: 'No access to this job' }, 403)
     return json(await resumeJob(env, jobId, waitUntil))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Resume failed') }, error?.status || 502)

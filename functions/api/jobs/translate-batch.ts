@@ -1,3 +1,4 @@
+import { assertInputAssetAccess } from '../../_lib/permissions'
 import { Env, json, corsPreflight } from '../../_shared'
 import { requireAuth } from '../../_lib/auth'
 import { submitTranslateBatch } from '../../_lib/v2-runner'
@@ -16,6 +17,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUnti
   try {
     const user = await requireAuth(env, request)
     const userId = user.id
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, userId, body?.clientKeys || {})
     return json(await submitTranslateBatch(env, { ...body, clientKeys, _authUserId: userId }, waitUntil))
   } catch (error: any) {

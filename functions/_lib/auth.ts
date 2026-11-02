@@ -1,6 +1,8 @@
 import type { Env } from '../_shared'
 import type { UserRecord } from '../../packages/contracts/v2'
 import { sha256Hex } from '../../packages/core/hash'
+import { getExternalIdentity } from './v2-store'
+import { resolveAgentModel } from './model-provider'
 import {
   createAuthSession,
   createUser,
@@ -99,6 +101,7 @@ export async function hashPassword(password: string, salt = randomBase64Url(16))
 }
 
 export async function verifyPassword(password: string, user: UserRecord): Promise<boolean> {
+  if (!user.passwordHash || !user.passwordSalt) return false
   const computed = await hashPassword(password, user.passwordSalt)
   return computed.hash === user.passwordHash
 }
@@ -142,6 +145,9 @@ export async function createLoginResponse(env: Env, user: UserRecord, request: R
 
 export async function registerUser(env: Env, input: { email: string; password: string; name?: string }) {
   const email = input.email.trim().toLowerCase()
+  if (email.endsWith('@modeljetty.invalid')) {
+    throw Object.assign(new Error('此地址保留用于 ModelJetty 账号登录'), { status: 400 })
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     const error = new Error('请输入有效邮箱') as Error & { status?: number }
     error.status = 400
@@ -172,12 +178,20 @@ export async function getAuthPayload(env: Env, request: Request) {
   const usage = auth.user
     ? await getUsageSummary(env, { userId: auth.user.id })
     : {}
-  return { user: auth.user, usage }
+  const issuer = `${(env.MODELJETTY_ORIGIN || 'https://modeljetty.com').replace(/\/+$/, '')}/oidc`
+  const identity = auth.user ? await getExternalIdentity(env, issuer, { userId: auth.user.id }) : null
+  return { user: auth.user, usage, modeljetty: {
+    loginEnabled: Boolean(env.MODELJETTY_CLIENT_ID && env.MODELJETTY_REDIRECT_URI && env.CREDENTIAL_KEK),
+    connected: Boolean(identity && identity.expiresAt !== -1),
+    imageTasksEnabled: env.MODELJETTY_IMAGE_TASKS_ENABLED === 'true',
+    agentModel: resolveAgentModel(env, { provider: 'modeljetty' }),
+  } }
 }
 
 export function jsonWithCookie(data: unknown, setCookie?: string, status = 200) {
   const headers = new Headers({
     'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*',
   })
   if (setCookie) headers.set('Set-Cookie', setCookie)

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
+import { serializeDesignAgentRun } from '../public/js/design-agent-harness.js'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
 const LEGACY_HISTORY_KEY = 'img-translator:canvas-ai-history:v1'
@@ -28,6 +29,7 @@ async function createHistoryHarness() {
   const storage = new Map()
   let idCounter = 0
   const context = {
+    serializeDesignAgentRun,
     AI_HISTORY_LIMIT: 40,
     AI_HISTORY_INLINE_DATA_URL_LIMIT: 220_000,
     AI_STORED_SESSION_LIMIT: 8,
@@ -147,6 +149,17 @@ test('canvas AI history is stored separately for each canvas project', async () 
 
   assert.deepEqual(harness.loadAiHistory('canvas-a').map((msg) => msg.content), ['A 的聊天'])
   assert.deepEqual(harness.loadAiHistory('canvas-b').map((msg) => msg.content), ['B 的聊天'])
+})
+
+test('legacy plan-only sessions reopen in automatic creation without losing their messages or skill', async () => {
+  const harness = await createHistoryHarness()
+  const old = { id: 'legacy-plan-session', mode: 'plan', skillId: 'brand-campaign', messages: [{ id: 'past', role: 'assistant', content: '之前的方案' }] }
+  const restored = harness.sanitizeAiSessions([old])[0]
+  assert.equal(restored.mode, 'auto')
+  assert.equal(restored.skillId, 'brand-campaign')
+  assert.equal(restored.messages[0].content, '之前的方案')
+  assert.equal(harness.serializeAiSessions([old])[0].mode, 'auto')
+  assert.equal(harness.createAiSessionRecord(old).mode, 'auto')
 })
 
 test('switching to a project without history does not reuse legacy global history', async () => {
@@ -355,4 +368,15 @@ test('canvas AI history strips legacy poster banner composition metadata', async
   assert.equal(sanitized[0].creativeMode, 'image')
   assert.ok(!('posterBrief' in sanitized[0].images[0]))
   assert.equal(sanitized[0].workflow[0].creativeMode, 'image')
+})
+
+test('saved Agent runs preserve task receipts and mark incomplete runs interrupted on reload', async () => {
+  const harness = await createHistoryHarness()
+  const messages = harness.sanitizeAiMessages([{ id: 'message-run', role: 'assistant', content: '正在读取原任务',
+    run: { id: 'run-saved', projectId: 'project', conversationId: 'session', phase: 'executing',
+      context: {}, tasks: [{ id: 'task', title: '商品主图', jobId: 'original-job', elementId: 'original-card', status: 'accepted' }], events: [] } }])
+  assert.equal(messages[0].run.phase, 'interrupted')
+  const stored = harness.serializeAiMessage(messages[0])
+  assert.equal(stored.run.tasks[0].jobId, 'original-job')
+  assert.equal(stored.run.tasks[0].elementId, 'original-card')
 })

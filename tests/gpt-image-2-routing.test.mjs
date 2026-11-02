@@ -69,7 +69,7 @@ test('gpt-image-2 text generation creates an async image task', async () => {
   }
 })
 
-test('gpt-image-2 retries transient upstream errors before succeeding', async () => {
+test('gpt-image-2 marks transient submission errors unknown without replaying the paid POST', async () => {
   const { mod, cleanup } = await importShared()
   const originalFetch = globalThis.fetch
   const calls = []
@@ -91,11 +91,11 @@ test('gpt-image-2 retries transient upstream errors before succeeding', async ()
       { timeoutMs: 1000, retryDelayMs: 1 },
     )
 
-    assert.equal(result.ok, true)
-    assert.equal(result.dataUrl, 'data:image/png;base64,cmV0cmllZC1pbWFnZQ==')
-    assert.equal(calls.length, 2)
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 524)
+    assert.match(result.error, /UNKNOWN_SUBMIT_RESULT/)
+    assert.equal(calls.length, 1)
     assert.equal(calls[0].input, 'https://relay.example/v1/images/tasks')
-    assert.equal(calls[1].input, 'https://relay.example/v1/images/tasks')
   } finally {
     globalThis.fetch = originalFetch
     await cleanup()

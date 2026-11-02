@@ -1,3 +1,14 @@
+import { assessImageDelivery } from './js/image-delivery.js'
+import { createCanvasAgentWatcher, mergeAgentRunMessages } from './js/canvas-agent-client.js'
+import { canvasDraftKey, readCanvasDraft, writeCanvasDraft } from './js/canvas-drafts.js'
+import { createDesignAgentRun, executeDesignAgentRun, requestDesignAgentStop, serializeDesignAgentRun, canShowAgentSuggestions, buildDesignAgentManifest } from './js/design-agent-harness.js'
+import { createAgentRunRecord, createAgentManifestDialog } from './js/design-agent-view.js'
+import { agentMarkdownToHtml } from './js/agent-markdown.js'
+import { planAgentReferenceAddition } from './js/agent-references.js'
+import { getCanvasJobDisplayStatus } from './js/canvas-job-progress.js'
+import { groupModelCatalog, agentModelUnavailableReason } from './js/model-catalog.js'
+import { createUiIcon, filterProjects, getCanvasFit, mergeWorkspaceSections } from './js/workspace-ui.js'
+import { loadPsdLibrary } from './js/psd-loader.js'
 import {
   buildCanvasPsdModel,
   buildSelectedImagePsdModel,
@@ -46,11 +57,19 @@ const LANGUAGES = [
 ]
 
 const TARGET_LANGUAGES = LANGUAGES.filter((item) => item.code !== 'auto')
+const runtimeSectionSignatures = {}
+const preferenceSectionSignatures = {}
 
 const MODEL_OPTIONS = [
   { id: 'nano-banana-2', label: 'Nano Banana 2', hint: '快速 · 稳定' },
   { id: 'nano-banana-pro', label: 'Nano Banana Pro', hint: '更强细节 · 更高一致性' },
   { id: 'gpt-image-2', label: 'GPT Image 2', hint: 'OpenAI 图像模型' },
+]
+
+const MODELJETTY_MODEL_OPTIONS = [
+  { id: 'gemini-3.1-flash-image', label: 'Nano Banana 2', hint: 'ModelJetty · Gemini 生图' },
+  { id: 'gpt-image-2.5-flare', label: 'GPT Image 快速', hint: 'ModelJetty · GPT 生图与编辑' },
+  { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 精细', hint: 'ModelJetty · GPT 生图与编辑' },
 ]
 
 const TRANSLATE_FONT_MODES = new Set(['match_original', 'reference'])
@@ -402,6 +421,7 @@ const state = {
     aiMessages: [],
     aiRefs: [],
     aiRunning: false,
+    activeAgentRun: null,
     // gen panel
     genTargetId: '',
     genPrompt: '',
@@ -436,8 +456,11 @@ const state = {
   account: {
     user: null,
     usage: null,
+    modeljetty: null,
+    modeljettyUsage: null,
     apiKeys: { keys: {}, updatedAt: '' },
     apiKeysLoadedFor: '',
+    modelCatalog: { models: [], status: 'idle', error: '', ownerId: '' },
     loading: false,
     error: '',
     status: '',
@@ -777,7 +800,6 @@ const dom = {
   noticeClose: $('#app-notice-close'),
 }
 
-init()
 
 function init() {
   const runtimeMigration = migrateLegacyRuntimeStorage()
@@ -795,6 +817,7 @@ function init() {
   ensureCanvasFirstOpenAiPanel()
   populateModelSelects()
   bindShell()
+  bindWorkspaceUi()
   bindSettings()
   bindAccount()
   bindLightbox()
@@ -814,7 +837,6 @@ function init() {
   renderAppNotice()
   void loadAccount()
   void restoreRuntimeState()
-  void loadAiTestTemplates()
 }
 
 function normalizeAppView(view) {
@@ -1436,7 +1458,7 @@ function getAiTestPreviewRows() {
 }
 
 function savePrefs() {
-  localStorage.setItem(PREF_STORAGE, JSON.stringify({
+  const snapshot = {
     activeView: state.activeView,
     theme: state.theme,
     translate: {
@@ -1473,15 +1495,24 @@ function savePrefs() {
       templateVersionId: state.aiTest.templateVersionId,
       rows: sanitizeAiTestRows(state.aiTest.rows, state.aiTest.images),
     },
-  }))
+  }
+  const activeSection = state.activeView === 'ai-test' ? 'aiTest' : state.activeView
+  localStorage.setItem(PREF_STORAGE, JSON.stringify(mergeWorkspaceSections(snapshot, readJson(PREF_STORAGE, {}), preferenceSectionSignatures, activeSection)))
 }
 
 function saveRuntimeState(options = {}) {
-  const persistCanvas = options.persistCanvas !== false
-  persistCurrentAiSession()
-  saveAiHistory()
+  const ownsCanvas = state.activeView === 'generate' || state.generate.aiRunning || state.generate.genRunning
+  const persistCanvas = ownsCanvas && options.persistCanvas !== false
+  if (ownsCanvas) {
+    persistCurrentAiSession()
+    saveAiHistory()
+  }
   saveStyleHistory()
-  writeRuntimeStorageSnapshot(createRuntimeStorageSnapshot())
+  const localSnapshot = createRuntimeStorageSnapshot()
+  const activeSection = state.activeView === 'ai-test' ? 'aiTest' : state.activeView
+  const snapshot = mergeWorkspaceSections(localSnapshot, loadRuntimeState(), runtimeSectionSignatures, activeSection)
+  if (ownsCanvas) snapshot.generate = localSnapshot.generate
+  writeRuntimeStorageSnapshot(snapshot)
   if (persistCanvas) scheduleCanvasProjectSave()
 }
 
@@ -1858,11 +1889,13 @@ function loadAiSessions(projectId = state.generate.projectId, options = {}) {
     : sanitizeAiSessions(legacy?.sessions)
 }
 
-function createAiSessionRecord({ id = '', title = '', messages = [], createdAt = '', updatedAt = '' } = {}) {
+function createAiSessionRecord({ id = '', title = '', messages = [], createdAt = '', updatedAt = '', skillId = 'auto' } = {}) {
   const now = new Date().toISOString()
   return {
     id: id || crypto.randomUUID(),
     title: String(title || '').trim() || DEFAULT_AI_SESSION_TITLE,
+    mode: 'auto',
+    skillId: ['reference-product', 'reference-edit', 'brand-campaign'].includes(skillId) ? skillId : 'auto',
     messages: sanitizeAiMessages(messages),
     createdAt: createdAt || now,
     updatedAt: updatedAt || now,
@@ -1877,6 +1910,8 @@ function sanitizeAiSessions(value) {
       const messages = sanitizeAiMessages(session?.messages)
       return {
         id,
+        mode: 'auto',
+        skillId: ['reference-product', 'reference-edit', 'brand-campaign'].includes(session.skillId) ? session.skillId : 'auto',
         title: typeof session?.title === 'string' && session.title.trim() ? session.title.trim().slice(0, 48) : inferAiSessionTitle(messages),
         messages,
         createdAt: typeof session?.createdAt === 'string' ? session.createdAt : new Date().toISOString(),
@@ -1917,6 +1952,7 @@ function persistCurrentAiSession() {
 }
 
 function activateAiSession(sessionId) {
+  if (state.generate.aiRunning) return
   persistCurrentAiSession()
   const session = state.generate.aiSessions.find((item) => item.id === sessionId)
   if (!session) return
@@ -3007,6 +3043,10 @@ function sanitizeCanvasElement(raw = {}) {
     originalHeight: Math.max(0, Number(raw.originalHeight) || Number(raw.naturalHeight) || 0),
     referenceImageId: raw.referenceImageId ? String(raw.referenceImageId) : null,
     generatingPrompt: typeof raw.generatingPrompt === 'string' ? raw.generatingPrompt : '',
+    prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+    agentRunId: typeof raw.agentRunId === 'string' ? raw.agentRunId : '',
+    delivery: raw.delivery || null, qualityReview: raw.qualityReview || null,
+    generationJobId: typeof raw.generationJobId === 'string' ? raw.generationJobId : '',
     connectorFrom: typeof raw.connectorFrom === 'string' ? raw.connectorFrom : '',
     connectorTo: typeof raw.connectorTo === 'string' ? raw.connectorTo : '',
     aspectRatio: normalizeAspectRatio(raw.aspectRatio || raw.ratio || ''),
@@ -3044,6 +3084,9 @@ function serializeCanvasElement(el) {
     originalHeight: Math.max(0, Number(el.originalHeight) || Number(el.naturalHeight) || 0),
     referenceImageId: el.referenceImageId || null,
     generatingPrompt: el.generatingPrompt || '',
+    prompt: el.prompt || '', agentRunId: el.agentRunId || '',
+    delivery: el.delivery || null, qualityReview: el.qualityReview || null,
+    generationJobId: el.generationJobId || '',
     connectorFrom: el.connectorFrom || '',
     connectorTo: el.connectorTo || '',
     aspectRatio: el.aspectRatio || '',
@@ -3071,7 +3114,10 @@ function serializeAiMessage(msg = {}) {
   return {
     id: msg.id || crypto.randomUUID(),
     role,
+    ...(msg.run ? { run: serializeDesignAgentRun(msg.run) } : {}),
     creativeMode: normalizeCanvasCreativeMode(msg.creativeMode),
+    agentModel: typeof msg.agentModel === 'string' ? msg.agentModel.slice(0, 160) : '',
+    agentProvider: msg.agentProvider === 'modeljetty' ? 'modeljetty' : '',
     content: typeof msg.content === 'string' && msg.content
       ? msg.content
       : (msg.loading ? `${msg.loadingText || 'AI 正在处理'}…` : ''),
@@ -3115,7 +3161,9 @@ function serializeAiWorkflowItem(item = {}) {
     id: typeof item.id === 'string' ? item.id : '',
     title,
     prompt,
-    status: ['queued', 'running', 'completed', 'failed'].includes(item.status) ? item.status : 'queued',
+    status: ['queued', 'running', 'accepted', 'completed', 'failed', 'unknown', 'skipped'].includes(item.status) ? item.status : 'queued',
+    jobId: typeof item.jobId === 'string' ? item.jobId : '',
+    elementId: typeof item.elementId === 'string' ? item.elementId : '',
     error: typeof item.error === 'string' ? item.error : '',
     creativeMode: normalizeCanvasCreativeMode(item.creativeMode),
   }
@@ -3127,6 +3175,7 @@ function serializeAiMessageRef(ref = {}) {
   if (!assetId && !dataUrl) return null
   return {
     assetId,
+    role: ['subject', 'style', 'layout'].includes(ref.role) ? ref.role : 'subject',
     dataUrl,
     name: typeof ref.name === 'string' ? ref.name : '',
     mime: typeof ref.mime === 'string' ? ref.mime : '',
@@ -3153,7 +3202,10 @@ function sanitizeAiMessages(value) {
       return {
         id: typeof msg.id === 'string' ? msg.id : crypto.randomUUID(),
         role,
+        ...(msg.run ? { run: serializeDesignAgentRun(msg.run, { restore: !state.generate.aiRunning }) } : {}),
         creativeMode: normalizeCanvasCreativeMode(msg.creativeMode),
+        agentModel: typeof msg.agentModel === 'string' ? msg.agentModel.slice(0, 160) : '',
+        agentProvider: msg.agentProvider === 'modeljetty' ? 'modeljetty' : '',
         content: typeof msg.content === 'string' ? msg.content : '',
         steps: Array.isArray(msg.steps) ? msg.steps.map(String).filter(Boolean).slice(0, 8) : [],
         refs: sanitizeAiMessageRefs(msg.refs),
@@ -3483,6 +3535,50 @@ function serializeStyleHistoryEntries(entries) {
   }))
 }
 
+function bindWorkspaceUi() {
+  const shortLabels = { home: '工作台', generate: '画布', projects: '项目', translate: '翻译', outfit: '换装', style: '风格', 'ai-test': '测图' }
+  for (const button of dom.navItems) {
+    button.setAttribute('aria-label', button.title)
+    button.dataset.shortLabel = shortLabels[button.dataset.view] || button.title
+  }
+  for (const field of $$('.field:not(label)')) {
+    const label = field.querySelector(':scope > label')
+    const control = field.querySelector('input:not([type="file"]), select, textarea')
+    if (label && control?.id && !label.contains(control)) label.htmlFor = control.id
+  }
+  $('#g-home')?.addEventListener('click', () => setActiveView('home'))
+  $('#settings-close')?.addEventListener('click', () => dom.settingsDialog.close())
+  $('#p-search')?.addEventListener('input', renderProjects)
+  for (const button of $$('[data-home-prompt]')) {
+    button.addEventListener('click', () => {
+      state.home.prompt = button.dataset.homePrompt || ''
+      dom.hPrompt.value = state.home.prompt
+      dom.hPrompt.focus()
+    })
+  }
+  $('#g-shortcuts')?.addEventListener('click', () => $('#shortcuts-dialog').showModal())
+  $('#g-fit')?.addEventListener('click', () => {
+    const fit = getCanvasFit(state.generate.elements, dom.gCanvasContainer.clientWidth, dom.gCanvasContainer.clientHeight, window.innerWidth <= 520)
+    if (!fit) return
+    Object.assign(state.generate, fit)
+    updateCanvasTransform()
+    updateZoomDisplay()
+    renderConnectors()
+    refreshGenPanelPosition()
+    saveRuntimeState()
+  })
+}
+
+function syncAiPanelChrome() {
+  dom.gAiToggle.classList.toggle('active', state.generate.showAiPanel)
+  dom.gAiToggle.setAttribute('aria-expanded', String(state.generate.showAiPanel))
+  dom.gAiToggle.setAttribute('aria-controls', 'g-ai-sidebar')
+  requestAnimationFrame(() => {
+    renderConnectors()
+    refreshGenPanelPosition()
+  })
+}
+
 function bindShell() {
   for (const button of dom.navItems) {
     button.addEventListener('click', () => {
@@ -3501,6 +3597,8 @@ function bindShell() {
 
   const sourceTrigger = $('.dd-trigger', dom.sourceDropdown)
   const targetTrigger = $('.dd-trigger', dom.targetDropdown)
+  bindLanguageDropdownKeyboard(dom.sourceDropdown, sourceTrigger, dom.sourceMenu, 'source', '源语言')
+  bindLanguageDropdownKeyboard(dom.targetDropdown, targetTrigger, dom.targetMenu, 'target', '目标语言')
 
   sourceTrigger.addEventListener('click', (event) => {
     event.stopPropagation()
@@ -3527,6 +3625,7 @@ function bindShell() {
     savePrefs()
     renderTranslateDropdowns()
     closeDropdowns()
+    sourceTrigger.focus()
   })
 
   dom.targetMenu.addEventListener('click', (event) => {
@@ -3535,10 +3634,52 @@ function bindShell() {
     const code = item.dataset.code
     if (!TARGET_LANGUAGES.some((language) => language.code === code)) return
     toggleTargetLanguage(code)
+    if (state.openDropdown === 'target') dom.targetMenu.querySelector(`[data-code="${code}"]`)?.focus()
+  })
+}
+
+function bindLanguageDropdownKeyboard(dropdown, trigger, menu, name, label) {
+  trigger.setAttribute('aria-label', label)
+  trigger.setAttribute('aria-controls', menu.id)
+  trigger.setAttribute('aria-expanded', 'false')
+  dropdown.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.openDropdown === name) {
+      event.preventDefault()
+      closeDropdowns()
+      trigger.focus()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    if (state.openDropdown !== name) toggleDropdown(name)
+    const options = Array.from(menu.querySelectorAll('button:not(:disabled)'))
+    if (!options.length) return
+    const current = options.indexOf(event.target)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+      : current < 0 ? event.key === 'ArrowUp' ? options.length - 1 : 0
+        : (current + (event.key === 'ArrowUp' ? -1 : 1) + options.length) % options.length
+    options[next].focus()
   })
 }
 
 function bindSettings() {
+  $('#settings-model-search')?.addEventListener('input', () => renderModeljettyModelChoices())
+  $('#settings-refresh-models')?.addEventListener('click', () => { void loadModeljettyModelCatalog(true) })
+  $('#k-agent-modeljetty')?.addEventListener('change', renderSettingsProvider)
+  $('#k-agent-1xm')?.addEventListener('input', renderSettingsProvider)
+  for (const button of $$('[data-settings-tab]')) {
+    button.addEventListener('click', () => activateSettingsTab(button.dataset.settingsTab))
+    button.addEventListener('keydown', (event) => {
+      const buttons = $$('[data-settings-tab]')
+      const direction = ['ArrowDown', 'ArrowRight'].includes(event.key) ? 1 : ['ArrowUp', 'ArrowLeft'].includes(event.key) ? -1 : 0
+      if (!direction) return
+      event.preventDefault()
+      const next = buttons[(buttons.indexOf(button) + direction + buttons.length) % buttons.length]
+      activateSettingsTab(next.dataset.settingsTab)
+      next.focus()
+    })
+  }
+  $('#k-provider')?.addEventListener('change', renderSettingsProvider)
   dom.settingsBtn.addEventListener('click', () => {
     hydrateSettingsForm()
     dom.settingsDialog.showModal()
@@ -3550,8 +3691,8 @@ function bindSettings() {
   })
 
   dom.settingsClear.addEventListener('click', () => {
-    localStorage.removeItem(KEY_STORAGE)
-    state.keys = {}
+    state.keys = Object.fromEntries(Object.entries(state.keys).filter(([key]) => ['provider', 'modeljettyAgentModel', 'oneXmAgentModel'].includes(key)))
+    localStorage.setItem(KEY_STORAGE, JSON.stringify(state.keys))
     hydrateSettingsForm()
     setSettingsKeyStatus('已清空本机保存的 Key')
   })
@@ -3570,10 +3711,26 @@ function bindSettings() {
   }
 }
 
+function activateSettingsTab(tab) {
+  for (const button of $$('[data-settings-tab]')) {
+    const active = button.dataset.settingsTab === tab
+    button.setAttribute('aria-selected', String(active))
+    button.tabIndex = active ? 0 : -1
+  }
+  for (const panel of $$('[data-settings-panel]')) panel.classList.toggle('hidden', panel.dataset.settingsPanel !== tab)
+}
+
 async function saveSettingsForm(event) {
   event.preventDefault()
+  const selectedModel = $('#k-agent-modeljetty')
+  if (selectedModel?.selectedOptions?.[0]?.disabled && ($('#k-provider')?.value || state.keys.provider) === 'modeljetty') {
+    setSettingsKeyStatus('请从目录中选择当前账号可用的文本或多模态 Agent 模型。', 'err')
+    activateSettingsTab('models')
+    return
+  }
   const nextKeys = getKeyFormValues()
   state.keys = nextKeys
+  populateModelSelects()
   state.theme = getSelectedSettingsTheme()
   applyTheme()
   localStorage.setItem(KEY_STORAGE, JSON.stringify(state.keys))
@@ -3581,22 +3738,26 @@ async function saveSettingsForm(event) {
 
   if (dom.settingsSaveAccount?.checked && state.account.user && hasAnyClientKey(nextKeys)) {
     try {
-      setSettingsKeyStatus('正在保存账号 Key…')
+      setSettingsKeyStatus('正在同步账号配置…')
       const data = await putJson('/api/account/api-keys', { keys: nextKeys })
       state.account.apiKeys = data.apiKeys || { keys: {}, updatedAt: '' }
       state.account.apiKeysLoadedFor = state.account.user.id
     } catch (error) {
-      setSettingsKeyStatus(`本机 Key 已保存；账号同步失败：${trimError(error)}`, 'err')
+      setSettingsKeyStatus(`本机配置已保存；账号同步失败：${trimError(error)}`, 'err')
       return
     }
   }
 
-  setSettingsKeyStatus('本机 Key 已保存')
+  setSettingsKeyStatus('配置已保存')
   dom.settingsDialog.close()
 }
 
 function getKeyFormValues() {
   const keys = {
+    provider: $('#k-provider')?.value || '1xm',
+    modeljettyAgentModel: $('#k-agent-modeljetty')?.value.trim() || state.account.modeljetty?.agentModel || 'gemini-3.8-flash-medium',
+    oneXmAgentModel: $('#k-agent-1xm')?.value.trim() || 'gemini-3-flash-preview',
+    modeljettyApiKey: $('#k-modeljetty')?.value.trim() || '',
     visionApiKey: $('#k-vision').value.trim(),
     banana2ApiKey: $('#k-banana2').value.trim(),
     bananaProApiKey: $('#k-bananapro').value.trim(),
@@ -3609,7 +3770,7 @@ function getKeyFormValues() {
 }
 
 function hasAnyClientKey(keys) {
-  return Object.values(keys || {}).some(Boolean)
+  return Object.entries(keys || {}).some(([name, value]) => name !== 'provider' && Boolean(value))
 }
 
 function setSettingsKeyStatus(message, tone = '') {
@@ -3647,10 +3808,13 @@ async function loadAccountApiKeys({ force = false } = {}) {
     return
   }
   let errorMessage = ''
+  const userId = state.account.user.id
   try {
     const data = await getJson('/api/account/api-keys')
+    if (state.account.user?.id !== userId) return
     state.account.apiKeys = data.apiKeys || { keys: {}, updatedAt: '' }
-    state.account.apiKeysLoadedFor = state.account.user.id
+    state.account.apiKeysLoadedFor = userId
+    if (!state.keys.provider && data.apiKeys?.preferences?.provider) state.keys.provider = data.apiKeys.preferences.provider
   } catch (error) {
     errorMessage = trimError(error)
   } finally {
@@ -3685,16 +3849,77 @@ function bindAccount() {
   dom.accountLogout?.addEventListener('click', () => {
     void logoutAccount()
   })
+  $('#account-modeljetty')?.addEventListener('click', async () => {
+    await saveCanvasDraft()
+    window.location.assign(`/api/auth/modeljetty/start?returnTo=${encodeURIComponent(getAuthReturnTarget() || currentRoutePath())}`)
+  })
+  $('#account-modeljetty-disconnect')?.addEventListener('click', async () => {
+    const button = $('#account-modeljetty-disconnect')
+    button.disabled = true
+    try {
+      await deleteJson('/api/account/modeljetty')
+      state.account.modeljettyUsage = null
+      await loadAccount({handleInvite:false})
+      $('#account-modeljetty-status').textContent = '当前应用授权已撤销，重新关联后可继续使用 ModelJetty 算力。'
+    } catch (error) { $('#account-modeljetty-status').textContent = trimError(error) }
+    finally { button.disabled = false }
+  })
+  $('#account-modeljetty-refresh')?.addEventListener('click', () => { void loadModeljettyUsage() })
+}
+
+async function loadModeljettyUsage() {
+  const userId = state.account.user?.id
+  if (!userId) return
+  const status = $('#account-modeljetty-status')
+  if (status) status.textContent = '正在读取 ModelJetty 算力余额…'
+  try {
+    const data = await getJson('/api/account/modeljetty')
+    if (state.account.user?.id !== userId) return
+    state.account.modeljettyUsage = data
+    if (status) status.textContent = data.connected
+      ? `已连接 ${data.user?.name || 'ModelJetty'} · 可用算力 ¥${Number(data.balance).toFixed(2)}`
+      : '尚未关联 ModelJetty 账号'
+  } catch (error) {
+    if (state.account.user?.id === userId && status) status.textContent = trimError(error)
+  }
+}
+
+function renderModeljettyAccount() {
+  renderAgentModelInfo()
+  const info = state.account.modeljetty
+  const login = $('#account-modeljetty')
+  const refresh = $('#account-modeljetty-refresh')
+  const status = $('#account-modeljetty-status')
+  if (!login || !refresh || !status) return
+  login.disabled = !info?.loginEnabled || state.account.loading
+  login.textContent = info?.connected ? '重新授权 ModelJetty' : state.account.user ? '关联 ModelJetty 账号' : '使用 ModelJetty 登录'
+  refresh.classList.toggle('hidden', !info?.connected)
+  $('#account-modeljetty-disconnect')?.classList.toggle('hidden', !info?.connected)
+  const activeWork = state.generate.aiRunning || state.generate.genRunning
+  if ($('#account-modeljetty-disconnect')) {
+    $('#account-modeljetty-disconnect').disabled = activeWork
+    $('#account-modeljetty-disconnect').title = activeWork ? '请先等已受理任务完成后断开授权' : '撤销 Visual Studio 的 ModelJetty 访问授权'
+  }
+  if (!state.account.modeljettyUsage) status.textContent = info?.connected
+    ? info.imageTasksEnabled ? '已关联 ModelJetty，可使用账号算力生图。' : '已关联 ModelJetty，可读取账号余额。生图需开通异步任务。'
+    : info?.loginEnabled ? '授权后关联 ModelJetty 账户与算力。' : 'ModelJetty 联合登录尚未开放，当前可在设置中配置 API Key。'
 }
 
 async function loadAccount({ handleInvite = true } = {}) {
   try {
     const data = await getJson('/api/auth/me')
+    if (state.account.user?.id !== data.user?.id) state.account.modeljettyUsage = null
     state.account.user = data.user || null
     state.account.usage = data.usage || null
+    state.account.modeljetty = data.modeljetty || null
+    if (data.modeljetty?.connected && !state.keys.provider) {
+      state.keys.provider = 'modeljetty'
+      populateModelSelects()
+    }
     state.account.error = ''
     if (state.account.user) {
       await loadAccountApiKeys()
+      if (state.activeView === 'ai-test') void loadAiTestTemplates()
     } else {
       state.account.apiKeys = { keys: {}, updatedAt: '' }
       state.account.apiKeysLoadedFor = ''
@@ -3703,6 +3928,8 @@ async function loadAccount({ handleInvite = true } = {}) {
     state.account.error = trimError(error)
   } finally {
     renderAccount()
+    if (runtimeStateReady && state.activeView === 'generate') renderGenerate()
+    if (state.account.modeljetty?.connected && !state.account.modeljettyUsage) void loadModeljettyUsage()
     if (handleInvite) void handlePendingInvite()
   }
 }
@@ -3769,6 +3996,11 @@ async function submitAccountAuth(mode) {
 }
 
 async function logoutAccount() {
+  if (state.generate.aiRunning || state.generate.genRunning) {
+    state.account.error = '画布任务仍在处理中，请先等待当前请求完成。'
+    renderAccount()
+    return
+  }
   state.account.loading = true
   state.account.status = '正在退出…'
   renderAccount()
@@ -3776,6 +4008,8 @@ async function logoutAccount() {
     await postJson('/api/auth/logout', {})
     state.account.user = null
     state.account.usage = null
+    state.account.modeljetty = { ...state.account.modeljetty, connected: false }
+    state.account.modeljettyUsage = null
     state.account.apiKeys = { keys: {}, updatedAt: '' }
     state.account.apiKeysLoadedFor = ''
     state.account.status = '已退出登录'
@@ -3968,7 +4202,11 @@ function bindProjects() {
     void startNewCanvasProject()
   })
   dom.pEmptyNew?.addEventListener('click', () => {
-    void startNewCanvasProject()
+    if (state.projects.filterShared) {
+      state.projects.filterShared = false
+      state.projects.loadedSessionId = ''
+      void loadCanvasProjects({ force: true })
+    } else void startNewCanvasProject()
   })
   dom.pRefresh?.addEventListener('click', () => {
     void loadCanvasProjects({ force: true })
@@ -4591,7 +4829,15 @@ function handleCanvasWheel(e) {
 
 function handleCanvasKeyDown(e) {
   if (state.activeView !== 'generate') return
-  if (document.activeElement?.tagName === 'TEXTAREA' || document.activeElement?.tagName === 'INPUT') return
+  if (document.activeElement?.matches('input, textarea, select, [contenteditable="true"]') || document.querySelector('dialog[open]')) return
+  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return
+
+  const tool = { v: 'select', h: 'hand', t: 'text', p: 'draw' }[e.key.toLowerCase()]
+  if (tool) {
+    e.preventDefault()
+    $(`.toolbar-btn[data-tool="${tool}"]`, dom.gToolbar)?.click()
+    return
+  }
 
   if ((e.key === 'Delete' || e.key === 'Backspace') && state.generate.selectedIds.length > 0) {
     e.preventDefault()
@@ -4719,6 +4965,7 @@ function replaceCanvasElementWithImage(el, dataUrl, name, meta = {}) {
   el.generatingPrompt = typeof meta.prompt === 'string' && meta.prompt.trim()
     ? meta.prompt
     : (el.generatingPrompt || '')
+  el.delivery = assessImageDelivery({width:el.originalWidth,height:el.originalHeight,resolution:el.resolution,aspectRatio:el.aspectRatio})
   el.generatingStatus = ''
   el.generatingError = ''
   el.width = size.width
@@ -4917,9 +5164,9 @@ function renderCanvas() {
     // Update image src if changed
     if (el.type === 'image') {
       const img = node.querySelector('.canvas-el-image')
-      if (img && img.src !== el.content) img.src = el.content
+      if (img && img.getAttribute('src') !== el.content) img.src = el.content
       const size = node.querySelector('.canvas-el-size')
-      if (size) size.textContent = `${Math.round(el.width)} × ${Math.round(el.height)}`
+      if (size) size.textContent = el.type === 'image' && el.originalWidth && el.originalHeight ? `原图 ${el.originalWidth} × ${el.originalHeight} px` : `${Math.round(el.width)} × ${Math.round(el.height)}`
     } else if (el.type === 'text') {
       const text = node.querySelector('.canvas-el-text')
       if (text && text.textContent !== el.content) text.textContent = el.content || ''
@@ -4937,6 +5184,7 @@ function renderCanvas() {
 
   updateCanvasTransform()
   renderConnectors()
+  renderDesignAgentContext()
 }
 
 function renderCanvasElement(el) {
@@ -5023,7 +5271,8 @@ function updateCanvasGeneratorNode(node, el) {
   } else {
     const icon = document.createElement('span')
     icon.className = 'canvas-gen-icon'
-    icon.textContent = hasError ? '!' : '\u2726'
+    if (hasError) icon.textContent = '!'
+    else icon.append(createUiIcon('panels-top-left'))
     placeholder.append(icon)
   }
 
@@ -5100,8 +5349,15 @@ function createCanvasElementActions(el) {
 
   const size = document.createElement('span')
   size.className = 'canvas-el-size'
-  size.textContent = `${Math.round(el.width)} × ${Math.round(el.height)}`
+  size.textContent = el.type === 'image' && el.originalWidth && el.originalHeight ? `原图 ${el.originalWidth} × ${el.originalHeight} px` : `${Math.round(el.width)} × ${Math.round(el.height)}`
   actions.append(size)
+  if (el.delivery?.status === 'mismatch') {
+    const warning = document.createElement('span'); warning.className = 'canvas-delivery-warning'; warning.textContent = '规格待确认'; warning.title = el.delivery.issues.join('；'); actions.append(warning)
+  }
+
+  const reference = createAgentReferenceButton(el, 'canvas-el-action canvas-el-reference-btn')
+  reference.addEventListener('mousedown', (event) => event.stopPropagation())
+  actions.append(reference)
 
   const prompt = getCanvasElementPrompt(el)
   if (prompt) {
@@ -5135,7 +5391,10 @@ function createCanvasElementActions(el) {
   download.addEventListener('mousedown', (event) => event.stopPropagation())
   download.addEventListener('click', (event) => {
     event.stopPropagation()
-    if (el.content) downloadAsset(el.content, `${sanitizeFileName(el.name || 'canvas-image')}.png`)
+    if (el.content) {
+      const extension = ({ 'image/jpeg': 'jpg', 'image/webp': 'webp' })[el.mime] || 'png'
+      downloadAsset(el.content, `${sanitizeFileName(el.name || 'canvas-image')}.${extension}`)
+    }
   })
   actions.append(download)
 
@@ -5262,16 +5521,11 @@ async function exportCanvasAsPsd({ baseImageId = '' } = {}) {
     setCanvasPsdExportStatus('画布为空，无法导出 PSD', 'err')
     return
   }
-  const agPsd = window.agPsd
-  if (!agPsd?.writePsd) {
-    setCanvasPsdExportStatus('PSD 导出组件未加载，请刷新后重试', 'err')
-    return
-  }
-
   state.generate.psdExporting = true
   setCanvasPsdExportStatus('正在准备 PSD…', 'run')
 
   try {
+    const agPsd = await loadPsdLibrary()
     const hydratedElements = await hydrateCanvasElements(state.generate.elements)
     if (hydratedElements !== state.generate.elements) {
       state.generate.elements = hydratedElements
@@ -5673,9 +5927,10 @@ function downloadBlob(blob, name) {
     link.download = name
     document.body.append(link)
     link.click()
-    link.remove()
   } finally {
-    URL.revokeObjectURL(url)
+    link.remove()
+    // Keep the URL alive while the browser starts consuming the download.
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
   }
 }
 
@@ -5852,11 +6107,9 @@ function showGenPanel(elementId) {
   // Position panel near the element
   const rect = dom.gCanvasContainer.getBoundingClientRect()
   const viewRect = $('#view-generate').getBoundingClientRect()
-  const panelWidth = 380
+  const panelWidth = Math.min(360, viewRect.width - 24)
   const panelGap = 16
-  const reservedRight = state.generate.showAiPanel && !dom.gAiSidebar.classList.contains('hidden')
-    ? dom.gAiSidebar.offsetWidth + 32
-    : 8
+  const reservedRight = Math.max(12, viewRect.right - rect.right + 12)
   const elScreenX = el.x * state.generate.scale + state.generate.panX + rect.left + el.width * state.generate.scale + 16
   const elScreenY = el.y * state.generate.scale + state.generate.panY + rect.top
   const elLeftScreenX = el.x * state.generate.scale + state.generate.panX + rect.left
@@ -5866,7 +6119,7 @@ function showGenPanel(elementId) {
     panelLeft = elLeftScreenX - viewRect.left - panelWidth - panelGap
   }
   dom.gGenPanel.style.left = `${clamp(panelLeft, 8, maxPanelLeft)}px`
-  dom.gGenPanel.style.top = `${clamp(elScreenY - viewRect.top, 8, viewRect.height - 400)}px`
+  dom.gGenPanel.style.top = `${clamp(elScreenY - viewRect.top, 76, Math.max(76, viewRect.height - dom.gGenPanel.offsetHeight - 16))}px`
 }
 
 function hideGenPanel() {
@@ -5955,15 +6208,17 @@ function renderGenPanelRefs() {
 function updateGenPanelBusy(isBusy, message = '', options = {}) {
   const text = String(message || '').trim()
   const isError = Boolean(options.error)
-  dom.gGenPrompt.disabled = isBusy
-  dom.gModel.disabled = isBusy
-  dom.gGenRatio.disabled = isBusy
-  dom.gGenResolution.disabled = isBusy
-  dom.gAgent.disabled = isBusy
-  dom.gGenRefUpload.disabled = isBusy
+  const target = state.generate.elements.find(item => item.id === state.generate.genTargetId)
+  const resuming = target?.type === 'image-generator' && Boolean(target.generationJobId)
+  dom.gGenPrompt.disabled = isBusy || resuming
+  dom.gModel.disabled = isBusy || resuming
+  dom.gGenRatio.disabled = isBusy || resuming
+  dom.gGenResolution.disabled = isBusy || resuming
+  dom.gAgent.disabled = isBusy || resuming
+  dom.gGenRefUpload.disabled = isBusy || resuming
   dom.gGenRun.disabled = isBusy
   dom.gGenRun.classList.toggle('running', isBusy)
-  dom.gGenRun.textContent = isBusy ? '生成中…' : '生成'
+  dom.gGenRun.textContent = isBusy ? '生成中…' : resuming ? '继续读取结果' : '生成'
   for (const button of $$('.gen-panel-ref-rm', dom.gGenRefList)) button.disabled = isBusy
 
   dom.gGenProgress.classList.toggle('hidden', !text)
@@ -5992,17 +6247,32 @@ function shouldUseAsyncCanvasGenerate(modelId, resolution, refImages = []) {
   return true
 }
 
-async function requestCanvasGenerate(payload, { onStatus = null } = {}) {
+async function requestCanvasGenerate(payload, { onStatus = null, onSubmitted = null, resumeJobId = '' } = {}) {
+  if (resumeJobId) {
+    const data = await getJson(`/api/jobs/${encodeURIComponent(resumeJobId)}`)
+    const config = data.job?.configJson || {}
+    state.generate.genModel = config.modelId || state.generate.genModel
+    state.generate.genRatio = normalizeAspectRatio(config.aspectRatio || state.generate.genRatio)
+    state.generate.genResolution = normalizeCanvasResolution(config.resolution || state.generate.genResolution)
+    dom.gModel.value = state.generate.genModel
+    dom.gGenRatio.value = state.generate.genRatio
+    dom.gGenResolution.value = state.generate.genResolution
+    if (['failed', 'partial_failed'].includes(data.job?.status)) {
+      await postJson(`/api/jobs/${encodeURIComponent(resumeJobId)}/retry`, {})
+    }
+    return waitForCanvasGenerateJob(resumeJobId, { projectId: payload.projectId || state.generate.projectId, onStatus })
+  }
   if (!shouldUseAsyncCanvasGenerate(payload.modelId, payload.resolution, payload.referenceImages || [])) {
     return postJson('/api/generate-direct', payload)
   }
 
   onStatus?.('正在提交生成任务…')
   const submitted = await postJson('/api/jobs/generate-direct', payload)
+  await onSubmitted?.(submitted.jobId)
   state.runtime.sessionId = submitted.sessionId || state.runtime.sessionId
   onStatus?.('任务已提交，正在等待生成完成…')
   return waitForCanvasGenerateJob(submitted.jobId, {
-    projectId: state.generate.projectId,
+    projectId: payload.projectId || state.generate.projectId,
     onStatus,
   })
 }
@@ -6013,13 +6283,10 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
   let lastStatus = ''
 
   while (Date.now() - startedAt < CANVAS_GENERATE_POLL_TIMEOUT_MS) {
-    const [jobData, itemsData] = await Promise.all([
-      getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
-      getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
-    ])
+    const jobData = await getJson(`/api/jobs/${encodeURIComponent(jobId)}?includeItems=1`)
     const job = jobData.job || {}
-    const item = Array.isArray(itemsData.items) ? itemsData.items[0] : null
-    const status = item?.status || job.status || ''
+    const item = Array.isArray(jobData.items) ? jobData.items[0] : null
+    const status = getCanvasJobDisplayStatus(job, item)
 
     if (status && status !== lastStatus) {
       lastStatus = status
@@ -6041,7 +6308,7 @@ async function waitForCanvasGenerateJob(jobId, { projectId = state.generate.proj
 
     if (status === 'failed' || status === 'cancelled') {
       const message = item?.errorMessage || job.summaryJson?.error || (status === 'cancelled' ? '生成任务已取消' : '生成任务失败')
-      throw new Error(message)
+      throw Object.assign(new Error(message), { operationState: 'failed', jobId })
     }
 
     await wait(CANVAS_GENERATE_POLL_INTERVAL_MS)
@@ -6079,11 +6346,13 @@ function formatCanvasGenerateJobStatus(status) {
 }
 
 async function executeCanvasGenerate() {
+  if (state.generate.aiRunning) return
   const targetId = state.generate.genTargetId
   const el = state.generate.elements.find((item) => item.id === targetId)
   if (!el || state.generate.genRunning) return
 
   const prompt = state.generate.genPrompt.trim()
+  const resumeJobId = el.generationJobId || ''
   if (!prompt) {
     dom.gGenPrompt.focus()
     return
@@ -6097,7 +6366,7 @@ async function executeCanvasGenerate() {
   try {
     // Upload reference images if needed
     const refImages = []
-    for (const [index, ref] of state.generate.genRefs.entries()) {
+    for (const [index, ref] of (resumeJobId ? [] : state.generate.genRefs).entries()) {
       if (ref.assetId) {
         refImages.push({ assetId: ref.assetId, role: ref.role || 'subject' })
       } else if (ref.dataUrl) {
@@ -6107,7 +6376,7 @@ async function executeCanvasGenerate() {
           kind: 'upload',
           source: 'browser_upload',
           filename: ref.name || 'reference.png',
-          mime: 'image/png',
+          mime: splitDataUrl(ref.dataUrl)?.mime || ref.mime || 'image/png',
           dataUrl: ref.dataUrl,
         })
         state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
@@ -6117,9 +6386,10 @@ async function executeCanvasGenerate() {
     }
 
     let finalPrompt = prompt
-    if (state.generate.genUseAgent) {
+    if (!resumeJobId && state.generate.genUseAgent) {
       setCanvasGenerateStatus(el, refImages.length ? '正在理解参考图卖点并规划提示词…' : '正在整理画面提示词…')
       const agentData = await postJson('/api/canvas/agent', {
+        projectId: state.generate.projectId || '',
         sessionId: state.runtime.sessionId || undefined,
         message: prompt,
         history: [],
@@ -6137,6 +6407,7 @@ async function executeCanvasGenerate() {
 
     setCanvasGenerateStatus(el, '正在调用图像模型生成图片…')
     const data = await requestCanvasGenerate({
+      projectId: state.generate.projectId || '',
       sessionId: state.runtime.sessionId || undefined,
       modelId: state.generate.genModel,
       prompt: finalPrompt,
@@ -6147,6 +6418,8 @@ async function executeCanvasGenerate() {
       clientKeys: { ...state.keys },
     }, {
       onStatus: (message) => setCanvasGenerateStatus(el, message),
+      resumeJobId,
+      onSubmitted: (jobId) => { el.generationJobId = jobId; saveRuntimeState() },
     })
 
     state.runtime.sessionId = data.sessionId || state.runtime.sessionId
@@ -6194,10 +6467,12 @@ function bindAiSidebar() {
   dom.gAiToggle.addEventListener('click', () => {
     state.generate.showAiPanel = !state.generate.showAiPanel
     dom.gAiSidebar.classList.toggle('hidden', !state.generate.showAiPanel)
+    syncAiPanelChrome()
   })
   dom.gAiClose.addEventListener('click', () => {
     state.generate.showAiPanel = false
     dom.gAiSidebar.classList.add('hidden')
+    syncAiPanelChrome()
   })
   dom.gAiSession?.addEventListener('change', () => {
     activateAiSession(dom.gAiSession.value)
@@ -6246,16 +6521,18 @@ function bindAiSidebar() {
   })
 
   // 上传参考图
-  dom.gAiUpload.addEventListener('click', () => dom.gAiFileInput.click())
+  bindDesignAgentControls()
+  dom.gAiUpload.addEventListener('click', () => { if (!state.generate.aiRunning) dom.gAiFileInput.click() })
   dom.gAiFileInput.addEventListener('change', async () => {
-    if (!dom.gAiFileInput.files?.length) return
+    if (state.generate.aiRunning || !dom.gAiFileInput.files?.length) return
     const images = await readImageFiles(dom.gAiFileInput.files)
-    for (const img of images) {
+    for (const img of images.slice(0, Math.max(0, 6 - state.generate.aiRefs.length))) {
       state.generate.aiRefs.push({
         id: crypto.randomUUID(),
         dataUrl: img.dataUrl,
         name: img.name,
         assetId: '',
+        role: 'subject',
       })
     }
     dom.gAiFileInput.value = ''
@@ -6273,10 +6550,22 @@ function renderAiRefList() {
     img.alt = ref.name || 'ref'
     card.append(img)
 
+    const role = document.createElement('select')
+    role.setAttribute('aria-label', `${ref.name || `参考图 ${i + 1}`}的参考角色`)
+    for (const [value, label] of [['subject', '主体'], ['style', '风格'], ['layout', '构图']]) {
+      const option = document.createElement('option'); option.value = value; option.textContent = label; role.append(option)
+    }
+    role.value = ref.role || 'subject'
+    role.disabled = state.generate.aiRunning
+    role.addEventListener('change', () => { ref.role = role.value; saveCanvasDraft(); saveRuntimeState() })
+    card.append(role)
+
     const rm = document.createElement('button')
     rm.type = 'button'
     rm.className = 'ai-sidebar-ref-rm'
     rm.textContent = '×'
+    rm.disabled = state.generate.aiRunning
+    rm.setAttribute('aria-label', `移除参考图 ${ref.name || i + 1}`)
     rm.addEventListener('click', () => {
       state.generate.aiRefs.splice(i, 1)
       renderAiRefList()
@@ -6285,6 +6574,8 @@ function renderAiRefList() {
 
     return card
   }))
+  renderDesignAgentContext()
+  saveCanvasDraft()
 }
 
 function renderAiSessionControls() {
@@ -6300,15 +6591,22 @@ function renderAiSessionControls() {
   dom.gAiSession.replaceChildren(...options)
   dom.gAiSession.value = state.generate.aiSessionId || state.generate.aiSessions[0]?.id || ''
   const busy = state.generate.aiRunning
+  if (dom.gSend) dom.gSend.disabled = busy || state.generate.genRunning
   dom.gAiSession.disabled = busy || state.generate.aiSessions.length <= 1
   if (dom.gAiNewSession) dom.gAiNewSession.disabled = busy
   if (dom.gAiClearSession) dom.gAiClearSession.disabled = busy || state.generate.aiMessages.length === 0
 }
 
 function renderAiMessages() {
+  const messagesEl = dom.gAiMessages
+  const previousTop = messagesEl.scrollTop || 0
+  const follow = !Number.isFinite(messagesEl.scrollHeight) || messagesEl.scrollHeight - messagesEl.clientHeight - previousTop < 90
+  const lastAssistant = state.generate.aiMessages.filter((message) => message.role === 'assistant').at(-1)?.id
+  const expanded = new Map(Array.from(messagesEl.querySelectorAll?.('details[data-run-id]') || []).map((el) => [el.dataset.runId, { open: el.open, phase: el.parentElement?.dataset.phase }]))
   renderAiSessionControls()
+  renderDesignAgentContext()
   if (dom.gSend) {
-    dom.gSend.disabled = state.generate.aiRunning
+    dom.gSend.disabled = state.generate.aiRunning || state.generate.genRunning
     dom.gSend.textContent = state.generate.aiRunning ? '处理中' : '发送'
   }
   if (state.generate.aiMessages.length === 0) {
@@ -6347,7 +6645,10 @@ function renderAiMessages() {
     if (contentText) {
       const content = document.createElement('div')
       content.className = 'msg-content'
-      content.append(document.createTextNode(contentText))
+      if (msg.role === 'assistant') {
+        content.className += ' agent-markdown'
+        content.innerHTML = agentMarkdownToHtml(contentText)
+      } else content.append(document.createTextNode(contentText))
       if (msg.streaming) {
         const caret = document.createElement('span')
         caret.className = 'msg-typing-caret'
@@ -6355,13 +6656,19 @@ function renderAiMessages() {
       }
       bubble.append(content)
     }
-    if (msg.loading) {
+    if (msg.loading && !msg.run) {
       bubble.append(createAiLoadingNode(msg.loadingText || 'AI 正在思考'))
     } else if (!contentText) {
       bubble.textContent = ''
     }
     node.append(bubble)
-    if (Array.isArray(msg.steps) && msg.steps.length) {
+    if (msg.role === 'assistant' && msg.agentModel) {
+      const model = document.createElement('div')
+      model.className = 'msg-model'
+      model.textContent = `${msg.agentProvider === 'modeljetty' ? 'ModelJetty' : '1xm'} · ${formatAgentModelLabel(msg.agentModel)}`
+      node.append(model)
+    }
+    if (!msg.run && Array.isArray(msg.steps) && msg.steps.length) {
       const steps = document.createElement('ul')
       steps.className = 'msg-steps'
       for (const step of msg.steps.slice(0, 4)) {
@@ -6371,7 +6678,7 @@ function renderAiMessages() {
       }
       node.append(steps)
     }
-    if (Array.isArray(msg.workflow) && msg.workflow.length) {
+    if (!msg.run && Array.isArray(msg.workflow) && msg.workflow.length) {
       const workflow = document.createElement('ul')
       workflow.className = 'msg-steps'
       for (const item of msg.workflow.slice(0, 8)) {
@@ -6407,17 +6714,33 @@ function renderAiMessages() {
         img.style.borderRadius = '8px'
         img.style.cursor = 'pointer'
         img.addEventListener('click', () => openLightbox({ src: image.dataUrl, caption: image.name || '生成结果' }))
-        imgWrap.append(img)
+        const card = document.createElement('figure')
+        card.className = 'agent-result-image'
+        card.append(img)
+        card.append(createAgentReferenceButton(image, 'agent-result-reference'))
+        imgWrap.append(card)
       }
       node.append(imgWrap)
     }
-    const suggestionNodes = createAiSuggestionNodes(msg.suggestions, {
+    if (msg.run) {
+      const previous = expanded.get(msg.run.id)
+      node.append(createAgentRunRecord(msg.run, {
+        onFocusTask: focusAgentTask, onExport: exportDesignAgentManifest,
+        onResume: msg.run.execution === 'server' ? async () => {
+          try { await postJson(`/api/canvas/agent-runs/${encodeURIComponent(msg.run.jobId)}`, {action:'resume'}); canvasAgentWatcher.start(state.generate.projectId, state.account.user?.id, true) }
+          catch (error) { state.notice.message = trimError(error); renderAppNotice() }
+        } : undefined,
+        loadingText: msg.loadingText, renderLoading: createAiLoadingNode,
+        expanded: previous && (msg.loading || previous.phase === msg.run.phase) ? previous.open : false,
+      }))
+    }
+    const suggestionNodes = createAiSuggestionNodes(msg.id === lastAssistant && canShowAgentSuggestions(msg) ? msg.suggestions : [], {
       numbered: Boolean(msg.needsClarification),
     })
     if (suggestionNodes) node.append(suggestionNodes)
     return node
   }))
-  dom.gAiMessages.scrollTop = dom.gAiMessages.scrollHeight
+  dom.gAiMessages.scrollTop = follow ? dom.gAiMessages.scrollHeight : previousTop
 }
 
 function createAiSuggestionNodes(items, options = {}) {
@@ -6514,15 +6837,15 @@ function createAiWelcomeNode() {
 
   const mark = document.createElement('div')
   mark.className = 'ai-welcome-mark'
-  mark.textContent = 'AI'
+  mark.append(createUiIcon('message-square'))
   wrap.append(mark)
 
   const title = document.createElement('h4')
-  title.textContent = 'Hi，我是你的 AI 设计师'
+  title.textContent = '一起，把想法往前推一步。'
   wrap.append(title)
 
   const copy = document.createElement('p')
-  copy.textContent = '我会读取当前画布上下文，先整理设计意图，再按需生成图片并放回画布。'
+  copy.textContent = '聊创意、分析参考图，或一起探索新的视觉方向。需要时，再把想法变成画布上的作品。'
   wrap.append(copy)
 
   const suggestions = document.createElement('div')
@@ -6643,236 +6966,258 @@ async function storeCanvasGeneratedResult(data, fallbackName, source) {
   return { storedResult, imageSize }
 }
 
+function bindDesignAgentControls() {
+  dom.gInput.addEventListener('input', () => {
+    saveCanvasDraft()
+    dom.gInput.style.height = 'auto'
+    dom.gInput.style.height = `${Math.min(96, Math.max(38, dom.gInput.scrollHeight))}px`
+  })
+  $('#g-ai-skill')?.addEventListener('change', () => {
+    if (state.generate.aiRunning) return
+    ensureAiSessionSelection().skillId = $('#g-ai-skill').value
+    saveRuntimeState()
+    renderDesignAgentContext()
+  })
+  $('#g-ai-stop')?.addEventListener('click', () => {
+    const run = state.generate.activeAgentRun
+    if (!requestDesignAgentStop(run)) return
+    if (run.execution === 'server') void postJson(`/api/canvas/agent-runs/${encodeURIComponent(run.jobId)}`, {action:'stop'}).catch(error => { state.notice.message = trimError(error); renderAppNotice() })
+    renderDesignAgentContext()
+    saveRuntimeState()
+  })
+  $('#g-ai-add-selected')?.addEventListener('click', () => {
+    if (state.generate.aiRunning) return
+    const selected = state.generate.elements.filter((el) => el.type === 'image' && state.generate.selectedIds.includes(el.id))
+    for (const el of selected) addImageToAgentReferences(el)
+  })
+}
+
+function createAgentReferenceButton(image, className) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = className
+  button.textContent = '＋ 加入参考图'
+  button.disabled = state.generate.aiRunning
+  button.addEventListener('click', (event) => {
+    event.stopPropagation()
+    addImageToAgentReferences(image)
+  })
+  return button
+}
+
+function addImageToAgentReferences(image) {
+  const result = planAgentReferenceAddition(state.generate.aiRefs, image, state.generate.aiRunning)
+  const status = $('#g-ai-ref-status')
+  const labels = { added: '已加入本轮参考图', duplicate: '这张图片已在参考图中', limit: '一次最多添加 6 张参考图', busy: '请等待当前运行结束后再添加', invalid: '图片尚未准备好' }
+  if (status) status.textContent = labels[result.status]
+  if (status) window.setTimeout(() => { if (status.textContent === labels[result.status]) status.textContent = '' }, 2400)
+  if (result.status === 'busy') return
+  if (result.reference) state.generate.aiRefs.push({ id: crypto.randomUUID(), ...result.reference })
+  state.generate.showAiPanel = true
+  dom.gAiSidebar.classList.remove('hidden')
+  syncAiPanelChrome()
+  renderAiRefList()
+  dom.gInput.focus({ preventScroll: true })
+}
+
+function renderDesignAgentContext() {
+  const context = $('#g-ai-context')
+  if (!context) return
+  const busy = state.generate.aiRunning
+  const session = state.generate.aiSessions.find((item) => item.id === state.generate.aiSessionId)
+  const run = state.generate.activeAgentRun
+  const count = state.generate.elements.filter((el) => el.type !== 'connector').length
+  const selected = state.generate.elements.filter((el) => el.type === 'image' && state.generate.selectedIds.includes(el.id)).length
+  $('#g-ai-context-title').textContent = state.generate.projectTitle || '当前画布'
+  $('#g-ai-context-count').textContent = `${count} 个元素 · ${state.generate.aiRefs.length} 张参考`
+  const attach = $('#g-ai-add-selected')
+  attach.disabled = busy || !selected || state.generate.aiRefs.length >= 6
+  attach.textContent = selected ? `添加选中图 (${selected})` : '添加选中图'
+  $('#g-ai-skill').value = session?.skillId || 'auto'
+  $('#g-ai-skill').disabled = busy
+  const skillLabel = ({ 'reference-product': '商品三图', 'reference-edit': '参考图延展', 'brand-campaign': '品牌海报' })[session?.skillId] || '自动匹配'
+  const settingsSummary = $('#g-ai-settings-summary')
+  if (settingsSummary) settingsSummary.textContent = `自动创作 · ${skillLabel}`
+  for (const button of $$('.canvas-el-reference-btn')) button.disabled = busy
+  dom.gAiUpload.disabled = busy || state.generate.aiRefs.length >= 6
+  const stop = $('#g-ai-stop')
+  stop.classList.toggle('hidden', !busy)
+  stop.disabled = !run || run.stopRequested
+  stop.textContent = run?.stopRequested ? '等待当前请求结束' : '停止后续'
+  $('#g-ai-mode-help').textContent = busy && run?.stopRequested ? '当前请求继续读取，后续图片不会提交。'
+    : '按你的需求规划，再逐张生成并保存。'
+}
+
+function focusAgentTask(task) {
+  const el = state.generate.elements.find((item) => item.id === task.elementId)
+  if (!el) return
+  state.generate.selectedIds = [el.id]
+  const width = dom.gCanvasContainer.clientWidth
+  const height = dom.gCanvasContainer.clientHeight
+  state.generate.panX = width / 2 - (el.x + el.width / 2) * state.generate.scale
+  state.generate.panY = height / 2 - (el.y + el.height / 2) * state.generate.scale
+  renderCanvas()
+  if (el.type === 'image-generator') showGenPanel(el.id)
+}
+
+function exportDesignAgentManifest(run) {
+  const manifest = buildDesignAgentManifest(run)
+  const dialog = createAgentManifestDialog(manifest, { onDownload: () => {
+    downloadBlob(new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }), `design-run-${run.id}.json`)
+  } })
+  document.body.append(dialog)
+  dialog.showModal()
+}
+
+const canvasKnownElementIds = new Map()
+let canvasDraftWrite = Promise.resolve()
+let canvasDraftScope = '', canvasDraftRestoring = false, canvasDraftSignature = ''
+function saveCanvasDraft() {
+  const key = canvasDraftKey(state.account.user?.id, state.generate.projectId)
+  if (!key || key !== canvasDraftScope || canvasDraftRestoring) return
+  const draft = { text:dom.gInput.value, refs:state.generate.aiRefs.map(ref => ({ ...ref })) }
+  const signature = JSON.stringify(draft)
+  if (signature === canvasDraftSignature) return canvasDraftWrite
+  canvasDraftSignature = signature
+  canvasDraftWrite = writeCanvasDraft(key, draft).catch(() => { canvasDraftSignature = ''; state.notice.message = '草稿暂未保存，请保留当前页面。'; renderAppNotice() })
+  return canvasDraftWrite
+}
+async function restoreCanvasDraft() {
+  if (!runtimeStateReady) return
+  const key = canvasDraftKey(state.account.user?.id, state.generate.projectId)
+  if (!key || key === canvasDraftScope) return
+  canvasDraftScope = key; canvasDraftRestoring = true; canvasDraftSignature = ''
+  dom.gInput.value = ''; state.generate.aiRefs = []
+  try {
+    const draft = await readCanvasDraft(key)
+    if (canvasDraftScope !== key) return
+    if (draft && !dom.gInput.value && !state.generate.aiRefs.length) {
+      dom.gInput.value = draft.text || ''; state.generate.aiRefs = draft.refs || []
+    }
+  } catch { /* Existing app remains usable when browser storage is unavailable. */ }
+  finally { if (canvasDraftScope === key) { canvasDraftRestoring = false; renderAiRefList() } }
+}
+function mergeServerCanvasElements(elements, projectId) {
+  const known = canvasKnownElementIds.get(projectId) || new Set()
+  let changed = false
+  for (const raw of elements) {
+    const el = sanitizeCanvasElement(raw)
+    if (!el?.agentRunId) continue
+    const local = state.generate.elements.find(e => e.id === el.id)
+    if (local) { local.delivery = el.delivery; local.qualityReview = el.qualityReview }
+    else if (!known.has(el.id)) {
+      if (!el.content && el.assetId) el.content = `/api/results/${encodeURIComponent(el.assetId)}?projectId=${encodeURIComponent(projectId)}`
+      if (el.content.startsWith('/api/assets/')) el.content = el.content.replace('/api/assets/', '/api/results/')
+      state.generate.elements.push(el); changed = true
+    }
+    known.add(el.id)
+  }
+  canvasKnownElementIds.set(projectId, known)
+  if (changed) renderCanvas()
+}
+const canvasAgentWatcher = createCanvasAgentWatcher({ getJson, recover: () => postJson('/api/jobs/recover', {}),
+  onSnapshot: ({runs, elements, projectId, ownerId}) => {
+    if (state.generate.projectId !== projectId || state.account.user?.id !== ownerId) return
+    let changed = false
+    const assetMimes = new Map(elements.map(el => [el.assetId, el.mime]))
+    for (const record of [...runs].reverse()) {
+      if (!record.run) continue
+      for (const task of record.run.tasks || []) if (!task.mime) task.mime = assetMimes.get(task.assetId) || ''
+      let session = state.generate.aiSessions.find(s => s.id === record.run.conversationId)
+      if (!session) { session = createAiSessionRecord({id:record.run.conversationId}); state.generate.aiSessions.push(session) }
+      const messages = session.id === state.generate.aiSessionId ? state.generate.aiMessages : session.messages
+      const before = JSON.stringify(messages)
+      const next = mergeAgentRunMessages(messages, record)
+      session.messages = next
+      if (session.id === state.generate.aiSessionId) state.generate.aiMessages = next
+      if (before !== JSON.stringify(next)) changed = true
+    }
+    const active = runs.find(r => ['preparing','planning','executing'].includes(r.run?.phase))
+    state.generate.aiRunning = Boolean(active); state.generate.activeAgentRun = active?.run || null
+    mergeServerCanvasElements(elements, projectId)
+    if (changed) { saveRuntimeState(); renderAiMessages() }
+    renderDesignAgentContext(); renderAiRefList()
+  },
+  onError: error => {
+    if ([401,403,404].includes(Number(error.status))) canvasAgentWatcher.stop()
+  },
+})
+
 async function sendCanvasAiMessage() {
-  if (state.generate.aiRunning) return
+  if (state.generate.aiRunning || state.generate.genRunning) return
   const text = dom.gInput.value.trim()
   if (!text && state.generate.aiRefs.length === 0) return
-  await ensureCanvasProjectRecord()
-  const requestText = text || '基于参考图生成一版。'
-  const history = state.generate.aiMessages
-    .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
-    .map((msg) => ({ role: msg.role, content: msg.content || '' }))
-    .slice(-8)
-  const aiModelId = dom.gAiModel.value || state.generate.genModel
-  const aiAspectRatio = normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio)
-  const aiResolution = normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution)
-  const canvasPendingEls = []
-
-  const userMsg = {
-    id: crypto.randomUUID(),
-    role: 'user',
-    creativeMode: 'image',
-    content: requestText,
-    refs: state.generate.aiRefs.map((r) => ({ assetId: r.assetId || '', dataUrl: r.dataUrl, name: r.name, mime: r.mime || 'image/png' })),
-  }
-  const assistantMsg = {
-    id: crypto.randomUUID(),
-    role: 'assistant',
-    content: '',
-    loading: true,
-    loadingText: '正在理解画布和需求',
-    steps: [],
-    creativeMode: 'image',
-  }
-  state.generate.aiMessages.push(userMsg)
-  dom.gInput.value = ''
   state.generate.aiRunning = true
-  state.generate.aiMessages.push(assistantMsg)
-  renderAiMessages()
-  saveRuntimeState()
-
+  renderAiSessionControls()
+  const refs = state.generate.aiRefs.slice(0, 6).map(ref => ({ ...ref }))
+  let run, assistantMsg, ownerId, accepted = false
   try {
-    // 上传参考图
-    const refImages = []
-    if (state.generate.aiRefs.length) {
-      setAiMessageLoading(assistantMsg, '正在读取参考图')
-    }
-    for (const [index, ref] of state.generate.aiRefs.entries()) {
-      if (ref.assetId) {
-        if (userMsg.refs[index]) userMsg.refs[index].assetId = ref.assetId
-        refImages.push({ assetId: ref.assetId, role: 'subject' })
-      } else if (ref.dataUrl) {
-        setAiMessageLoading(assistantMsg, `正在上传参考图 ${refImages.length + 1}/${state.generate.aiRefs.length}`)
-        const uploaded = await postJson('/api/assets/upload', {
-          sessionId: state.runtime.sessionId || undefined,
-          kind: 'upload',
-          source: 'browser_upload',
-          filename: ref.name || 'reference.png',
-          mime: 'image/png',
-          dataUrl: ref.dataUrl,
-        })
-        state.runtime.sessionId = uploaded.sessionId || state.runtime.sessionId
+    await ensureCanvasProjectRecord()
+    const session = ensureAiSessionSelection()
+    ownerId = state.account.user?.id
+    const requestText = text || '请基于参考图整理设计方向并生成作品。'
+    const canvasContext = getCanvasAgentContext()
+    run = createDesignAgentRun({ id: crypto.randomUUID(), projectId: state.generate.projectId, conversationId: session.id, mode: 'auto', context: {
+      elementCount: canvasContext.elementCount, referenceCount: refs.length, imageModel: dom.gAiModel.value || state.generate.genModel,
+      aspectRatio: normalizeAspectRatio(dom.gAiRatio.value || state.generate.genRatio), resolution: normalizeCanvasResolution(dom.gAiResolution.value || state.generate.genResolution) } })
+    run.execution = 'server'; run.jobId = `job_agent_${run.id}`
+    state.generate.activeAgentRun = run
+    const isCurrent = () => state.generate.projectId === run.projectId && state.account.user?.id === ownerId
+    const referenceImages = []
+    for (const ref of refs) {
+      if (!isCurrent()) throw new Error('画布或账号已改变，未提交创作任务。')
+      if (!ref.assetId && ref.dataUrl) {
+        const uploaded = await postJson('/api/assets/upload', { projectId: run.projectId, sessionId: state.runtime.sessionId || undefined,
+          kind: 'upload', source: 'canvas_agent_reference', filename: ref.name || 'reference.png', mime: splitDataUrl(ref.dataUrl)?.mime || ref.mime || 'image/png', dataUrl: ref.dataUrl })
         ref.assetId = uploaded.asset.id
-        if (userMsg.refs[index]) {
-          userMsg.refs[index].assetId = uploaded.asset.id
-          userMsg.refs[index].mime = uploaded.asset.mime || userMsg.refs[index].mime || 'image/png'
-        }
-        refImages.push({ assetId: uploaded.asset.id, role: 'subject' })
+        const original = state.generate.aiRefs.find(item => item.id === ref.id)
+        if (original && isCurrent()) original.assetId = ref.assetId
       }
+      if (ref.assetId) referenceImages.push({ assetId: ref.assetId, role: ref.role || 'subject', label: ref.name || '参考图' })
     }
-
-    setAiMessageLoading(assistantMsg, refImages.length ? '正在理解参考图卖点与画面结构' : '正在整理设计思路')
-    const agentData = await postJson('/api/canvas/agent', {
-      sessionId: state.runtime.sessionId || undefined,
-      message: requestText,
-      history,
-      canvasContext: getCanvasAgentContext(),
-      modelId: aiModelId,
-      aspectRatio: aiAspectRatio,
-      resolution: aiResolution,
-      hasReferenceImages: refImages.length > 0,
-      referenceImages: refImages,
-      clientKeys: { ...state.keys },
-    })
-    state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId
-    const replyText = agentData.reply || '我已经整理好设计方向。'
-    await streamAiMessageContent(assistantMsg, replyText)
-    assistantMsg.steps = Array.isArray(agentData.steps) ? agentData.steps : []
-    assistantMsg.suggestions = Array.isArray(agentData.suggestions) ? agentData.suggestions : []
-    assistantMsg.needsClarification = Boolean(agentData.needsClarification)
-    assistantMsg.styleIntent = agentData.styleIntent || null
-    renderAiMessages()
-
-    if (!agentData.shouldGenerate) {
+    if (!isCurrent()) throw new Error('画布或账号已改变，未提交创作任务。')
+    const history = state.generate.aiMessages.filter(m => ['user', 'assistant'].includes(m.role)).slice(-8).map(m => ({ role:m.role, content:String(m.content || '').slice(0,6000) }))
+    assistantMsg = { id: `${run.id}-assistant`, role:'assistant', content:'', loading:true, loadingText:'正在提交服务端任务', run, steps:[], images:[] }
+    state.generate.aiMessages.push({ id:`${run.id}-user`, role:'user',content:requestText, refs }, assistantMsg)
+    saveRuntimeState(); renderAiMessages()
+    const body = { runId:run.id, conversationId:session.id, projectId:run.projectId, sessionId:state.runtime.sessionId || undefined,
+      message:requestText, history, canvasContext, modelId:run.context.imageModel, aspectRatio:run.context.aspectRatio, resolution:run.context.resolution,
+      skillId:session.skillId || 'auto', executionPolicy:{mode:'auto'}, referenceImages, clientKeys:{...state.keys} }
+    let data
+    try { data = await postJson('/api/canvas/agent-runs', body) }
+    catch (error) {
+      // A lost submission response is reconciled by deterministic run ID.
+      // The browser never repeats the POST or any model request.
+      try { data = await getJson(`/api/canvas/agent-runs/${encodeURIComponent(run.jobId)}`) } catch { throw error }
+    }
+    accepted = true
+    if (isCurrent()) {
+      state.runtime.sessionId = data.sessionId || state.runtime.sessionId
+      state.generate.aiMessages = mergeAgentRunMessages(state.generate.aiMessages, data)
+      state.generate.activeAgentRun = data.run
+      dom.gInput.value = ''; if (dom.gInput.style) dom.gInput.style.height = ''
+      state.generate.aiRefs = []
+      saveCanvasDraft()
       saveRuntimeState()
-      return
+      canvasAgentWatcher.start(run.projectId, ownerId, true)
     }
-
-    const actions = normalizeCanvasAgentActions(agentData, requestText, aiAspectRatio, aiResolution)
-    if (!actions.length) {
-      saveRuntimeState()
-      return
-    }
-    assistantMsg.workflow = actions.map((action) => ({
-      id: action.id,
-      title: action.title,
-      prompt: action.prompt,
-      status: 'queued',
-      error: '',
-      creativeMode: action.creativeMode,
-    }))
-    assistantMsg.images = []
-    renderAiMessages()
-
-    let completedCount = 0
-    for (const [index, action] of actions.entries()) {
-      const workflowItem = assistantMsg.workflow[index]
-      if (workflowItem) workflowItem.status = 'running'
-      setAiMessageLoading(assistantMsg, `正在生成 ${index + 1}/${actions.length}：${action.title}`)
-      const placement = getCanvasWorkflowPlacement(index, actions.length, action.aspectRatio)
-      const pendingEl = addGeneratingPlaceholderToCanvas({
-        prompt: action.prompt,
-        aspectRatio: action.aspectRatio,
-        resolution: action.resolution,
-        x: placement.x,
-        y: placement.y,
-      })
-      canvasPendingEls.push(pendingEl)
-      renderCanvas()
-
-      try {
-        const data = await requestCanvasGenerate({
-          sessionId: state.runtime.sessionId || undefined,
-          modelId: aiModelId,
-          prompt: action.prompt,
-          referenceImages: refImages,
-          aspectRatio: action.aspectRatio,
-          resolution: action.resolution,
-          useDesignAgent: false,
-          clientKeys: { ...state.keys },
-        }, {
-          onStatus: (message) => setAiMessageLoading(assistantMsg, `${index + 1}/${actions.length} ${message}`),
-        })
-
-        state.runtime.sessionId = data.sessionId || state.runtime.sessionId
-        const resultDataUrl = data.resultDataUrl
-        const imageName = action.title || `ai-${Date.now()}-${index + 1}`
-        const { storedResult, imageSize } = await storeCanvasGeneratedResult(
-          {
-            ...data,
-            resultDataUrl,
-            resultAsset: data.resultAsset,
-            width: data.width,
-            height: data.height,
-          },
-          `ai-${Date.now()}-${index + 1}.png`,
-          'canvas_ai_sidebar',
-        )
-        assistantMsg.images.push({
-          dataUrl: resultDataUrl,
-          assetId: storedResult.assetId,
-          mime: storedResult.mime,
-          name: imageName,
-          prompt: action.prompt,
-          actionId: action.id,
-          aspectRatio: action.aspectRatio,
-          creativeMode: action.creativeMode,
-        })
-        if (!assistantMsg.imageDataUrl) {
-          assistantMsg.imageDataUrl = resultDataUrl
-          assistantMsg.imageAssetId = storedResult.assetId
-          assistantMsg.imageMime = storedResult.mime
-          assistantMsg.imageName = imageName
-          assistantMsg.aspectRatio = action.aspectRatio
-        }
-        replaceCanvasElementWithImage(pendingEl, resultDataUrl, imageName, {
-          assetId: storedResult.assetId,
-          mime: storedResult.mime,
-          aspectRatio: action.aspectRatio,
-          resolution: action.resolution,
-          prompt: action.prompt,
-          width: imageSize?.width || storedResult.width,
-          height: imageSize?.height || storedResult.height,
-        })
-        if (workflowItem) workflowItem.status = 'completed'
-        completedCount += 1
-      } catch (error) {
-        const itemError = trimError(error)
-        pendingEl.generatingStatus = ''
-        pendingEl.generatingError = `处理失败：${itemError}`
-        if (workflowItem) {
-          workflowItem.status = 'failed'
-          workflowItem.error = itemError
-        }
-      }
-      renderCanvas()
-      renderAiMessages()
-      saveRuntimeState()
-    }
-
-    state.generate.aiRefs = []
-    renderAiRefList()
-    renderCanvas()
-    const failedCount = actions.length - completedCount
-    const finalSummary = failedCount
-      ? `${replyText}\n\n已完成 ${completedCount}/${actions.length} 张图片，${failedCount} 张生成失败。`
-      : `${replyText}\n\n已完成 ${completedCount}/${actions.length} 张图片，并已添加到画布。`
-    await streamAiMessageContent(assistantMsg, finalSummary, { fromCurrent: true })
-    saveRuntimeState()
   } catch (error) {
-    const message = trimError(error)
-    assistantMsg.loading = false
-    assistantMsg.streaming = false
-    assistantMsg.loadingText = ''
-    assistantMsg.content = `处理失败：${message}`
-    for (const pendingEl of canvasPendingEls) {
-      if (pendingEl && state.generate.elements.includes(pendingEl) && pendingEl.type === 'image-generator') {
-        pendingEl.generatingStatus = ''
-        pendingEl.generatingError = `处理失败：${message}`
-        renderCanvas()
-        saveRuntimeState()
-      }
-    }
-    saveRuntimeState()
+    if (assistantMsg) { assistantMsg.loading = false; assistantMsg.run.phase = 'awaiting_result'; assistantMsg.run.error = trimError(error); assistantMsg.content = `任务提交未确认：${trimError(error)}。请刷新读取原任务。` }
+    else { state.notice.message = trimError(error); state.notice.tone = ''; renderAppNotice() }
   } finally {
-    state.generate.aiRunning = false
-    renderAiMessages()
+    if (!accepted) { state.generate.aiRunning = false; state.generate.activeAgentRun = null }
+    renderAiMessages(); renderAiRefList(); renderDesignAgentContext()
   }
 }
+
 
 /* ═══════════════ RENDER GENERATE ═══════════════ */
 
 function renderGenerate() {
+  if (runtimeStateReady && state.account.user?.id) {
+    canvasAgentWatcher.start(state.generate.projectId, state.account.user.id)
+    void restoreCanvasDraft()
+  }
   if (state.activeView === 'generate' && runtimeStateReady && !state.generate.projectId && !restoringRuntimeState) {
     void ensureCanvasProjectRecord().catch(() => {
       state.generate.projectSaveStatus = 'local'
@@ -6887,6 +7232,7 @@ function renderGenerate() {
   dom.gAiResolution.value = state.generate.genResolution
   dom.gAgent.checked = state.generate.genUseAgent
   dom.gAiSidebar.classList.toggle('hidden', !state.generate.showAiPanel)
+  syncAiPanelChrome()
   renderCanvasProjectMeta()
   renderAiMessages()
   renderAiRefList()
@@ -7436,7 +7782,7 @@ function renderStyle() {
   dom.sSubject.disabled = !hasStyle || busy
   dom.sSubject.value = s.subject
   dom.sGenerate.disabled = (!s.subject.trim() && s.subjectRefs.length === 0) || !hasStyle || busy
-  dom.sGenerate.textContent = s.subjectRefs.length > 1 ? '批量生成 ▸' : '生成 ▸'
+  dom.sGenerate.textContent = s.subjectRefs.length > 1 ? '批量生成' : '生成'
 
   if (hasResult || hasBatchResults) {
     const title = dom.sResultWrap.querySelector('.style-section-title')
@@ -7752,6 +8098,9 @@ function renderShell() {
 
   for (const button of dom.navItems) {
     button.classList.toggle('active', button.dataset.view === state.activeView)
+    button.setAttribute('aria-label', button.title || button.textContent.trim())
+    if (button.dataset.view === state.activeView) button.setAttribute('aria-current', 'page')
+    else button.removeAttribute('aria-current')
   }
 
   for (const view of dom.views) {
@@ -7875,6 +8224,7 @@ function renderTargetDropdown() {
     remove.className = 'chip-rm'
     remove.textContent = '×'
     remove.title = `移除 ${language.label}`
+    remove.setAttribute('aria-label', remove.title)
     remove.addEventListener('click', () => toggleTargetLanguage(language.code))
     chip.append(remove)
 
@@ -7961,7 +8311,7 @@ function renderTranslate() {
   if (dom.tFontPrompt) dom.tFontPrompt.value = state.translate.fontPrompt
   if (dom.tFontPromptWrap) dom.tFontPromptWrap.classList.toggle('hidden', state.translate.fontMode === 'match_original')
   if (dom.tFontReferenceWrap) dom.tFontReferenceWrap.classList.toggle('hidden', state.translate.fontMode !== 'reference')
-  if (dom.tFontReferenceName) dom.tFontReferenceName.textContent = state.translate.fontReference?.name || '未选择'
+  if (dom.tFontReferenceName) dom.tFontReferenceName.textContent = state.translate.fontReference?.name || '未上传样张，将跟随原图字体'
   if (dom.tTextColorMode) dom.tTextColorMode.value = textColorMode
   if (dom.tHeadlineColorWrap) dom.tHeadlineColorWrap.classList.toggle('hidden', textColorMode !== 'custom')
   if (dom.tBodyColorWrap) dom.tBodyColorWrap.classList.toggle('hidden', textColorMode !== 'custom')
@@ -8168,6 +8518,7 @@ function renderAiTestImageList() {
     remove.textContent = '×'
     remove.disabled = busy
     remove.title = '移除商品图'
+    remove.setAttribute('aria-label', `移除商品图 ${name.textContent}`)
     remove.addEventListener('click', () => {
       if (busy) return
       const assetId = image.assetId || image.id
@@ -8186,6 +8537,7 @@ function renderAiTestImageList() {
     add.textContent = '+ 行'
     add.disabled = busy || countAiTestRowsForImage(image.assetId || image.id) >= getAiTestMaxRowsPerImage()
     add.title = '为这张商品图新增一个测图方向'
+    add.setAttribute('aria-label', `为 ${name.textContent} 新增测图行`)
     add.addEventListener('click', () => {
       if (busy) return
       addAiTestRow(image.assetId || image.id)
@@ -8211,6 +8563,7 @@ function createAiTestPreviewRow(row, busy) {
   const direction = document.createElement('td')
   const directionSelect = document.createElement('select')
   directionSelect.className = 'input ai-test-row-direction'
+  directionSelect.setAttribute('aria-label', `商品 ${row.imageIndex + 1} 第 ${row.groupIndex} 行测试方向`)
   directionSelect.disabled = busy
   const directions = getAiTestTemplateDirections()
   directionSelect.replaceChildren(...directions.map((item) => {
@@ -8244,6 +8597,7 @@ function createAiTestPreviewRow(row, busy) {
   promptInput.disabled = busy
   promptInput.spellcheck = false
   promptInput.placeholder = '可以直接改这一行最终 prompt'
+  promptInput.setAttribute('aria-label', `商品 ${row.imageIndex + 1} 第 ${row.groupIndex} 行提示词`)
   promptInput.addEventListener('input', () => {
     const draft = state.aiTest.rows.find((entry) => entry.id === row.rowId)
     if (!draft) return
@@ -8323,6 +8677,7 @@ function createAiTestPreviewRow(row, busy) {
   remove.className = 'row-rm'
   remove.textContent = '×'
   remove.title = '删除这一行'
+  remove.setAttribute('aria-label', `删除商品 ${row.imageIndex + 1} 第 ${row.groupIndex} 行`)
   remove.disabled = busy || countAiTestRowsForImage(row.imageAssetId) <= 1
   remove.addEventListener('click', () => {
     if (busy) return
@@ -8383,6 +8738,7 @@ function renderHome() {
 }
 
 function renderAccount() {
+  renderModeljettyAccount()
   if (!dom.accountSummary) return
   const user = state.account.user
   const signedIn = Boolean(user)
@@ -8390,14 +8746,16 @@ function renderAccount() {
   dom.accountForm.classList.toggle('hidden', signedIn)
   dom.accountFormHead?.classList.toggle('hidden', signedIn)
   dom.accountName.textContent = user?.name || '未登录'
-  dom.accountEmail.textContent = user?.email || ''
+  dom.accountEmail.textContent = user?.email?.endsWith('@modeljetty.invalid') ? 'ModelJetty 账号' : user?.email || ''
   const accountLabel = signedIn ? user.name || '账号' : '登录 / 注册'
   if (dom.hAccount) dom.hAccount.textContent = accountLabel
   if (dom.accountBtn) {
-    const mark = document.createElement('span')
-    mark.className = 'settings-mark'
-    mark.textContent = '账号'
-    dom.accountBtn.replaceChildren(mark, document.createTextNode(` ${accountLabel}`))
+    const label = document.createElement('span')
+    label.className = 'sidebar-account-label'
+    label.textContent = accountLabel
+    dom.accountBtn.replaceChildren(createUiIcon('user-round'), label)
+    dom.accountBtn.title = `账号 · ${accountLabel}`
+    dom.accountBtn.setAttribute('aria-label', `账号 · ${accountLabel}`)
   }
   dom.accountLogin.disabled = state.account.loading
   dom.accountRegister.disabled = state.account.loading
@@ -8433,7 +8791,7 @@ function createHomeNewProjectCard() {
 
   const mark = document.createElement('span')
   mark.className = 'home-new-mark'
-  mark.textContent = '＋'
+  mark.append(createUiIcon('plus'))
 
   const text = document.createElement('strong')
   text.textContent = '新建画布'
@@ -8461,8 +8819,15 @@ function renderProjects() {
     return
   }
 
-  dom.pList.replaceChildren(...items.map(createProjectCard))
+  const matching = filterProjects(items, $('#p-search')?.value || '')
+  dom.pList.replaceChildren(...matching.map(createProjectCard))
+  $('#p-search-empty')?.classList.toggle('hidden', !items.length || matching.length > 0)
+  dom.pCount.textContent = matching.length === items.length ? `${items.length} 个项目` : `${matching.length} / ${items.length} 个项目`
   dom.pEmpty.classList.toggle('hidden', items.length > 0 || loading)
+  const sharedEmpty = state.projects.filterShared
+  dom.pEmpty.querySelector('h3').textContent = sharedEmpty ? '暂时没有共享给你的项目' : '还没有画布项目'
+  dom.pEmpty.querySelector('p').textContent = sharedEmpty ? '请项目所有者邀请你的账号，或返回查看自己的画布。' : '创建一个新画布，系统会在你编辑时自动保存。'
+  dom.pEmptyNew.textContent = sharedEmpty ? '查看全部项目' : '创建项目'
 }
 
 function renderJobList(kind) {
@@ -8818,27 +9183,31 @@ function createProjectSkeleton() {
 }
 
 function createProjectCard(project) {
-  const card = document.createElement('div')
-  card.tabIndex = 0
-  card.role = 'button'
+  const card = document.createElement('article')
   card.className = 'project-card'
   card.dataset.projectId = project.id
   card.title = `打开 ${project.title || DEFAULT_CANVAS_PROJECT_TITLE}`
+  const open = document.createElement('button')
+  open.type = 'button'
+  open.className = 'project-open'
+  open.setAttribute('aria-label', card.title)
 
   const thumb = document.createElement('div')
   thumb.className = 'project-thumb'
   if (project.previewUrl) {
     const img = document.createElement('img')
     img.src = project.previewUrl
+    img.loading = 'lazy'
+    img.decoding = 'async'
     img.alt = project.title || DEFAULT_CANVAS_PROJECT_TITLE
     thumb.append(img)
   } else {
     const placeholder = document.createElement('span')
     placeholder.className = 'project-thumb-placeholder'
-    placeholder.textContent = '◇'
+    placeholder.append(createUiIcon('panels-top-left'))
     thumb.append(placeholder)
   }
-  card.append(thumb)
+  open.append(thumb)
 
   const meta = document.createElement('div')
   meta.className = 'project-meta'
@@ -8869,10 +9238,9 @@ function createProjectCard(project) {
     del.textContent = '删除'
     actions.append(del)
   }
-  if (actions.childElementCount) {
-    meta.append(actions)
-  }
-  card.append(meta)
+  open.append(meta)
+  card.append(open)
+  if (actions.childElementCount) card.append(actions)
 
   return card
 }
@@ -9127,6 +9495,7 @@ function renderLaneList(container, items, kind) {
     const remove = document.createElement('button')
     remove.type = 'button'
     remove.className = 'lane-thumb-rm'
+    remove.setAttribute('aria-label', `移除 ${item.name || '图片'}`)
     remove.textContent = '×'
     remove.title = '移除'
     remove.disabled = busy
@@ -10314,6 +10683,10 @@ function toggleTargetLanguage(code) {
 
 function setActiveView(view, { updateRoute = true } = {}) {
   const previousView = state.activeView
+  if (previousView === 'generate' && normalizeAppView(view) !== 'generate') {
+    window.clearTimeout(canvasSaveTimer)
+    void persistCanvasProject()
+  }
   if (previousView && previousView !== normalizeAppView(view)) {
     if (releaseCompletedLoadedTasksForView(previousView)) saveRuntimeState()
   }
@@ -10369,28 +10742,52 @@ function toggleDropdown(name) {
   state.openDropdown = state.openDropdown === name ? null : name
   dom.sourceDropdown.classList.toggle('open', state.openDropdown === 'source')
   dom.targetDropdown.classList.toggle('open', state.openDropdown === 'target')
+  $('.dd-trigger', dom.sourceDropdown).setAttribute('aria-expanded', String(state.openDropdown === 'source'))
+  $('.dd-trigger', dom.targetDropdown).setAttribute('aria-expanded', String(state.openDropdown === 'target'))
 }
 
 function closeDropdowns() {
   state.openDropdown = null
   dom.sourceDropdown.classList.remove('open')
   dom.targetDropdown.classList.remove('open')
+  $('.dd-trigger', dom.sourceDropdown).setAttribute('aria-expanded', 'false')
+  $('.dd-trigger', dom.targetDropdown).setAttribute('aria-expanded', 'false')
 }
 
 function populateModelSelects() {
+  renderAgentModelInfo()
+  const models = state.keys.provider === 'modeljetty' ? MODELJETTY_MODEL_OPTIONS : MODEL_OPTIONS
+  const valid = new Set(models.map(model => model.id))
+  for (const view of [state.translate, state.generate, state.outfit, state.style, state.aiTest]) {
+    if (view && !valid.has(view.model)) view.model = models[0].id
+  }
+  if (!valid.has(state.generate.genModel)) state.generate.genModel = state.generate.model
   for (const select of [dom.tModel, dom.gModel, dom.oModel, dom.sModel, dom.gAiModel, dom.aiTestModel]) {
     if (!select) continue
-    select.replaceChildren(...MODEL_OPTIONS.map((model) => {
+    const previous = select.value
+    select.replaceChildren(...models.map((model) => {
       const option = document.createElement('option')
       option.value = model.id
-      option.textContent = `${model.label} · ${model.hint}`
+      option.textContent = model.label
+      option.title = `${model.label} · ${model.hint}`
       return option
     }))
+    select.value = valid.has(previous) ? previous : models[0].id
   }
 }
 
 function bindDropSurface({ surface, input, onFiles, onClick = null, clickable = true }) {
   if (clickable) {
+    if (!surface.querySelector('button, a, input:not([hidden])')) {
+      surface.tabIndex = 0
+      surface.setAttribute('role', 'button')
+      surface.setAttribute('aria-label', surface.querySelector('.dz-text')?.textContent.trim() || '上传图片')
+      surface.addEventListener('keydown', (event) => {
+        if (event.target !== surface || !['Enter', ' '].includes(event.key)) return
+        event.preventDefault()
+        surface.click()
+      })
+    }
     surface.addEventListener('click', () => {
       if (onClick && !onClick()) return
       input.click()
@@ -10673,6 +11070,7 @@ async function startCanvasFromHomePrompt() {
 async function startNewCanvasProject({ initialPrompt = '' } = {}) {
   if (state.generate.genRunning || state.generate.aiRunning) return
   state.generate.projectId = ''
+  canvasDraftScope = ''; canvasDraftSignature = ''; dom.gInput.value = initialPrompt
   state.generate.projectTitle = initialPrompt ? initialPrompt.slice(0, 36) : DEFAULT_CANVAS_PROJECT_TITLE
   state.generate.projectMetadata = {}
   state.generate.projectSaveStatus = ''
@@ -10712,6 +11110,11 @@ async function startNewCanvasProject({ initialPrompt = '' } = {}) {
 }
 
 async function openCanvasProject(projectId) {
+  if (state.generate.aiRunning || state.generate.genRunning) {
+    state.projects.error = '当前画布正在执行任务，请等待完成或先停止后续操作。'
+    renderProjects()
+    return
+  }
   if (!projectId) return
   state.projects.error = '正在打开项目…'
   renderProjects()
@@ -11076,9 +11479,10 @@ async function enrichCanvasProjectCard(project) {
 
 function scheduleCanvasProjectSave() {
   if (restoringRuntimeState) return
-  if (state.activeView !== 'generate' && !state.generate.projectId) return
+  if (state.activeView !== 'generate' && !state.generate.aiRunning && !state.generate.genRunning) return
   window.clearTimeout(canvasSaveTimer)
   canvasSaveTimer = window.setTimeout(() => {
+    if (state.activeView !== 'generate' && !state.generate.aiRunning && !state.generate.genRunning) return
     void persistCanvasProject()
   }, CANVAS_SAVE_DEBOUNCE_MS)
 }
@@ -11123,6 +11527,9 @@ async function ensureCanvasProjectRecord() {
     state.generate.projectId = data.project?.id || ''
     state.generate.projectTitle = data.project?.title || state.generate.projectTitle || DEFAULT_CANVAS_PROJECT_TITLE
     state.generate.projectMetadata = getProjectMetadata(data.project)
+    canvasDraftScope = canvasDraftKey(state.account.user?.id, state.generate.projectId)
+    canvasDraftSignature = ''; saveCanvasDraft()
+    canvasAgentWatcher.start(state.generate.projectId, state.account.user?.id)
     canvasLastSavedSignature = ''
     if (state.activeView === 'generate' && state.generate.projectId && window.location.pathname === '/lovart/canvas' && !canvasProjectIdFromLocation()) {
       window.history.replaceState({}, '', `/lovart/canvas?id=${encodeURIComponent(state.generate.projectId)}`)
@@ -11145,7 +11552,10 @@ async function persistCanvasProject() {
     canvasSavePending = true
     return canvasSaveInFlight
   }
+  const targetProjectId = state.generate.projectId
+  const targetOwnerId = state.account.user?.id
   const snapshot = createCanvasProjectSaveSnapshot()
+  const knownElementIds = [...(canvasKnownElementIds.get(targetProjectId) || [])]
   const signature = getCanvasProjectSaveSignature(snapshot)
   if (signature && signature === canvasLastSavedSignature && state.generate.projectSaveStatus === 'saved') return null
 
@@ -11154,26 +11564,23 @@ async function persistCanvasProject() {
     renderCanvasProjectMeta()
     try {
       await ensureCanvasProjectRecord()
-      if (!state.generate.projectId) throw new Error('Canvas project id missing')
-      const projectUrl = `/api/canvas/projects/${encodeURIComponent(state.generate.projectId)}`
+      if (targetProjectId && state.generate.projectId !== targetProjectId || state.account.user?.id !== targetOwnerId) return
+      const savedProjectId = targetProjectId || state.generate.projectId
+      if (!savedProjectId) throw new Error('Canvas project id missing')
+      const projectUrl = `/api/canvas/projects/${encodeURIComponent(savedProjectId)}`
       const projectBody = {
         sessionId: state.runtime.sessionId || undefined,
         title: snapshot.title,
         metadataJson: snapshot.metadataJson,
       }
 
-      try {
-        await putJson(projectUrl, projectBody)
-      } catch (error) {
-        if (error?.status !== 404) throw error
-        state.generate.projectId = ''
-        await ensureCanvasProjectRecord()
-      }
-
-      await putJson(`/api/canvas/projects/${encodeURIComponent(state.generate.projectId)}/elements`, {
-        sessionId: state.runtime.sessionId || undefined,
-        elements: snapshot.elements,
+      await putJson(projectUrl, projectBody)
+      const result = await putJson(`${projectUrl}/elements`, {
+        sessionId: state.runtime.sessionId || undefined, elements: snapshot.elements, knownElementIds,
       })
+      if (state.generate.projectId !== savedProjectId || state.account.user?.id !== targetOwnerId) return
+      mergeServerCanvasElements(result.elements || [], savedProjectId)
+      canvasKnownElementIds.set(savedProjectId, new Set((result.elements || snapshot.elements).map(e => e.id)))
       canvasLastSavedSignature = signature || getCanvasProjectSaveSignature(snapshot)
       state.generate.projectSaveStatus = 'saved'
       state.projects.loadedSessionId = ''
@@ -11200,6 +11607,7 @@ async function loadCanvasProjectSnapshot(projectId) {
     getJson(projectUrl),
     getJson(`${projectUrl}/elements`),
   ])
+  canvasKnownElementIds.set(projectId, new Set((elementsData.elements || []).map(e => e.id)))
   return {
     project: projectData.project,
     elements: Array.isArray(elementsData.elements)
@@ -12674,27 +13082,12 @@ async function downloadAll(entries, { concurrency = JOB_DOWNLOAD_CONCURRENCY, on
 }
 
 async function downloadAsset(href, name) {
-  const link = document.createElement('a')
-
-  try {
-    if (href.startsWith('data:')) {
-      link.href = href
-    } else {
-      const response = await fetch(href)
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const blob = await response.blob()
-      link.href = URL.createObjectURL(blob)
-    }
-
-    link.download = ensureImageExtension(name, href)
-    document.body.append(link)
-    link.click()
-    link.remove()
-  } finally {
-    if (link.href.startsWith('blob:')) {
-      URL.revokeObjectURL(link.href)
-    }
-  }
+  // Large data URLs are unreliable as download navigation targets. Use the same
+  // bounded blob lifecycle for inline images, stored assets and PSD exports.
+  const response = await fetch(href)
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const blob = await response.blob()
+  downloadBlob(blob, ensureImageExtension(name, href, blob.type))
 }
 
 async function copyTextToClipboard(text) {
@@ -12743,6 +13136,7 @@ function createDropdownItem({ primary, secondary, selected, multiple }) {
   const button = document.createElement('button')
   button.type = 'button'
   button.className = `dd-item${selected ? ' selected' : ''}`
+  button.setAttribute('aria-pressed', String(selected))
 
   if (multiple) {
     const check = document.createElement('span')
@@ -12773,13 +13167,124 @@ function hydrateSettingsForm({ preserveKeyInputs = false } = {}) {
   hydrateKeyForm({ preserveKeyInputs })
   hydrateThemeForm()
   renderSettingsAccountKeys()
+  if (!preserveKeyInputs) {
+    renderModeljettyModelChoices(state.keys.modeljettyAgentModel || state.account.apiKeys?.preferences?.modeljettyAgentModel || state.account.modeljetty?.agentModel || 'gemini-3.8-flash-medium')
+    $('#k-agent-1xm').value = state.keys.oneXmAgentModel || state.account.apiKeys?.preferences?.oneXmAgentModel || 'gemini-3-flash-preview'
+  }
+  if (dom.settingsDialog?.open || !preserveKeyInputs) void loadModeljettyModelCatalog()
+}
+
+async function loadModeljettyModelCatalog(force = false) {
+  const catalog = state.account.modelCatalog
+  const ownerId = state.account.user?.id || ''
+  if (catalog.ownerId !== ownerId) { catalog.models = []; catalog.status = 'idle'; catalog.ownerId = ownerId }
+  if (catalog.status === 'loading' || !force && catalog.status === 'ready' && catalog.ownerId === ownerId) return
+  catalog.status = 'loading'; catalog.ownerId = ownerId; catalog.error = ''
+  renderModeljettyModelChoices()
+  try {
+    const data = await getJson('/api/account/modeljetty/models')
+    if ((state.account.user?.id || '') !== ownerId || catalog.ownerId !== ownerId) return
+    catalog.models = (data.models || []).map(model => ({ ...model, name: getModel(model.id)?.label || model.name })); catalog.status = 'ready'; catalog.fetchedAt = data.fetchedAt
+  } catch (error) {
+    if ((state.account.user?.id || '') !== ownerId || catalog.ownerId !== ownerId) return
+    catalog.status = 'error'; catalog.error = trimError(error)
+  }
+  renderModeljettyModelChoices()
+}
+
+function renderModeljettyModelChoices(selectedValue) {
+  const select = $('#k-agent-modeljetty')
+  if (!select) return
+  const selected = selectedValue || select.value || state.keys.modeljettyAgentModel || state.account.apiKeys?.preferences?.modeljettyAgentModel || state.account.modeljetty?.agentModel || 'gemini-3.8-flash-medium'
+  const catalog = state.account.modelCatalog
+  const search = $('#settings-model-search')?.value || ''
+  const groups = groupModelCatalog(catalog.models, search)
+  const vendorFilters = $('#settings-model-vendors')
+  if (vendorFilters) {
+    vendorFilters.replaceChildren()
+    const allGroups = groupModelCatalog(catalog.models)
+    const filters = allGroups.length ? [{ vendor: '', label: '全部', count: catalog.models.length }, ...allGroups.map((group) => ({ vendor: group.vendor, label: group.vendor, count: group.models.length }))] : []
+    for (const filter of filters) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = `${filter.label} ${filter.count}`
+      button.setAttribute('aria-pressed', String(search.trim().toLowerCase() === filter.vendor.toLowerCase()))
+      button.addEventListener('click', () => {
+        $('#settings-model-search').value = filter.vendor
+        renderModeljettyModelChoices()
+      })
+      vendorFilters.append(button)
+    }
+  }
+  select.replaceChildren()
+  let selectedIncluded = false
+  for (const group of groups) {
+    const optgroup = document.createElement('optgroup'); optgroup.label = group.vendor
+    for (const model of group.models) {
+      const reason = agentModelUnavailableReason(model)
+      const option = document.createElement('option')
+      option.value = model.id
+      option.disabled = Boolean(reason)
+      const imageModel = MODELJETTY_MODEL_OPTIONS.find(item => item.id === model.id)
+      option.textContent = imageModel
+        ? `${imageModel.label}${reason ? `（${reason}）` : ''}`
+        : `${model.name || model.id} · ${model.id}${reason ? `（${reason}）` : model.capabilities?.imageInput ? ' · 支持参考图' : ' · 文字'} `
+      if (model.id === selected) selectedIncluded = true
+      optgroup.append(option)
+    }
+    select.append(optgroup)
+  }
+  if (!selectedIncluded) {
+    const option = document.createElement('option'); option.value = selected; option.textContent = `${formatAgentModelLabel(selected)}（当前配置）`
+    const known = catalog.models.find((model) => model.id === selected)
+    option.disabled = Boolean(known && agentModelUnavailableReason(known))
+    select.prepend(option)
+  }
+  select.value = selected
+  const status = $('#settings-model-catalog-status')
+  if (status) status.textContent = catalog.status === 'loading' ? '正在读取 ModelJetty 完整模型目录…'
+    : catalog.status === 'error' ? catalog.error
+      : catalog.status === 'ready' ? `平台共 ${catalog.models.length} 个模型 · 当前账号可选 ${catalog.models.filter((model) => !agentModelUnavailableReason(model)).length} 个 Agent 模型。灰色选项显示当前不可选原因。${search && !groups.length ? ' 没有匹配的模型。' : ''}` : '关联 ModelJetty 账号后读取模型目录。'
 }
 
 function hydrateKeyForm({ preserveKeyInputs = false } = {}) {
+  if (!preserveKeyInputs && $('#k-provider')) $('#k-provider').value = state.keys.provider || '1xm'
+  renderSettingsProvider()
+  hydrateKeyInput('k-modeljetty', 'modeljettyApiKey', preserveKeyInputs)
   hydrateKeyInput('k-vision', 'visionApiKey', preserveKeyInputs)
   hydrateKeyInput('k-banana2', 'banana2ApiKey', preserveKeyInputs)
   hydrateKeyInput('k-bananapro', 'bananaProApiKey', preserveKeyInputs)
   hydrateKeyInput('k-gptimage', 'gptImageApiKey', preserveKeyInputs)
+}
+
+function renderSettingsProvider() {
+  const provider = $('#k-provider')?.value || '1xm'
+  for (const field of $$('[data-provider-fields]')) field.classList.toggle('hidden', field.dataset.providerFields !== provider)
+  const link = $('#settings-api-link')
+  if (link) link.href = provider === 'modeljetty' ? 'https://modeljetty.com/console' : 'https://1xm.ai/register?aff=Bkzj'
+  $('#modeljetty-image-hint')?.classList.toggle('hidden', Boolean(state.account.modeljetty?.imageTasksEnabled))
+  const agentInfo = $('#settings-agent-model')
+  const agentModel = provider === 'modeljetty'
+    ? $('#k-agent-modeljetty')?.value || state.keys.modeljettyAgentModel || state.account.modeljetty?.agentModel || 'gemini-3.8-flash-medium'
+    : $('#k-agent-1xm')?.value || state.keys.oneXmAgentModel || 'gemini-3-flash-preview'
+  if (agentInfo) agentInfo.textContent = `Agent 模型：${formatAgentModelLabel(agentModel)}；与生图模型分别工作。`
+  const providerLabel = $('#settings-model-provider')
+  if (providerLabel) providerLabel.textContent = provider === 'modeljetty' ? '当前使用 ModelJetty' : '当前使用 1xm'
+}
+
+function formatAgentModelLabel(modelId) {
+  const match = /^gemini-3\.8-flash-(low|medium|high|tiered)$/.exec(String(modelId || ''))
+  return match ? `Gemini 3.8 Flash（${match[1]}）` : String(modelId || '')
+}
+
+function renderAgentModelInfo() {
+  const info = $('#g-ai-agent-model')
+  if (!info) return
+  const managed = state.keys.provider === 'modeljetty'
+  const prefs = state.account.apiKeys?.preferences || {}
+  const model = managed ? state.keys.modeljettyAgentModel || prefs.modeljettyAgentModel || state.account.modeljetty?.agentModel || 'gemini-3.8-flash-medium'
+    : state.keys.oneXmAgentModel || prefs.oneXmAgentModel || 'gemini-3-flash-preview'
+  info.textContent = `Agent 规划：${managed ? 'ModelJetty' : '1xm'} · ${formatAgentModelLabel(model)}`
 }
 
 function hydrateKeyInput(id, keyName, preserveValue = false) {
@@ -12806,7 +13311,7 @@ function renderSettingsAccountKeys() {
 
   const saved = Object.values(state.account.apiKeys?.keys || {}).filter((item) => item?.saved)
   if (!saved.length) {
-    setSettingsKeyStatus('账号尚未保存 API Keys')
+    setSettingsKeyStatus(Object.keys(state.account.apiKeys?.preferences || {}).length ? '默认模型配置已同步到账号' : '账号尚未保存 API Keys')
     return
   }
 
@@ -12820,7 +13325,7 @@ function renderSettingsAccountKeys() {
 }
 
 function hasSavedAccountKeys() {
-  return Object.values(state.account.apiKeys?.keys || {}).some((item) => item?.saved)
+  return Object.values(state.account.apiKeys?.keys || {}).some((item) => item?.saved) || Object.keys(state.account.apiKeys?.preferences || {}).length > 0
 }
 
 function hydrateThemeForm() {
@@ -12852,7 +13357,7 @@ function getLanguage(code) {
 }
 
 function getModel(id) {
-  return MODEL_OPTIONS.find((item) => item.id === id)
+  return [...MODEL_OPTIONS, ...MODELJETTY_MODEL_OPTIONS].find((item) => item.id === id)
 }
 
 function getGarmentRoleLabel(role) {
@@ -13212,3 +13717,5 @@ function restoreOutfitResults(store) {
     }
   }
 }
+
+init()

@@ -156,7 +156,7 @@ test('POST /api/ai-test/templates lets admin create a draft version', async () =
   try {
     const env = {}
     const auth = await createAuthedUser(mod, env, 'admin-create@example.com')
-    env.VS_ADMIN_EMAILS = auth.user.email
+    env.VS_ADMIN_USER_IDS = auth.user.id
 
     const response = await mod.onRequestPost({
       request: jsonRequest('POST', {
@@ -190,7 +190,7 @@ test('template API write routes validate JSON and activation action fields', asy
   try {
     const env = {}
     const auth = await createAuthedUser(mod, env, 'admin-invalid@example.com')
-    env.VS_ADMIN_EMAILS = auth.user.email
+    env.VS_ADMIN_USER_IDS = auth.user.id
 
     const invalidJson = await mod.onRequestPost({
       request: new Request('https://example.com/api/ai-test/templates', {
@@ -292,7 +292,7 @@ test('PATCH /api/ai-test/templates lets admin activate a version', async () => {
   try {
     const env = {}
     const auth = await createAuthedUser(mod, env, 'admin-activate@example.com')
-    env.ADMIN_EMAILS = auth.user.email
+    env.ADMIN_USER_IDS = auth.user.id
 
     const createResponse = await mod.onRequestPost({
       request: jsonRequest('POST', {
@@ -332,7 +332,7 @@ test('template API maps unknown template/version store errors to 404', async () 
   try {
     const env = {}
     const auth = await createAuthedUser(mod, env, 'admin-notfound@example.com')
-    env.VS_ADMIN_EMAILS = auth.user.email
+    env.VS_ADMIN_USER_IDS = auth.user.id
 
     const postUnknownTemplate = await mod.onRequestPost({
       request: jsonRequest('POST', {

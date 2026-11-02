@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
+import { mergeWorkspaceSections } from '../public/js/workspace-ui.js'
 import { readFile } from 'node:fs/promises'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
@@ -58,6 +59,8 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
   let shouldFailLargeWrite = failLargeWrites
   let idCounter = 0
   const context = {
+    mergeWorkspaceSections,
+    runtimeSectionSignatures: {},
     RUNTIME_STORAGE: 'img-translator:runtime:v2',
     RESULTS_STORAGE: 'img-translator:results:v1',
     CANVAS_AI_HISTORY_STORAGE: 'img-translator:canvas-ai-history:v1',
@@ -397,7 +400,7 @@ async function createRuntimeHarness({ failLargeWrites = false } = {}) {
   const harnessSource = functionNames.map((name) => extractFunction(source, name)).filter(Boolean).join('\n')
   vm.createContext(context)
   vm.runInContext(harnessSource, context)
-  return { ...context, writes, storage }
+  return { ...context, writes, storage, context }
 }
 
 test('app defaults batch translation to gpt image 2 and outfit to nano banana 2', async () => {
@@ -711,6 +714,40 @@ test('writeRuntimeStorageSnapshot keeps the full snapshot when storage accepts i
   assert.equal(harness.writes.length, 1)
   assert.equal(stored.generate.elements.length, 1)
   assert.equal(stored.generate.elements[0].content, 'data:image/png;base64,abc')
+})
+
+test('batch-tool saves preserve another tab canvas cache and never publish stale canvas history', async () => {
+  const harness = await createRuntimeHarness()
+  let historyWrites = 0, canvasWrites = 0
+  harness.context.saveAiHistory = () => { historyWrites++; return true }
+  harness.context.scheduleCanvasProjectSave = () => { canvasWrites++ }
+  harness.state.activeView = 'ai-test'
+  const currentCanvas = { projectId: 'new-canvas-from-other-tab', elements: [{ id: 'completed-image', assetId: 'result-asset' }] }
+  harness.storage.set('img-translator:runtime:v2', JSON.stringify({ generate: currentCanvas }))
+  harness.saveRuntimeState()
+  const stored = JSON.parse(harness.storage.get('img-translator:runtime:v2'))
+  assert.deepEqual(stored.generate, currentCanvas)
+  assert.equal(historyWrites, 0)
+  assert.equal(canvasWrites, 0)
+  assert.ok(stored.aiTest)
+
+  harness.state.activeView = 'generate'
+  harness.saveRuntimeState()
+  assert.equal(historyWrites, 1)
+  assert.equal(canvasWrites, 1)
+  assert.equal(JSON.parse(harness.storage.get('img-translator:runtime:v2')).generate.projectId, 'project-1')
+})
+
+test('an active Agent can persist accepted receipts after navigating to a batch tool', async () => {
+  const harness = await createRuntimeHarness()
+  let historyWrites = 0, canvasWrites = 0
+  harness.context.saveAiHistory = () => { historyWrites++; return true }
+  harness.context.scheduleCanvasProjectSave = () => { canvasWrites++ }
+  harness.state.activeView = 'style'
+  harness.state.generate.aiRunning = true
+  harness.saveRuntimeState()
+  assert.equal(historyWrites, 1)
+  assert.equal(canvasWrites, 1)
 })
 
 test('migrateLegacyRuntimeStorage moves heavy legacy runtime fields out of runtime storage', async () => {

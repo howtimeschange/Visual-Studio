@@ -64,6 +64,8 @@ export async function dispatchQueuedJob(
     return 'queue'
   }
 
+  if (message.jobType === 'canvas_agent') throw new Error('创作任务已保存，持久队列暂不可用，请恢复原任务。')
+
   const task = fallback()
   if (waitUntil) {
     waitUntil(task)

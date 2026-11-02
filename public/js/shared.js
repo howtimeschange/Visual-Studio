@@ -63,10 +63,10 @@ export function sanitizeFileName(name = '') {
   return String(name).replace(/[\\/:*?"<>|]+/g, '-')
 }
 
-export function ensureImageExtension(name = '', href = '') {
+export function ensureImageExtension(name = '', href = '', mimeHint = '') {
   const normalized = String(name || 'image').trim() || 'image'
   if (/\.(png|jpg|jpeg|webp|gif)$/i.test(normalized)) return normalized
-  const mime = splitDataUrl(href)?.mime || ''
+  const mime = mimeHint || splitDataUrl(href)?.mime || ''
   if (/jpeg/i.test(mime)) return `${normalized}.jpg`
   if (/webp/i.test(mime)) return `${normalized}.webp`
   if (/gif/i.test(mime)) return `${normalized}.gif`

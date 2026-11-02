@@ -1,3 +1,4 @@
+import { assertInputAssetAccess } from '../../_lib/permissions'
 import {
   Env,
   json,
@@ -19,6 +20,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   try {
     const user = await requireAuth(env, request)
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
     return json(await decomposeCanvasPsdImage(env, { ...body, clientKeys, _authUserId: user.id }))
   } catch (error: any) {

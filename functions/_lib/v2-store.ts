@@ -18,6 +18,7 @@ import type {
   UsageEventRecord,
   UserApiKeysRecord,
   UserRecord,
+  ExternalIdentityRecord,
 } from '../../packages/contracts/v2'
 import { createId, nowIso } from '../../packages/core/id'
 import { sha256Hex } from '../../packages/core/hash'
@@ -118,6 +119,97 @@ const memoryState: MemoryState = {
 
 function dbFor(env: any): D1Database | null {
   return env?.VS_DB || null
+}
+
+// Local fallback follows the same single-use/unique-binding rules as D1.
+const externalIdentities = new Map<string, ExternalIdentityRecord>()
+const oauthFlows = new Map<string, { ciphertext: string; expiresAt: number }>()
+
+function rowToExternalIdentity(row: any): ExternalIdentityRecord {
+  return { issuer: row.issuer, subject: row.subject, userId: row.user_id, ciphertext: row.ciphertext,
+    expiresAt: row.expires_at, refreshLeaseUntil: row.refresh_lease_until, updatedAt: row.updated_at }
+}
+
+export async function putOAuthFlow(env: any, hash: string, ciphertext: string, expiresAt: number) {
+  if (env?.VS_DB) {
+    await env.VS_DB.batch([
+      env.VS_DB.prepare('DELETE FROM oauth_flows WHERE expires_at < ?').bind(Date.now()),
+      env.VS_DB.prepare('INSERT INTO oauth_flows VALUES (?, ?, ?)').bind(hash, ciphertext, expiresAt),
+    ])
+  } else {
+    for (const [key, flow] of oauthFlows) if (flow.expiresAt < Date.now()) oauthFlows.delete(key)
+    oauthFlows.set(hash, { ciphertext, expiresAt })
+  }
+}
+
+export async function consumeOAuthFlow(env: any, hash: string): Promise<string | null> {
+  if (env?.VS_DB) {
+    const row = await env.VS_DB.prepare('DELETE FROM oauth_flows WHERE state_hash = ? RETURNING ciphertext, expires_at').bind(hash).first()
+    return row && row.expires_at > Date.now() ? row.ciphertext : null
+  }
+  const flow = oauthFlows.get(hash)
+  oauthFlows.delete(hash)
+  return flow && flow.expiresAt > Date.now() ? flow.ciphertext : null
+}
+
+export async function getExternalIdentity(env: any, issuer: string, opts: { subject?: string; userId?: string }): Promise<ExternalIdentityRecord | null> {
+  if (env?.VS_DB) {
+    const row = await env.VS_DB.prepare(`SELECT * FROM external_identities WHERE issuer = ? AND ${opts.subject ? 'subject' : 'user_id'} = ?`)
+      .bind(issuer, opts.subject || opts.userId || '').first()
+    return row ? rowToExternalIdentity(row) : null
+  }
+  return [...externalIdentities.values()].find(row => row.issuer === issuer && (opts.subject ? row.subject === opts.subject : row.userId === opts.userId)) || null
+}
+
+export async function saveExternalIdentity(env: any, input: Omit<ExternalIdentityRecord, 'updatedAt' | 'refreshLeaseUntil'>, newUser?: UserRecord) {
+  const record = { ...input, updatedAt: nowIso(), refreshLeaseUntil: 0 }
+  if (env?.VS_DB) {
+    const statements = []
+    if (newUser) statements.push(env.VS_DB.prepare('INSERT INTO users (id, email, name, password_hash, password_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(newUser.id, newUser.email, newUser.name, newUser.passwordHash, newUser.passwordSalt, newUser.createdAt, newUser.updatedAt))
+    statements.push(env.VS_DB.prepare(`INSERT INTO external_identities (issuer, subject, user_id, ciphertext, expires_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(issuer, subject) DO UPDATE SET ciphertext = excluded.ciphertext,
+      expires_at = excluded.expires_at, updated_at = excluded.updated_at, refresh_lease_until = 0
+      WHERE external_identities.user_id = excluded.user_id`)
+      .bind(record.issuer, record.subject, record.userId, record.ciphertext, record.expiresAt, record.updatedAt))
+    await env.VS_DB.batch(statements)
+    const saved = await getExternalIdentity(env, record.issuer, { subject: record.subject })
+    if (saved?.userId !== record.userId) throw Object.assign(new Error('ModelJetty account already linked'), { status: 409 })
+  } else {
+    const existing = await getExternalIdentity(env, record.issuer, { subject: record.subject })
+    const linked = await getExternalIdentity(env, record.issuer, { userId: record.userId })
+    if ((existing && existing.userId !== record.userId) || (linked && linked.subject !== record.subject)) throw Object.assign(new Error('ModelJetty account already linked'), { status: 409 })
+    if (newUser) { memoryState.users.set(newUser.id, newUser); memoryState.usersByEmail.set(newUser.email, newUser.id) }
+    externalIdentities.set(`${record.issuer}:${record.subject}`, record)
+  }
+  return record
+}
+
+export async function claimIdentityRefresh(env: any, record: ExternalIdentityRecord): Promise<boolean> {
+  const until = Date.now() + 30_000
+  if (env?.VS_DB) {
+    const result = await env.VS_DB.prepare(`UPDATE external_identities SET refresh_lease_until = ?
+      WHERE issuer = ? AND subject = ? AND ciphertext = ? AND refresh_lease_until = 0`)
+      .bind(until, record.issuer, record.subject, record.ciphertext).run()
+    return result.meta.changes === 1
+  }
+  const current = externalIdentities.get(`${record.issuer}:${record.subject}`)
+  if (!current || current.ciphertext !== record.ciphertext || current.refreshLeaseUntil !== 0) return false
+  current.refreshLeaseUntil = until
+  return true
+}
+
+export async function finishIdentityRefresh(env: any, record: ExternalIdentityRecord, ciphertext: string, expiresAt: number): Promise<boolean> {
+  if (env?.VS_DB) {
+    const result = await env.VS_DB.prepare(`UPDATE external_identities SET ciphertext = ?, expires_at = ?, updated_at = ?, refresh_lease_until = 0
+      WHERE issuer = ? AND subject = ? AND ciphertext = ?`)
+      .bind(ciphertext, expiresAt, nowIso(), record.issuer, record.subject, record.ciphertext).run()
+    return result.meta.changes === 1
+  }
+  const current = externalIdentities.get(`${record.issuer}:${record.subject}`)
+  if (!current || current.ciphertext !== record.ciphertext) return false
+  externalIdentities.set(`${record.issuer}:${record.subject}`, { ...current, ciphertext, expiresAt, updatedAt: nowIso(), refreshLeaseUntil: 0 })
+  return true
 }
 
 function getScopeKey(scope: string, scopeId: string): string {
@@ -748,6 +840,7 @@ export async function ensureSession(env: any, sessionId?: string, userId?: strin
   if (db) {
     const existing = await db.prepare('SELECT * FROM sessions WHERE id = ?').bind(id).first<any>()
     if (existing) {
+      if (existing.user_id !== (userId || null)) return ensureSession(env, undefined, userId)
       const nextUserId = userId || existing.user_id || null
       await db.prepare('UPDATE sessions SET last_active_at = ?, user_id = COALESCE(?, user_id) WHERE id = ?').bind(now, userId || null, id).run()
       return { ...rowToSession(existing), userId: nextUserId, lastActiveAt: now }
@@ -768,6 +861,7 @@ export async function ensureSession(env: any, sessionId?: string, userId?: strin
 
   const existing = memoryState.sessions.get(id)
   if (existing) {
+    if ((existing.userId || null) !== (userId || null)) return ensureSession(env, undefined, userId)
     existing.lastActiveAt = now
     if (userId) existing.userId = userId
     memoryState.sessions.set(id, existing)
@@ -1052,16 +1146,68 @@ export async function listJobsByStatus(env: any, statuses: string[]): Promise<Jo
     .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
 }
 
+export async function listCanvasAgentJobs(env: any, projectId: string): Promise<JobRecord[]> {
+  const db = dbFor(env)
+  if (db) {
+    const result = await db.prepare(`SELECT * FROM jobs WHERE type = 'canvas_agent'
+      AND json_extract(config_json, '$.inputProjectId') = ? ORDER BY created_at DESC LIMIT 100`).bind(projectId).all<any>()
+    return (result.results || []).map(rowToJob)
+  }
+  return [...memoryState.jobs.values()].filter(job => job.type === 'canvas_agent' && job.configJson.inputProjectId === projectId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100)
+}
+
+// Insert a deterministic server result once. Reconciliation never moves or
+// overwrites artwork a person has already edited.
+export async function insertCanvasAgentElement(env: any, projectId: string, element: Record<string, unknown>) {
+  const project = await getCanvasProject(env, projectId)
+  if (!project) throw Object.assign(new Error('Canvas project not found'), { status: 404 })
+  const current = await listCanvasProjectElements(env, projectId)
+  const existing = current.find(record => record.dataJson.id === element.id)
+  if (existing) return existing
+  const now = nowIso()
+  const record: CanvasProjectElementRecord = { id: `cel_agent_${element.id}`, projectId, elementType: 'image',
+    zIndex: current.reduce((n, r) => Math.max(n, r.zIndex + 1), 0), dataJson: element, createdAt: now, updatedAt: now }
+  const db = dbFor(env)
+  if (db) {
+    await db.batch([
+      db.prepare(`INSERT OR IGNORE INTO canvas_project_elements
+        (id, project_id, element_type, z_index, data_json, created_at, updated_at)
+        SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS
+        (SELECT 1 FROM canvas_project_elements WHERE project_id = ? AND json_extract(data_json, '$.id') = ?)`).bind(
+        record.id, projectId, record.elementType, record.zIndex, stringifyJson(element), now, now, projectId, String(element.id)),
+      db.prepare('UPDATE canvas_projects SET updated_at = ? WHERE id = ?').bind(now, projectId),
+    ])
+  } else {
+    memoryState.canvasProjectElements.set(projectId, [...current, record])
+    project.updatedAt = now
+  }
+  return record
+}
+
+export async function patchCanvasAgentReview(env: any, projectId: string, elementId: string, runId: string, review: any) {
+  const db = dbFor(env)
+  if (db) {
+    await db.prepare(`UPDATE canvas_project_elements SET data_json = json_set(data_json, '$.qualityReview', json(?))
+      WHERE project_id = ? AND json_extract(data_json, '$.id') = ? AND json_extract(data_json, '$.agentRunId') = ?`)
+      .bind(stringifyJson(review), projectId, elementId, runId).run()
+  } else {
+    const records = memoryState.canvasProjectElements.get(projectId) || []
+    const record = records.find(r => r.dataJson.id === elementId && r.dataJson.agentRunId === runId)
+    if (record) record.dataJson = { ...record.dataJson, qualityReview: review }
+  }
+}
+
 export async function createJobItems(
   envOrJobId: any,
-  jobIdOrItems: string | Array<Omit<JobItemRecord, 'id'>>,
-  maybeItems?: Array<Omit<JobItemRecord, 'id'>>,
+  jobIdOrItems: string | Array<Omit<JobItemRecord, 'id'> & { id?: string }>,
+  maybeItems?: Array<Omit<JobItemRecord, 'id'> & { id?: string }>,
 ): Promise<JobItemRecord[]> {
   const legacy = Array.isArray(jobIdOrItems)
   const env = legacy ? null : envOrJobId
   const jobId = legacy ? String(envOrJobId || '') : String(jobIdOrItems || '')
-  const items = (legacy ? jobIdOrItems : maybeItems) as Array<Omit<JobItemRecord, 'id'>>
-  const created = items.map((item) => ({ ...item, id: createId('item') }))
+  const items = (legacy ? jobIdOrItems : maybeItems) as Array<Omit<JobItemRecord, 'id'> & { id?: string }>
+  const created = items.map((item) => ({ ...item, id: item.id || createId('item') }))
 
   const db = dbFor(env)
   if (db) {
@@ -1604,6 +1750,7 @@ export async function replaceCanvasProjectElements(
   envOrProjectId: any,
   projectIdOrElements: string | Array<Record<string, unknown>>,
   maybeElements?: Array<Record<string, unknown>>,
+  knownElementIds?: string[],
 ): Promise<CanvasProjectElementRecord[] | null> {
   const legacy = Array.isArray(projectIdOrElements)
   const env = legacy ? null : envOrProjectId
@@ -1611,48 +1758,46 @@ export async function replaceCanvasProjectElements(
   const elements = (legacy ? projectIdOrElements : maybeElements) as Array<Record<string, unknown>>
   const project = await getCanvasProject(env, projectId)
   if (!project) return null
-  const now = nowIso()
-  const currentRecords = await listCanvasProjectElements(env, projectId)
-  if (jsonValuesEqual(currentRecords.map((record) => record.dataJson), elements)) {
-    return currentRecords
-  }
+  const ids = elements.map(e => String(e.id || ''))
+  if (ids.some(id => !id) || new Set(ids).size !== ids.length) throw Object.assign(new Error('Unique element ids required'), { status: 400 })
+  const current = await listCanvasProjectElements(env, projectId)
+  if (jsonValuesEqual(current.map(r => r.dataJson), elements)) return current
+  // A stale client can delete only artwork it previously saw. In particular,
+  // a browser snapshot cannot remove newly appended server Agent results.
+  const known = new Set(knownElementIds || current.filter(r => !r.dataJson.agentRunId).map(r => String(r.dataJson.id)))
+  const removed = current.filter(r => !ids.includes(String(r.dataJson.id)) && known.has(String(r.dataJson.id)))
+  const stamp = nowIso()
   const records = elements.map((element, index) => {
-    return {
-      id: createId('cel'),
-      projectId,
-      elementType: typeof element.type === 'string' ? element.type : 'unknown',
-      zIndex: index,
-      dataJson: element,
-      createdAt: now,
-      updatedAt: now,
+    const previous = current.find(r => r.dataJson.id === element.id)
+    const data = { ...element }
+    if (previous?.dataJson.agentRunId) for (const key of ['agentRunId', 'qualityReview', 'delivery']) {
+      if (previous.dataJson[key] !== undefined) data[key] = previous.dataJson[key]
     }
+    return { id: previous?.id || (data.agentRunId ? `cel_agent_${data.id}` : `cel_${projectId}_${data.id}`),
+      projectId, elementType: String(data.type || 'unknown'), zIndex: index, dataJson: data,
+      createdAt: previous?.createdAt || stamp, updatedAt: stamp }
   })
-
   const db = dbFor(env)
   if (db) {
     await db.batch([
-      db.prepare('DELETE FROM canvas_project_elements WHERE project_id = ?').bind(projectId),
-      ...records.map((record) => db.prepare(`
-        INSERT INTO canvas_project_elements (
-          id, project_id, element_type, z_index, data_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).bind(
-        record.id,
-        record.projectId,
-        record.elementType,
-        record.zIndex,
-        stringifyJson(record.dataJson),
-        record.createdAt,
-        record.updatedAt,
-      )),
-      db.prepare('UPDATE canvas_projects SET updated_at = ? WHERE id = ?').bind(now, projectId),
+      ...removed.map(r => db.prepare('DELETE FROM canvas_project_elements WHERE project_id = ? AND id = ?').bind(projectId, r.id)),
+      ...records.map(r => db.prepare(`INSERT INTO canvas_project_elements
+        (id, project_id, element_type, z_index, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET element_type = excluded.element_type, z_index = excluded.z_index,
+        data_json = CASE WHEN json_extract(canvas_project_elements.data_json, '$.agentRunId') IS NOT NULL
+          THEN json_patch(excluded.data_json, json_object('agentRunId', json_extract(canvas_project_elements.data_json, '$.agentRunId'),
+          'qualityReview', json_extract(canvas_project_elements.data_json, '$.qualityReview'), 'delivery', json_extract(canvas_project_elements.data_json, '$.delivery')))
+          ELSE excluded.data_json END, updated_at = excluded.updated_at`).bind(
+        r.id, projectId, r.elementType, r.zIndex, stringifyJson(r.dataJson), r.createdAt, stamp)),
+      db.prepare('UPDATE canvas_projects SET updated_at = ? WHERE id = ?').bind(stamp, projectId),
     ])
   } else {
-    memoryState.canvasProjectElements.set(projectId, records)
-    project.updatedAt = now
-    memoryState.canvasProjects.set(projectId, project)
+    const latest = memoryState.canvasProjectElements.get(projectId) || []
+    const keep = latest.filter(r => !removed.some(d => d.id === r.id) && !records.some(n => n.id === r.id))
+    memoryState.canvasProjectElements.set(projectId, [...records, ...keep])
+    project.updatedAt = stamp
   }
-  return records
+  return listCanvasProjectElements(env, projectId)
 }
 
 export async function getProjectRole(env: any, projectId: string, userId?: string | null): Promise<ProjectRole | null> {

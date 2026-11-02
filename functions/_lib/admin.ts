@@ -10,15 +10,12 @@ function parseList(value: unknown): string[] {
 }
 
 export function isAdminUser(env: Env, user: PublicUser): boolean {
-  const emails = [
-    ...parseList(env.ADMIN_EMAILS),
-    ...parseList(env.VS_ADMIN_EMAILS),
-  ].map((email) => email.toLowerCase())
   const userIds = [
     ...parseList(env.ADMIN_USER_IDS),
     ...parseList(env.VS_ADMIN_USER_IDS),
   ]
-  return emails.includes(user.email.toLowerCase()) || userIds.includes(user.id)
+  // Email/password registration does not prove mailbox ownership.
+  return userIds.includes(user.id)
 }
 
 export async function requireAdmin(env: Env, request: Request): Promise<PublicUser> {

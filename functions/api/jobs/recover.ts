@@ -6,8 +6,8 @@ export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUntil }) => {
   try {
-    await requireAuth(env, request)
-    return json(await recoverJobs(env, waitUntil))
+    const user = await requireAuth(env, request)
+    return json(await recoverJobs(env, waitUntil, user.id))
   } catch (error: any) {
     return json({ error: String(error?.message || 'Recover jobs failed') }, error?.status || 502)
   }

@@ -1,5 +1,7 @@
 import type { Env } from '../_shared'
 import { sealJson, unsealJson } from '../../packages/core/crypto'
+import { loadModeljettyTokens, modeljettyConfig } from './modeljetty-auth'
+import { getExternalIdentity } from './v2-store'
 import {
   deleteUserApiKeys,
   getUserApiKeys,
@@ -14,7 +16,12 @@ const KEY_FIELDS = [
   'bananaProApiKey',
   'gptImageApiKey',
   'gptImageGroup',
+  'provider',
+  'modeljettyApiKey',
+  'modeljettyAgentModel',
+  'oneXmAgentModel',
 ]
+const PREFERENCE_FIELDS = new Set(['provider', 'modeljettyAgentModel', 'oneXmAgentModel'])
 
 const KEY_LABELS: Record<string, string> = {
   visionApiKey: 'Vision / Design Agent',
@@ -22,6 +29,7 @@ const KEY_LABELS: Record<string, string> = {
   bananaProApiKey: 'Nano Banana Pro',
   gptImageApiKey: 'GPT Image 2',
   gptImageGroup: 'GPT Image Group',
+  modeljettyApiKey: 'ModelJetty',
 }
 
 export function sanitizeClientKeys(value: unknown): ClientKeys {
@@ -29,6 +37,8 @@ export function sanitizeClientKeys(value: unknown): ClientKeys {
   const keys: ClientKeys = {}
   for (const field of KEY_FIELDS) {
     const text = String(input[field] || '').trim()
+    if (field === 'provider' && !['1xm', 'modeljetty'].includes(text)) continue
+    if (field.endsWith('AgentModel') && !/^[\w][\w.\/:\-]{0,159}$/.test(text)) continue
     if (text) keys[field] = text
   }
   return keys
@@ -37,6 +47,7 @@ export function sanitizeClientKeys(value: unknown): ClientKeys {
 function createKeySummary(keys: ClientKeys): Record<string, unknown> {
   const summary: Record<string, unknown> = {}
   for (const field of KEY_FIELDS) {
+    if (PREFERENCE_FIELDS.has(field)) continue
     const value = keys[field]
     if (!value) continue
     summary[field] = {
@@ -45,6 +56,7 @@ function createKeySummary(keys: ClientKeys): Record<string, unknown> {
       last4: value.slice(-4),
     }
   }
+  summary.preferences = Object.fromEntries(Object.entries(keys).filter(([key]) => PREFERENCE_FIELDS.has(key)))
   return summary
 }
 
@@ -52,8 +64,10 @@ export function toPublicKeyStatus(record: {
   summaryJson: Record<string, unknown>
   updatedAt: string
 } | null) {
+  const { preferences, ...keys } = record?.summaryJson || {}
   return {
-    keys: record?.summaryJson || {},
+    keys,
+    ...(preferences && typeof preferences === 'object' ? { preferences } : {}),
     updatedAt: record?.updatedAt || '',
   }
 }
@@ -74,10 +88,27 @@ export async function mergeUserClientKeys(
   userId: string | null | undefined,
   requestKeys: unknown,
 ): Promise<ClientKeys> {
-  return {
+  const keys = {
     ...await loadUserClientKeys(env, userId),
     ...sanitizeClientKeys(requestKeys),
   }
+  const requested = sanitizeClientKeys(requestKeys)
+  if (!keys.provider && userId) {
+    const identity = await getExternalIdentity(env, modeljettyConfig(env).issuer, { userId })
+    if (identity && identity.expiresAt !== -1) keys.provider = 'modeljetty'
+  }
+  if (keys.provider === 'modeljetty' && userId && !keys.modeljettyApiKey) {
+    return { ...keys, ...await loadLinkedModeljettyClientKeys(env, userId) }
+  }
+  // Selecting a provider never reuses another provider's credentials.
+  if (requested.provider) keys.provider = requested.provider
+  return keys
+}
+
+export async function loadLinkedModeljettyClientKeys(env: Env, userId: string): Promise<ClientKeys> {
+  const tokens = await loadModeljettyTokens(env, userId)
+  if (!tokens) return {}
+  return { provider: 'modeljetty', modeljettyManaged: 'true', modeljettyApiKey: tokens.accessToken }
 }
 
 export async function getUserApiKeyStatus(env: Env, userId: string) {
@@ -85,6 +116,7 @@ export async function getUserApiKeyStatus(env: Env, userId: string) {
 }
 
 export async function saveUserClientKeys(env: Env, userId: string, value: unknown) {
+  if (env.VS_DB && !env.CREDENTIAL_KEK) throw Object.assign(new Error('CREDENTIAL_KEK is required for persistent API keys'), { status: 503 })
   const incomingKeys = sanitizeClientKeys(value)
   if (Object.keys(incomingKeys).length === 0) {
     const error = new Error('At least one API key is required') as Error & { status?: number }

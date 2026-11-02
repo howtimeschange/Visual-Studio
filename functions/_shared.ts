@@ -1,6 +1,20 @@
-// Shared helpers for Pages Functions calling the 1xm.ai OpenAI-compatible relay.
+// Shared helpers for model services. Image jobs keep an asynchronous task contract.
+import { resolveProvider, resolveProviderImageOptions } from './_lib/model-provider'
+export { resolveProvider, resolveRelayBaseUrl, resolveVisionModel, resolveAgentModel } from './_lib/model-provider'
 
 export interface Env {
+  VS_MODEL_PROVIDER?: string
+  MODELJETTY_BASE_URL?: string
+  MODELJETTY_API_KEY?: string
+  MODELJETTY_VISION_MODEL?: string
+  MODELJETTY_AGENT_MODEL?: string
+  MODELJETTY_IMAGE_MODEL_MAP?: string
+  MODELJETTY_IMAGE_TASKS_ENABLED?: string
+  MODELJETTY_ORIGIN?: string
+  MODELJETTY_CLIENT_ID?: string
+  MODELJETTY_CLIENT_SECRET?: string
+  MODELJETTY_REDIRECT_URI?: string
+  MODELJETTY_ALLOW_LOCAL_HTTP?: string
   RELAY_BASE_URL?: string
   VISION_API_KEY?: string
   BANANA2_API_KEY?: string
@@ -62,6 +76,9 @@ export const MODEL_MAP: Record<string, string> = {
   'nano-banana-2': 'gemini-3.1-flash-image-preview',
   'nano-banana-pro': 'gemini-3-pro-image-preview',
   'gpt-image-2': 'gpt-image-2',
+  'gpt-image-2.5-flare': 'gpt-image-2.5-flare',
+  'gpt-image-2.5-sunburst': 'gpt-image-2.5-sunburst',
+  'gemini-3.1-flash-image': 'gemini-3.1-flash-image',
 }
 
 export const LANG_NAMES: Record<string, string> = {
@@ -111,6 +128,42 @@ export function readPngDimensions(base64: string): { width: number; height: numb
   }
 }
 
+export function readImageDimensions(base64: string): { width: number; height: number } | null {
+  const png = readPngDimensions(base64)
+  if (png) return png
+  try {
+    // JPEG dimensions live in a SOF segment. Bound header parsing, including EXIF.
+    const binary = atob(String(base64 || '').slice(0, 256 * 1024))
+    const u16 = (offset: number) => binary.charCodeAt(offset) * 256 + binary.charCodeAt(offset + 1)
+    if (u16(0) !== 0xffd8) return null
+    for (let offset = 2; offset + 4 <= binary.length;) {
+      if (binary.charCodeAt(offset++) !== 0xff) return null
+      while (binary.charCodeAt(offset) === 0xff) offset++
+      const marker = binary.charCodeAt(offset++)
+      if (marker === 0xda || marker === 0xd9) return null
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue
+      const length = u16(offset)
+      if (length < 2 || offset + length > binary.length) return null
+      if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+        const height = u16(offset + 3), width = u16(offset + 5)
+        return length >= 8 && width > 0 && height > 0 ? { width, height } : null
+      }
+      offset += length
+    }
+  } catch { /* Unknown or incomplete header: do not invent dimensions. */ }
+  return null
+}
+
+function base64ImageMime(base64: string, fallback = 'image/png'): string {
+  try {
+    const header = atob(base64.slice(0, 32))
+    if (header.startsWith('\xff\xd8\xff')) return 'image/jpeg'
+    if (header.startsWith('\x89PNG\r\n\x1a\n')) return 'image/png'
+    if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') return 'image/webp'
+  } catch { /* Keep the declared type when the signature is unavailable. */ }
+  return fallback
+}
+
 function readBigEndianUint32(binary: string, offset: number): number {
   return (
     (binary.charCodeAt(offset) << 24)
@@ -121,6 +174,10 @@ function readBigEndianUint32(binary: string, offset: number): number {
 }
 
 export function resolveKeys(modelId: string, env: Env, clientKeys: any = {}) {
+  if (resolveProvider(env, clientKeys) === 'modeljetty') {
+    const key = clientKeys.modeljettyApiKey || env.MODELJETTY_API_KEY || ''
+    return { visionKey: key, genKey: key }
+  }
   const visionKey = clientKeys.visionApiKey || env.VISION_API_KEY || ''
   const genKey =
     modelId === 'nano-banana-pro'
@@ -132,8 +189,13 @@ export function resolveKeys(modelId: string, env: Env, clientKeys: any = {}) {
 }
 
 export function resolveImageModelOptions(modelId: string, env: Env, clientKeys: any = {}) {
+  const providerOptions = resolveProviderImageOptions(modelId, env, clientKeys)
+  if (providerOptions.provider === 'modeljetty' && (!providerOptions.asyncEnabled || !providerOptions.modelName)) {
+    throw Object.assign(new Error('ModelJetty 图片生成暂未开放，请切换至 1xm。'), { status: 503 })
+  }
   return {
-    group: modelId === 'gpt-image-2'
+    ...providerOptions,
+    group: providerOptions.provider === '1xm' && modelId === 'gpt-image-2'
       ? String(clientKeys.gptImageGroup || env.GPT_IMAGE_GROUP || '').trim()
       : '',
     timeoutMs: normalizeTimeoutMs(env.VS_IMAGE_REQUEST_TIMEOUT_MS, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS),
@@ -151,6 +213,12 @@ export interface ImagePart {
 }
 
 type ImageModelOptions = {
+  beforeSubmit?: () => Promise<void>
+  onAccepted?: (task: any) => Promise<void>
+  requestId?: string
+  provider?: string
+  asyncEnabled?: boolean
+  modelName?: string
   group?: string
   timeoutMs?: number
   imageFetchTimeoutMs?: number
@@ -173,7 +241,7 @@ type ImageSourceResult =
   | { ok: false; error: string }
 
 export type ImageTaskStepResult =
-  | { ok: true; pending?: false; dataUrl: string; task: any }
+  | { ok: true; pending?: false; dataUrl: string; task: any; timings?: { resultTransferMs: number; taskStepMs: number } }
   | { ok: false; pending: true; task: any; pollTarget: string; pollUrl: string; taskStatus: string; nextPollAfterMs: number; error?: string }
   | { ok: false; pending?: false; error: string; status: number }
 
@@ -210,17 +278,24 @@ export async function callImageModelTaskStep(
   prompt: string,
   opts: ImageModelOptions = {},
 ): Promise<ImageTaskStepResult> {
+  if (opts.provider === 'modeljetty' && (!opts.asyncEnabled || !opts.modelName)) {
+    return { ok: false, status: 503, error: 'ModelJetty 异步生图尚未配置：需要任务创建/查询接口及模型映射。请使用 1xm 生图。' }
+  }
   const timeoutMs = normalizeTimeoutMs(opts.timeoutMs, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS)
   const startedAt = Date.now()
   const taskHttpTimeoutMs = Math.min(timeoutMs, DEFAULT_IMAGE_TASK_HTTP_TIMEOUT_MS)
   const payload = buildAsyncImageTaskPayload(modelName, images, prompt, opts)
+  if (opts.modelName) payload.model = opts.modelName
+  if (opts.provider === 'modeljetty') payload.result_format = 'url'
 
   try {
     const deadlineAt = startedAt + timeoutMs
+    if (!opts.existingTask) await opts.beforeSubmit?.()
     const task = opts.existingTask
       ? { ok: true as const, data: opts.existingTask }
       : await createAsyncImageTask(baseUrl, apiKey, payload, opts, taskHttpTimeoutMs, deadlineAt)
     if (!task.ok) return task
+    if (!opts.existingTask) await opts.onAccepted?.(task.data)
 
     const maxPollAttempts = normalizeMaxPollAttempts(opts.maxPollAttempts)
     if (!opts.existingTask && opts.returnAfterCreate && maxPollAttempts > 0) {
@@ -236,24 +311,36 @@ export async function callImageModelTaskStep(
     })
     if (!finalTask.ok) return finalTask
 
-    const imageSource = extractImageFromResponse(finalTask.data)
+    let imageSource = extractImageFromResponse(finalTask.data)
     if (!imageSource) {
       return { ok: false, error: 'Model returned no image.', status: 502 }
     }
 
+    if (opts.provider === 'modeljetty' && !imageSource.startsWith('data:')) {
+      const source = new URL(imageSource, baseUrl)
+      const base = new URL(baseUrl)
+      if (source.origin !== base.origin || !source.pathname.startsWith(`${base.pathname.replace(/\/+$/, '')}/images/tasks/`) || !source.pathname.endsWith('/result') || source.username || source.password) {
+        return { ok: false, status: 502, error: 'ModelJetty 返回了非预期的结果地址，请回查原任务。' }
+      }
+      imageSource = source.href
+    }
+    const transferStartedAt = Date.now()
     const dataUrl = await coerceImageSourceToDataUrl(
       imageSource,
       normalizeTimeoutMs(opts.imageFetchTimeoutMs, DEFAULT_IMAGE_FETCH_TIMEOUT_MS),
+      opts.provider === 'modeljetty',
     )
     if (!dataUrl.ok) {
       return { ok: false, error: dataUrl.error, status: 502 }
     }
-    return { ok: true, dataUrl: dataUrl.dataUrl, task: finalTask.data }
+    return { ok: true, dataUrl: dataUrl.dataUrl, task: finalTask.data, timings: { resultTransferMs: Date.now() - transferStartedAt, taskStepMs: Date.now() - startedAt } }
   } catch (e: any) {
     if (isTimeoutError(e)) {
       return { ok: false, error: `Upstream image task timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
     }
-    return { ok: false, error: e?.message ?? 'fetch failed', status: 502 }
+    return { ok: false, error: !opts.existingTask
+      ? `UNKNOWN_SUBMIT_RESULT: ${e?.message || 'fetch failed'}; 请先回查服务商任务，勿重复提交。`
+      : e?.message ?? 'fetch failed', status: 502 }
   }
 }
 
@@ -263,7 +350,7 @@ function buildPendingImageTaskResult(
   requestOpts: ImageModelOptions,
 ): Extract<ImageTaskStepResult, { pending: true }> | null {
   const status = normalizeTaskStatus(task?.status)
-  if (SUCCEEDED_IMAGE_TASK_STATUSES.has(status) || FAILED_IMAGE_TASK_STATUSES.has(status) || extractImageFromResponse(task)) {
+  if (status === 'unknown' || SUCCEEDED_IMAGE_TASK_STATUSES.has(status) || FAILED_IMAGE_TASK_STATUSES.has(status) || extractImageFromResponse(task)) {
     return null
   }
   const pollTarget = String(task?.poll_url || task?.pollUrl || task?.id || task?.task_id || task?.taskId || '').trim()
@@ -297,7 +384,7 @@ function buildAsyncImageTaskPayload(
     output_format: 'png',
   }
 
-  if (modelName === 'gpt-image-2') {
+  if (modelName.startsWith('gpt-image-')) {
     const settings = resolveGptImage2Settings(opts)
     payload.size = settings.size
     payload.quality = settings.quality
@@ -324,18 +411,30 @@ async function createAsyncImageTask(
   timeoutMs: number,
   deadlineAt?: number,
 ): Promise<{ ok: true; data: any } | { ok: false; error: string; status: number }> {
-  const res = await fetchImageModelWithRetry(`${baseUrl}/images/tasks`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(payload),
-  }, { ...opts, timeoutMs }, deadlineAt)
+  let res: Response
+  try {
+    // A timeout/5xx can arrive after acceptance. Never replay a paid POST.
+    res = await fetchWithTimeout(`${baseUrl}/images/tasks`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        ...(opts.requestId ? { 'X-Request-Id': opts.requestId } : {}),
+      },
+      body: JSON.stringify(payload),
+      redirect: 'manual',
+    }, remainingTimeoutMs(deadlineAt, timeoutMs))
+  } catch (error: any) {
+    return { ok: false, status: isTimeoutError(error) ? 504 : 502, error: `UNKNOWN_SUBMIT_RESULT: ${error?.message || 'connection failed'}; 请先回查服务商记录，勿重复提交。` }
+  }
 
   const data = await readJsonResponse(res)
   if (!res.ok && res.status !== 202) {
+    if (res.status >= 500 || res.status === 408) return { ok: false, status: res.status, error: `UNKNOWN_SUBMIT_RESULT: Upstream ${res.status}; 请先回查服务商记录，勿重复提交。` }
     return { ok: false, error: `Upstream ${res.status}: ${formatUpstreamError(data)}`, status: res.status }
+  }
+  if (!extractImageFromResponse(data) && !String(data?.poll_url || data?.pollUrl || data?.id || data?.task_id || data?.taskId || '').trim()) {
+    return { ok: false, status: 502, error: 'UNKNOWN_SUBMIT_RESULT: 服务商未返回任务 ID，请先回查，勿重复提交。' }
   }
   return { ok: true, data }
 }
@@ -352,6 +451,9 @@ async function waitForAsyncImageTask(
 
   for (;;) {
     const status = normalizeTaskStatus(task?.status)
+    if (status === 'unknown') {
+      return { ok: false, error: 'UNKNOWN_SUBMIT_RESULT: 服务商任务执行结果未知，请先回查，禁止重复提交。', status: 409 }
+    }
     if (SUCCEEDED_IMAGE_TASK_STATUSES.has(status)) return { ok: true, data: task }
     if (FAILED_IMAGE_TASK_STATUSES.has(status)) {
       return { ok: false, error: `Image task ${status}: ${formatUpstreamError(task)}`, status: 502 }
@@ -365,6 +467,8 @@ async function waitForAsyncImageTask(
     }
 
     const pollUrl = buildImageTaskPollUrl(baseUrl, pollTarget)
+    const requestPollUrl = new URL(pollUrl)
+    if (requestOpts.provider === 'modeljetty') requestPollUrl.searchParams.set('result_format', 'url')
     const nextPollAfterMs = normalizePollAfterMs(
       task?.poll_after ?? task?.pollAfter,
       requestOpts.pollIntervalMs,
@@ -415,9 +519,10 @@ async function waitForAsyncImageTask(
 
     let pollRes: Response
     try {
-      pollRes = await fetchImageModelWithRetry(pollUrl, {
+      pollRes = await fetchImageModelWithRetry(requestPollUrl.href, {
         method: 'GET',
         headers: { Authorization: `Bearer ${apiKey}` },
+        redirect: 'manual',
       }, {
         ...requestOpts,
         timeoutMs: Math.min(opts.taskHttpTimeoutMs, Math.max(MIN_TIMEOUT_MS, opts.timeoutMs - (Date.now() - opts.startedAt))),
@@ -458,8 +563,15 @@ async function waitForAsyncImageTask(
 }
 
 function buildImageTaskPollUrl(baseUrl: string, pollTarget: string): string {
-  if (/^https?:\/\//i.test(pollTarget)) return pollTarget
-  return `${baseUrl.replace(/\/+$/, '')}/images/tasks/${encodeURIComponent(pollTarget)}`
+  const base = new URL(baseUrl)
+  const prefix = `${base.pathname.replace(/\/+$/, '')}/images/tasks/`
+  const url = /^https?:\/\//i.test(pollTarget) || pollTarget.startsWith('/')
+    ? new URL(pollTarget, base)
+    : new URL(`${base.origin}${prefix}${encodeURIComponent(pollTarget)}`)
+  if (url.origin !== base.origin || !url.pathname.startsWith(prefix) || url.username || url.password || url.hash) {
+    throw new Error('Unsafe image task poll URL')
+  }
+  return url.href
 }
 
 function normalizeTaskStatus(value: unknown): string {
@@ -593,22 +705,26 @@ export async function callTextModel(
   apiKey: string,
   model: string,
   messages: any[],
-  opts: { maxTokens?: number; temperature?: number } = {},
+  opts: { maxTokens?: number; temperature?: number; requestId?: string; timeoutMs?: number; strict?: boolean; protocol?: 'responses' | 'chat' } = {},
 ): Promise<string | null> {
   try {
-    const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+    const responses = opts.protocol === 'responses'
+    const payload = responses ? {
+      model, stream: false, max_output_tokens: opts.maxTokens ?? 1500,
+      input: messages.map((message) => ({ role: message.role, content: typeof message.content === 'string'
+        ? [{ type: 'input_text', text: message.content }]
+        : message.content.map((part: any) => part.type === 'image_url' ? { type: 'input_image', image_url: part.image_url.url } : { type: 'input_text', text: part.text || '' }) })),
+    } : { model, messages, temperature: opts.temperature ?? 0.3, max_tokens: opts.maxTokens ?? 1500 }
+    const res = await fetchWithTimeout(`${baseUrl}/${responses ? 'responses' : 'chat/completions'}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
+        'X-Request-Id': opts.requestId || crypto.randomUUID(),
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: opts.temperature ?? 0.3,
-        max_tokens: opts.maxTokens ?? 1500,
-      }),
-    }, normalizeTimeoutMs((opts as { timeoutMs?: number }).timeoutMs, DEFAULT_TEXT_REQUEST_TIMEOUT_MS))
+      body: JSON.stringify(payload),
+      redirect: 'manual',
+    }, normalizeTimeoutMs(opts.timeoutMs, DEFAULT_TEXT_REQUEST_TIMEOUT_MS))
     const responseText = await res.text()
     let data: any = null
     try {
@@ -620,6 +736,11 @@ export async function callTextModel(
       const errorMessage = extractUpstreamErrorMessage(data) || responseText.trim() || res.statusText || 'request failed'
       throw createUpstreamTextModelError(`Text model upstream failed (${res.status}): ${errorMessage}`, res.status)
     }
+    if (responses) {
+      if (data.status && data.status !== 'completed') throw createUpstreamTextModelError(`Responses request ended as ${data.status}; check the original request before submitting again`, 502)
+      if (typeof data.output_text === 'string') return data.output_text
+      return Array.isArray(data.output) ? data.output.filter((item: any) => item.type === 'message').flatMap((item: any) => item.content || []).filter((part: any) => part.type === 'output_text').map((part: any) => part.text || '').join('\n') || null : null
+    }
     const raw = data.choices?.[0]?.message?.content
     if (typeof raw === 'string') return raw
     if (Array.isArray(raw)) {
@@ -628,6 +749,10 @@ export async function callTextModel(
     return null
   } catch (error: any) {
     if (error?.status) throw error
+    if (opts.strict) throw createUpstreamTextModelError(
+      isTimeoutError(error) ? 'Text model response deadline exceeded; check the original request before submitting again' : 'Text model response interrupted; check the original request before submitting again',
+      isTimeoutError(error) ? 504 : 502,
+    )
     return null
   }
 }
@@ -701,7 +826,7 @@ function collectImageSources(content: any): string[] {
 
   const addBase64 = (data: string | null | undefined, mime = 'image/png') => {
     if (!data) return
-    addSource(`data:${mime};base64,${data}`)
+    addSource(`data:${base64ImageMime(data, mime)};base64,${data}`)
   }
 
   const walk = (node: any) => {
@@ -746,7 +871,7 @@ function collectImageSources(content: any): string[] {
   return sources
 }
 
-async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IMAGE_FETCH_TIMEOUT_MS): Promise<ImageSourceResult> {
+async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IMAGE_FETCH_TIMEOUT_MS, forbidRedirect = false): Promise<ImageSourceResult> {
   if (!source) return { ok: false, error: 'Model returned no image.' }
   if (source.startsWith('data:')) {
     return isUsableImageDataUrl(source)
@@ -758,7 +883,7 @@ async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IM
   }
 
   try {
-    const res = await fetchWithTimeout(source, {}, timeoutMs)
+    const res = await fetchWithTimeout(source, forbidRedirect ? {redirect:'manual'} : {}, timeoutMs)
     if (!res.ok) {
       const detail = await readResponseText(res)
       return { ok: false, error: `Image result fetch failed (${res.status}) from ${formatUrlForError(source)}${detail ? `: ${detail}` : ''}` }
@@ -928,7 +1053,28 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
   })
   try {
     return await Promise.race([
-      fetch(input, { ...init, signal: controller.signal }),
+      fetch(input, { ...init, signal: controller.signal }).then(async response => {
+        // The deadline covers body consumption too, not just response headers.
+        if (!response.body) return response
+        const reader = response.body.getReader()
+        const chunks: Uint8Array[] = []
+        let length = 0
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          length += value.byteLength
+          if (length > 64 * 1024 * 1024) {
+            controller.abort()
+            await reader.cancel().catch(() => undefined)
+            throw Object.assign(new Error('Upstream response exceeds 64 MiB'), { status: 413 })
+          }
+          chunks.push(value)
+        }
+        const bytes = new Uint8Array(length)
+        let offset = 0
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+        return new Response(length ? bytes : null, { status: response.status, statusText: response.statusText, headers: response.headers })
+      }),
       timeout,
     ])
   } finally {

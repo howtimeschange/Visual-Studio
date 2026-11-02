@@ -1,5 +1,7 @@
+import { getAuthorizedAssetDataUrl } from '../_lib/permissions'
+import { assertInputAssetAccess } from '../_lib/permissions'
 import {
-  Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
+  Env, resolveRelayBaseUrl, resolveVisionModel, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
 } from '../_shared'
 import type { ImageTaskStepResult } from '../_shared'
@@ -19,7 +21,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   try {
     const user = await requireAuth(env, request)
+    if (body?.existingTask) return json({ error: 'Resume images through the owned job API' }, 400)
     const action = String(body?.action || '').trim()
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
     const requestBody = { ...body, clientKeys, _authUserId: user.id }
 
@@ -87,11 +91,11 @@ async function handleAnalyze(env: Env, body: any) {
   if (!assetId) throw createError('assetId required', 400)
 
   const clientKeys = body?.clientKeys || {}
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
-  const visionKey = String(clientKeys.visionApiKey || env.VISION_API_KEY || '').trim()
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
+  const { visionKey } = resolveKeys('nano-banana-2', env, clientKeys)
   if (!visionKey) throw createError('Missing Vision Key for style analysis', 400)
 
-  const dataUrl = await getAssetDataUrl(env, assetId)
+  const dataUrl = await getAuthorizedAssetDataUrl(env, assetId, body?._authUserId, String(body?.projectId || ''))
   if (!dataUrl) throw createError(`Asset not found: ${assetId}`, 404)
 
   const { mime, base64 } = splitDataUrl(dataUrl)
@@ -99,7 +103,7 @@ async function handleAnalyze(env: Env, body: any) {
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    VISION_MODEL,
+    resolveVisionModel(env, clientKeys),
     [
       { role: 'system', content: STYLE_ANALYSIS_PROMPT },
       {
@@ -146,16 +150,17 @@ export async function executeStyleTransferGenerate(env: Env, body: any) {
   if (!MODEL_MAP[modelId]) throw createError(`Unknown modelId: ${modelId}`, 400)
 
   const clientKeys = body?.clientKeys || {}
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { genKey } = resolveKeys(modelId, env, clientKeys)
   if (!genKey) throw createError(`Missing API key for ${modelId}`, 400)
 
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  Object.assign(imageModelOptions, { beforeSubmit: body?._submissionHooks?.beforeSubmit, onAccepted: body?._submissionHooks?.onAccepted, requestId: body?._submissionHooks?.requestId })
 
   const images: Array<{ base64: string; mime: string }> = []
 
   if (!existingTask && assetId) {
-    const dataUrl = await getAssetDataUrl(env, assetId)
+    const dataUrl = await getAuthorizedAssetDataUrl(env, assetId, body?._authUserId, String(body?.projectId || ''))
     if (!dataUrl) throw createError(`Asset not found: ${assetId}`, 404)
     if (dataUrl) images.push(splitDataUrl(dataUrl))
   }
@@ -163,7 +168,7 @@ export async function executeStyleTransferGenerate(env: Env, body: any) {
   const subjectImages: Array<{ base64: string; mime: string }> = []
   for (const sid of existingTask ? [] : subjectAssetIds) {
     const subjectAssetId = String(sid)
-    const dataUrl = await getAssetDataUrl(env, subjectAssetId)
+    const dataUrl = await getAuthorizedAssetDataUrl(env, subjectAssetId, body?._authUserId, String(body?.projectId || ''))
     if (!dataUrl) throw createError(`Subject asset not found: ${subjectAssetId}`, 404)
     if (dataUrl) subjectImages.push(splitDataUrl(dataUrl))
   }

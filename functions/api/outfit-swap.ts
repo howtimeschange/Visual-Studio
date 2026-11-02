@@ -12,7 +12,7 @@
 // Returns: { resultDataUrl }
 
 import {
-  Env, DEFAULT_BASE, MODEL_MAP, VISION_MODEL,
+  Env, resolveRelayBaseUrl, resolveVisionModel, DEFAULT_BASE, MODEL_MAP, VISION_MODEL,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
 } from '../_shared'
 import type { ImageTaskStepResult } from '../_shared'
@@ -30,7 +30,7 @@ export async function executeOutfitSwap(body: any, env: Env) {
 export async function executeOutfitSwapTaskStep(
   body: any,
   env: Env,
-  stepOptions: { existingTask?: any; maxPollAttempts?: number; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
+  stepOptions: { beforeSubmit?: () => Promise<void>; onAccepted?: (task: any) => Promise<void>; requestId?: string; existingTask?: any; maxPollAttempts?: number; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
 ): Promise<
   | { pending: false; dataUrl: string }
   | Extract<ImageTaskStepResult, { pending: true }>
@@ -45,9 +45,10 @@ export async function executeOutfitSwapTaskStep(
 
   if (!MODEL_MAP[modelId]) throw createOutfitError(`Unknown modelId: ${modelId}`, 400)
 
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { genKey } = resolveKeys(modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  Object.assign(imageModelOptions, { beforeSubmit: stepOptions.beforeSubmit, onAccepted: stepOptions.onAccepted, requestId: stepOptions.requestId })
   imageModelOptions.existingTask = stepOptions.existingTask
   imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
   imageModelOptions.returnAfterCreate = stepOptions.returnAfterCreate
@@ -110,10 +111,10 @@ export async function prepareOutfitAnalysis(body: any, env: Env): Promise<Outfit
   const garmentItems = normalizeGarments(garments, garment, garmentType)
   if (garmentItems.length === 0) throw createOutfitError('at least one garment image required', 400)
 
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { visionKey } = resolveKeys(modelId, env, clientKeys)
   return visionKey
-    ? await analyzeOutfitReferences(baseUrl, visionKey, model, garmentItems)
+    ? await analyzeOutfitReferences(baseUrl, visionKey, model, garmentItems, resolveVisionModel(env, clientKeys))
     : null
 }
 
@@ -200,6 +201,7 @@ async function analyzeOutfitReferences(
   visionKey: string,
   model: any,
   garments: GarmentItem[],
+  visionModel = VISION_MODEL,
 ): Promise<OutfitAnalysis | null> {
   const content: any[] = [
     { type: 'image_url', image_url: { url: `data:${model.mime || 'image/jpeg'};base64,${model.base64}` } },
@@ -248,7 +250,7 @@ Rules:
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    VISION_MODEL,
+    visionModel,
     [{ role: 'user', content }],
     { maxTokens: 4096, temperature: 0.1 },
   )

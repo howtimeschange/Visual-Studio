@@ -154,9 +154,11 @@ test('canvas agent requests include uploaded reference image entries', async () 
   const blocks = [...source.matchAll(/postJson\('\/api\/canvas\/agent', \{[\s\S]*?\n\s*\}\)/g)]
     .map((match) => match[0])
 
-  assert.equal(blocks.length, 2)
+  assert.equal(blocks.length, 1)
+  assert.match(source, /postJson\('\/api\/canvas\/agent-runs', body\)/)
+  assert.match(source, /executionPolicy:\{mode:'auto'\}, referenceImages, clientKeys/)
   for (const block of blocks) {
-    assert.match(block, /referenceImages:\s*refImages/)
-    assert.match(block, /hasReferenceImages:\s*refImages\.length > 0/)
+    assert.match(block, /referenceImages:\s*(?:refImages|referenceImages)/)
+    assert.match(block, /hasReferenceImages:\s*(?:refImages|referenceImages)\.length > 0/)
   }
 })

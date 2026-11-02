@@ -1,10 +1,12 @@
+import { getAuthorizedAssetDataUrl } from '../_lib/permissions'
+import { assertInputAssetAccess } from '../_lib/permissions'
 // POST /api/generate-direct — Direct image generation with reference images passed directly to image model.
 // No intermediate text-based Design Agent — references go as image inputs alongside the prompt.
 
 import {
-  Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
+  Env, resolveProvider, resolveRelayBaseUrl, resolveAgentModel, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
-  readPngDimensions,
+  readImageDimensions,
 } from '../_shared'
 import type { ImageTaskStepResult } from '../_shared'
 import {
@@ -42,6 +44,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try {
     const user = await requireAuth(env, request)
     const userId = user.id
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, userId, body?.clientKeys || {})
     return json(await handleDirectGenerate(env, { ...body, clientKeys, _authUserId: userId }))
   } catch (error: any) {
@@ -124,7 +127,7 @@ async function handleDirectGenerate(env: Env, body: any) {
       jobId: job.id,
       eventType: 'generate_direct_result',
       amount: 1,
-      provider: '1xm.ai',
+      provider: resolveProvider(env, clientKeys) === 'modeljetty' ? 'modeljetty' : '1xm.ai',
       modelId: request.modelId,
     })
 
@@ -164,6 +167,8 @@ export function normalizeDirectGenerateRequest(body: any) {
     : []
 
   return {
+    userId: typeof body?._authUserId === 'string' ? body._authUserId : null,
+    projectId: String(body?.projectId || ''),
     modelId: String(body?.modelId || 'nano-banana-2'),
     prompt: String(body?.prompt || '').trim(),
     aspectRatio: normalizeAspectRatio(body?.aspectRatio),
@@ -192,16 +197,17 @@ export async function executeDirectGenerateTaskStep(
   env: Env,
   request: ReturnType<typeof normalizeDirectGenerateRequest>,
   clientKeys: any = {},
-  stepOptions: { existingTask?: any; maxPollAttempts?: number; finalPrompt?: string; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
+  stepOptions: { beforeSubmit?: () => Promise<void>; onAccepted?: (task: any) => Promise<void>; requestId?: string; existingTask?: any; maxPollAttempts?: number; finalPrompt?: string; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
 ): Promise<
-  | { pending: false; dataUrl: string; finalPrompt: string; width: number | null; height: number | null }
+  | { pending: false; dataUrl: string; finalPrompt: string; width: number | null; height: number | null; timings?: { resultTransferMs: number; taskStepMs: number } }
   | (Extract<ImageTaskStepResult, { pending: true }> & { finalPrompt: string })
 > {
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { visionKey, genKey } = resolveKeys(request.modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(request.modelId, env, clientKeys)
   imageModelOptions.aspectRatio = request.aspectRatio
   imageModelOptions.resolution = request.resolution
+  Object.assign(imageModelOptions, { beforeSubmit: stepOptions.beforeSubmit, onAccepted: stepOptions.onAccepted, requestId: stepOptions.requestId })
   imageModelOptions.existingTask = stepOptions.existingTask
   imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
   imageModelOptions.returnAfterCreate = stepOptions.returnAfterCreate
@@ -226,12 +232,12 @@ export async function executeDirectGenerateTaskStep(
       throw createError(result.error, result.status)
     }
     const size = getImageDataUrlDimensions(result.dataUrl)
-    return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height }
+    return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height, timings:result.timings }
   }
 
   const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
   for (const entry of request.referenceEntries) {
-    const dataUrl = await getAssetDataUrl(env, String(entry.assetId))
+    const dataUrl = await getAuthorizedAssetDataUrl(env, String(entry.assetId), request.userId, request.projectId)
     if (!dataUrl) continue
     const { base64, mime } = splitDataUrl(dataUrl)
     if (!base64) continue
@@ -253,6 +259,7 @@ export async function executeDirectGenerateTaskStep(
       refImages,
       request.aspectRatio,
       request.resolution,
+      resolveAgentModel(env, clientKeys),
     )
     if (refined) finalPrompt = refined
   }
@@ -272,16 +279,14 @@ export async function executeDirectGenerateTaskStep(
   if (result.pending) return { ...result, finalPrompt }
   if (!result.ok) throw createError(result.error, result.status)
   const size = getImageDataUrlDimensions(result.dataUrl)
-  return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height }
+  return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height, timings:result.timings }
 }
 
 function getImageDataUrlDimensions(dataUrl: string): { width: number | null; height: number | null } {
   const { mime, base64 } = splitDataUrl(dataUrl)
   if (!base64) return { width: null, height: null }
-  if (mime === 'image/png') {
-    const size = readPngDimensions(base64)
-    if (size) return size
-  }
+  const size = readImageDimensions(base64)
+  if (size) return size
   return { width: null, height: null }
 }
 
@@ -348,6 +353,7 @@ async function refineWithDesignAgent(
   refs: Array<{ base64: string; mime: string; role: string; label: string }>,
   aspectRatio: string,
   resolution: string,
+  visionModel = VISION_MODEL,
 ): Promise<string | null> {
   const refSummary = refs.length > 0
     ? refs.map((r, i) => `- Image ${i + 1}: role=${r.role}${r.label ? `, "${r.label}"` : ''}`).join('\n')
@@ -356,7 +362,7 @@ async function refineWithDesignAgent(
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    VISION_MODEL,
+    visionModel,
     [
       {
         role: 'system',

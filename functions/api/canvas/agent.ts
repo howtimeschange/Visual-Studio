@@ -1,10 +1,13 @@
+import { assertInputAssetAccess, getAuthorizedAssetDataUrl } from '../../_lib/permissions'
 import {
-  Env, DEFAULT_BASE, VISION_MODEL,
+  Env, resolveProvider, resolveRelayBaseUrl, resolveAgentModel, DEFAULT_BASE, VISION_MODEL,
   json, corsPreflight, resolveKeys, callTextModel,
 } from '../../_shared'
-import { getAuthContext } from '../../_lib/auth'
+import { requireAuth } from '../../_lib/auth'
 import { mergeUserClientKeys } from '../../_lib/user-api-keys'
 import { ensureSession, getAsset, getAssetDataUrl } from '../../_lib/v2-store'
+import { applyDesignAgentPolicy, normalizeDesignAgentPolicy } from '../../_lib/design-agent-policy'
+import { describeDesignAgentSkill, resolveDesignAgentSkill } from '../../_lib/design-agent-skills'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
@@ -77,61 +80,106 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: 'Invalid JSON' }, 400)
   }
 
-  const auth = await getAuthContext(env, request)
+  let user
+  try { user = await requireAuth(env, request) } catch { return json({ error: 'Login required' }, 401) }
+  return executeCanvasAgentPlan(env, body, user.id)
+}
+
+// Internal queue entry point: the public route authenticates before invoking it.
+export async function executeCanvasAgentPlan(env: Env, body: any, userId: string, trustedKeys?: Record<string, any>): Promise<Response> {
+  const requestStartedAt = Date.now()
+  const auth = { user: { id: userId } }
+  try { await assertInputAssetAccess(env, body, userId) } catch (error: any) { return json({ error: error.message }, error.status || 403) }
   const session = await ensureSession(env, body?.sessionId, auth.user?.id || null)
   const message = String(body?.message || '').trim()
   if (!message) return json({ error: 'message required' }, 400)
 
-  const modelId = String(body?.modelId || 'nano-banana-2')
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
-  const clientKeys = await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
-  const { visionKey } = resolveKeys(modelId, env, clientKeys)
-  const referenceImages = normalizeReferenceImages(body?.referenceImages)
-  let referenceBrief = normalizeReferenceBrief(body?.referenceBrief)
-  let referenceAnalysisSource = referenceBrief ? 'request' : ''
-  let referenceAnalysisReason = ''
-
-  if (visionKey && referenceImages.length && !referenceBrief) {
-    const resolvedReferenceImages = await loadReferenceImages(env, referenceImages, session.id, auth.user?.id || null)
-    if (resolvedReferenceImages.length) {
-      try {
-        referenceBrief = await analyzeReferenceImages(baseUrl, visionKey, message, resolvedReferenceImages)
-        referenceAnalysisSource = referenceBrief ? 'vision' : ''
-        referenceAnalysisReason = referenceBrief ? '' : 'empty_reference_brief'
-      } catch (error: any) {
-        referenceAnalysisReason = String(error?.message || 'reference_analysis_failed').slice(0, 240)
-      }
-    } else {
-      referenceAnalysisReason = 'no_readable_reference_images'
+  const runId = typeof body?.runId === 'string' && /^[\w-]{1,80}$/.test(body.runId) ? body.runId : crypto.randomUUID()
+  const executionPolicy = normalizeDesignAgentPolicy(body?.executionPolicy)
+  const agentRequestId = `${runId}-plan`
+  let agentModel = ''
+  let provider = ''
+  try {
+    const modelId = String(body?.modelId || 'nano-banana-2')
+    const clientKeys = trustedKeys || await mergeUserClientKeys(env, auth.user?.id || null, body?.clientKeys || {})
+    const baseUrl = resolveRelayBaseUrl(env, clientKeys)
+    provider = resolveProvider(env, clientKeys)
+    agentModel = resolveAgentModel(env, clientKeys)
+    const agentProtocol = provider === 'modeljetty' && /^gpt-(?!image)/.test(agentModel) ? 'responses' as const : 'chat' as const
+    if (/^(gpt-image-|gemini-.*-image)/.test(agentModel)) return json({ error: '请为 Agent 选择文本或多模态模型；生图模型在画布中独立设置。' }, 400)
+    const timeoutMs = Number(env.VS_TEXT_REQUEST_TIMEOUT_MS) || (provider === 'modeljetty' ? 210_000 : 90_000)
+    const { visionKey } = resolveKeys(modelId, env, clientKeys)
+    const referenceImages = normalizeReferenceImages(body?.referenceImages)
+    if (referenceImages.length && agentModel === 'deepseek-v4-pro') return json({ error: '当前 Agent 模型仅支持文字。请选择支持参考图的多模态模型后再继续。' }, 400)
+    const skill = resolveDesignAgentSkill(body?.skillId, message, referenceImages.length)
+    const skillDescriptor = describeDesignAgentSkill(skill)
+    if (skill.requiresReference && !referenceImages.length) {
+      return json({ sessionId: session.id, runId, executionPolicy, skill: skillDescriptor, usedModel: false,
+        agentModel, provider, reply: `“${skill.label}”需要真实参考图。请上传图片，或从画布引用选中的图片后再开始。`,
+        shouldGenerate: false, prompt: '', actions: [], mode: 'plan', steps: [], suggestions: [], needsClarification: true })
     }
-  } else if (referenceImages.length && !visionKey) {
-    referenceAnalysisReason = 'missing_vision_key'
-  }
+    let referenceBrief = normalizeReferenceBrief(body?.referenceBrief)
+    let referenceAnalysisSource = referenceBrief ? 'request' : ''
+    let referenceAnalysisReason = ''
+    let referenceRequestId = ''
+    let planningImages: ResolvedReferenceImage[] = []
+    let referenceDurationMs = 0
 
-  const passthrough = buildPassthroughAgentResult({ ...body, referenceBrief }, message)
+    if (visionKey && referenceImages.length && !referenceBrief) {
+      const resolvedReferenceImages = await loadReferenceImages(env, referenceImages, session.id, auth.user?.id || null, String(body?.projectId || ''))
+      if (resolvedReferenceImages.length) {
+        if (body?.referenceStrategy === 'combined') {
+          planningImages = resolvedReferenceImages
+          referenceAnalysisSource = 'combined'
+          referenceRequestId = agentRequestId
+        } else try {
+          const referenceStartedAt = Date.now()
+          referenceRequestId = `${runId}-vision`
+          referenceBrief = await analyzeReferenceImages(baseUrl, visionKey, message, resolvedReferenceImages, agentModel, referenceRequestId, timeoutMs, agentProtocol)
+          referenceDurationMs = Date.now() - referenceStartedAt
+          if (!referenceBrief) throw Object.assign(new Error('参考图分析未返回有效内容'), { status: 502 })
+          referenceAnalysisSource = referenceBrief ? 'vision' : ''
+          referenceAnalysisReason = referenceBrief ? '' : 'empty_reference_brief'
+        } catch (error: any) {
+          return json({ error: '参考图分析未完成，请先检查原请求，当前没有继续规划或生图。', agentModel, provider, referenceRequestId }, error.status || 502)
+        }
+      } else {
+        referenceAnalysisReason = 'no_readable_reference_images'
+      }
+    } else if (referenceImages.length && !visionKey) {
+      referenceAnalysisReason = 'missing_vision_key'
+    }
 
-  if (!visionKey) {
-    return json({
-      sessionId: session.id,
-      ...passthrough,
-      referenceBrief,
-      referenceAnalysisUsed: Boolean(referenceBrief),
-      referenceAnalysisSource,
-      referenceAnalysisReason: referenceAnalysisReason || 'missing_vision_key',
-      usedModel: false,
-      agentPassthrough: true,
-      passthroughReason: 'missing_vision_key',
-    })
-  }
+    const passthrough = applyDesignAgentPolicy(buildPassthroughAgentResult({ ...body, referenceBrief }, message), executionPolicy)
 
-  const raw = await callTextModel(
-    baseUrl,
-    visionKey,
-    VISION_MODEL,
-    [
-      {
-        role: 'system',
-        content: `You are the Canvas AI Designer Agent for a commercial image canvas.
+    if (!visionKey) {
+      if (provider === 'modeljetty') return json({ error: '请关联 ModelJetty 账号或配置 ModelJetty API Key 后使用 Agent。', agentModel, provider }, 400)
+      return json({
+        sessionId: session.id,
+        skill: skillDescriptor,
+        ...passthrough,
+        referenceBrief,
+        referenceAnalysisUsed: Boolean(referenceBrief),
+        referenceAnalysisSource,
+        referenceAnalysisReason: referenceAnalysisReason || 'missing_vision_key',
+        usedModel: false,
+        agentModel,
+        provider,
+        agentPassthrough: true,
+        passthroughReason: 'missing_vision_key',
+      })
+    }
+
+    const planningStartedAt = Date.now()
+    const planningInput = JSON.stringify({ ...buildAgentPlanningInput(body, message, referenceImages, referenceBrief), skill: skillDescriptor, skillInstructions: skill.instructions })
+    const raw = await callTextModel(
+      baseUrl,
+      visionKey,
+      agentModel,
+      [
+        {
+          role: 'system',
+          content: `You are the Canvas AI Designer Agent for a commercial image canvas.
 You behave like Lovart-style ChatCanvas: read the user's message and canvas context, identify the design intent, choose an appropriate visual language, decide whether to generate images now, and produce a concise design response.
 
 Return strict JSON only:
@@ -162,6 +210,9 @@ Return strict JSON only:
 }
 
 Rules:
+- When reference images are attached, analyze their visible evidence and reference roles within this same response before planning. Include referenceBrief with product, sellingPoints, copyHierarchy, pageStructure, visualStyle, materialDetails, evidence, missingEvidence. Do not invent invisible product properties, certifications or performance claims.
+- The executionPolicy in the user payload is a host constraint. In plan mode, provide analysis and a complete design plan only: shouldGenerate=false, prompt="", actions=[].
+- Generate at most 8 independent image actions per turn. Do not claim that an image has been generated: the host executes image tools after planning and verifies their stored results.
 - If the user asks for analysis, advice, planning, critique, or project organization and says not to generate, set shouldGenerate=false.
 - If the user asks to create, generate, make, extend, redraw, or produce a poster/image, set shouldGenerate=true.
 - First classify the request type: ecommerce main image, campaign poster, social post, editorial photography, illustration, packaging, 3D render, infographic/UI, art concept, or other.
@@ -177,28 +228,48 @@ Rules:
 - Do not add blanket "no text" or "empty copy-space" restrictions. If the user's goal needs visible titles, selling points, icons, labels, or detail-page typography, plan those directly in the image prompt.
 - Return raw JSON only, without Markdown fences.
 - Do not mention internal JSON, tools, APIs, or model limitations.`,
-      },
-      {
-        role: 'user',
-        content: JSON.stringify(buildAgentPlanningInput(body, message, referenceImages, referenceBrief)),
-      },
-    ],
-    { maxTokens: 4000, temperature: 0.45 },
-  )
+        },
+        {
+          role: 'user',
+          content: planningImages.length ? [
+            { type: 'text', text: planningInput },
+            ...planningImages.map((image) => ({ type: 'image_url', image_url: { url: image.dataUrl } })),
+          ] : planningInput,
+        },
+      ],
+      { maxTokens: 4000, temperature: 0.45, requestId: agentRequestId, timeoutMs, strict: true, protocol: agentProtocol },
+    )
 
-  const parsedJson = parseJsonObject(raw)
-  const parsed = normalizeAgentResult(parsedJson, passthrough)
-  return json({
-    sessionId: session.id,
-    ...parsed,
-    referenceBrief,
-    referenceAnalysisUsed: Boolean(referenceBrief),
-    referenceAnalysisSource,
-    referenceAnalysisReason,
-    usedModel: true,
-    agentPassthrough: !parsedJson,
-    passthroughReason: parsedJson ? '' : (raw ? 'invalid_agent_json' : 'empty_agent_response'),
-  })
+    const parsedJson = parseJsonObject(raw)
+    if (!parsedJson) return json({ error: 'Agent 模型未返回有效方案，请稍后检查原请求。', agentModel, provider, agentRequestId, referenceRequestId }, 502)
+    if (planningImages.length) referenceBrief = normalizeReferenceBrief(parsedJson.referenceBrief)
+    if (executionPolicy.mode !== 'plan' && Array.isArray(parsedJson.actions) && parsedJson.actions.length > executionPolicy.maxActions) {
+      return json({ error: '单次最多生成 8 张图片，请拆分需求。当前没有提交图片任务。', agentModel, provider, agentRequestId, referenceRequestId }, 422)
+    }
+    const parsed = applyDesignAgentPolicy(normalizeAgentResult(parsedJson, passthrough), executionPolicy)
+    return json({
+      runId,
+      executionPolicy,
+      skill: skillDescriptor,
+      sessionId: session.id,
+      ...parsed,
+      referenceBrief,
+      referenceAnalysisUsed: Boolean(referenceBrief),
+      referenceAnalysisSource,
+      referenceAnalysisReason,
+      usedModel: true,
+      agentModel,
+      provider,
+      agentRequestId,
+      referenceRequestId,
+      timings: { planningMs: Date.now() - planningStartedAt, referenceMs: referenceDurationMs, totalMs: Date.now() - requestStartedAt, modelCalls: referenceAnalysisSource === 'vision' ? 2 : 1 },
+      agentPassthrough: false,
+      passthroughReason: '',
+    })
+  } catch (error: any) {
+    const status = error?.status >= 400 && error?.status <= 599 ? error.status : 502
+    return json({ error: `Agent 模型调用失败：${String(error?.message || '请求结果未确认，请检查原请求').slice(0, 400)}`, agentModel, provider, agentRequestId }, status)
+  }
 }
 
 export function buildPassthroughAgentResult(body: any, message: string): AgentResult {
@@ -382,6 +453,7 @@ export function buildAgentPlanningInput(
 ) {
   return {
     message,
+    executionPolicy: normalizeDesignAgentPolicy(body?.executionPolicy),
     history: Array.isArray(body?.history) ? body.history.slice(-8) : [],
     canvasContext: body?.canvasContext || {},
     aspectRatio: body?.aspectRatio || '1:1',
@@ -418,17 +490,13 @@ async function loadReferenceImages(
   entries: ReferenceImageEntry[],
   sessionId: string,
   userId: string | null,
+  projectId = '',
 ): Promise<ResolvedReferenceImage[]> {
   const images: ResolvedReferenceImage[] = []
   for (const entry of entries) {
     const asset = await getAsset(env, entry.assetId)
     if (!asset) continue
-    const canRead = asset.userId
-      ? asset.userId === userId
-      : asset.sessionId === sessionId
-    if (!canRead) continue
-
-    const dataUrl = await getAssetDataUrl(env, entry.assetId)
+    const dataUrl = await getAuthorizedAssetDataUrl(env, entry.assetId, userId, projectId)
     if (!dataUrl) continue
     const image = splitDataUrl(dataUrl)
     if (!image.base64) continue
@@ -447,13 +515,17 @@ async function analyzeReferenceImages(
   visionKey: string,
   message: string,
   images: ResolvedReferenceImage[],
+  visionModel = VISION_MODEL,
+  requestId?: string,
+  timeoutMs?: number,
+  protocol: 'responses' | 'chat' = 'chat',
 ): Promise<ReferenceBrief | null> {
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    VISION_MODEL,
+    visionModel,
     buildReferenceAnalysisMessages(message, images),
-    { maxTokens: 3000, temperature: 0.2 },
+    { maxTokens: 3000, temperature: 0.2, requestId, timeoutMs, strict: true, protocol },
   )
   return normalizeReferenceBrief(parseJsonObject(raw))
 }

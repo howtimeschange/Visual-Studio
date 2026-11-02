@@ -12,7 +12,8 @@ async function importResultsRoute() {
     stdin: {
       contents: `
         export { onRequestGet } from './functions/api/results/[assetId].ts'
-        export { createAsset, ensureSession } from './functions/_lib/v2-store.ts'
+        export { createAsset, ensureSession, createUser } from './functions/_lib/v2-store.ts'
+        export { createLoginResponse } from './functions/_lib/auth.ts'
       `,
       resolveDir: process.cwd(),
       sourcefile: 'results-route-test-entry.mjs',
@@ -68,10 +69,12 @@ test('results route streams R2 object bytes without data-url rehydration', async
   }
 
   try {
-    const session = await mod.ensureSession(env, 'session-results-route', null)
+    const user = await mod.createUser(env, { email: 'result-owner@example.com', passwordHash: '', passwordSalt: '' })
+    const login = await mod.createLoginResponse(env, user, new Request('https://example.com'))
+    const session = await mod.ensureSession(env, 'session-results-route', user.id)
     const asset = await mod.createAsset(env, {
       sessionId: session.id,
-      userId: null,
+      userId: user.id,
       kind: 'result',
       source: 'outfit_batch',
       filename: 'outfit.png',
@@ -81,12 +84,12 @@ test('results route streams R2 object bytes without data-url rehydration', async
     const response = await mod.onRequestGet({
       env,
       params: { assetId: asset.id },
-      request: new Request(`https://example.com/api/results/${asset.id}`),
+      request: new Request(`https://example.com/api/results/${asset.id}`, { headers: { Cookie: login.setCookie.split(';')[0] } }),
     })
 
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('content-type'), 'image/png')
-    assert.equal(response.headers.get('cache-control'), 'private, max-age=86400, immutable')
+    assert.equal(response.headers.get('cache-control'), 'private, no-store')
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
     assert.equal(resultStats.get, 1)
     assert.equal(resultStats.arrayBuffer, 0)

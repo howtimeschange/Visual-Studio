@@ -1,3 +1,4 @@
+import { assertInputAssetAccess } from '../../_lib/permissions'
 import { Env, json, corsPreflight } from '../../_shared'
 import { requireAuth } from '../../_lib/auth'
 import { submitAiTestBatch } from '../../_lib/v2-runner'
@@ -15,6 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUnti
       return json({ error: 'Invalid JSON' }, 400)
     }
 
+    await assertInputAssetAccess(env, body, user.id)
     const clientKeys = await mergeUserClientKeys(env, user.id, body?.clientKeys || {})
     return json(await submitAiTestBatch(env, { ...body, clientKeys, _authUserId: user.id }, waitUntil))
   } catch (error: any) {

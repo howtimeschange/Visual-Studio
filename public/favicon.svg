@@ -1,4 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Visual Studio">
-  <rect width="64" height="64" rx="13" fill="#ffad4a"/>
-  <path d="M32 21 43 32 32 43 21 32Z" fill="#04070b"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Visual Studio · 创作画布">
+  <rect width="64" height="64" rx="15" fill="#24251f"/>
+  <rect x="12" y="23" width="31" height="29" rx="4" fill="none" stroke="#e49c7c" stroke-width="4"/>
+  <rect x="23" y="12" width="29" height="30" rx="4" fill="#f2f0e7"/>
+  <path d="M29 34 35 26l5 5 6-8v13H29Z" fill="#24251f"/>
+  <circle cx="32" cy="21" r="2.5" fill="#ad482b"/>
 </svg>

@@ -7,6 +7,7 @@ export type JobType =
   | 'style_transfer_batch'
   | 'generate_batch'
   | 'ai_test_batch'
+  | 'canvas_agent'
 
 export type JobStatus =
   | 'queued'
@@ -24,6 +25,7 @@ export type JobItemType =
   | 'generate_turn_step'
   | 'generate_batch_item'
   | 'ai_test_cell'
+  | 'canvas_agent_run'
 
 export type JobItemStatus =
   | 'queued'
@@ -65,6 +67,16 @@ export interface UserRecord {
   passwordHash: string
   passwordSalt: string
   createdAt: string
+  updatedAt: string
+}
+
+export interface ExternalIdentityRecord {
+  issuer: string
+  subject: string
+  userId: string
+  ciphertext: string
+  expiresAt: number
+  refreshLeaseUntil: number
   updatedAt: string
 }
 

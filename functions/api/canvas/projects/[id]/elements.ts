@@ -1,6 +1,6 @@
 import { Env, json, corsPreflight } from '../../../../_shared'
 import { getAuthContext } from '../../../../_lib/auth'
-import { assertCanEditProject, assertCanReadProject } from '../../../../_lib/permissions'
+import { assertCanEditProject, assertCanReadProject, assertInputAssetAccess } from '../../../../_lib/permissions'
 import { listCanvasProjectElements, replaceCanvasProjectElements } from '../../../../_lib/v2-store'
 
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
@@ -36,7 +36,8 @@ export const onRequestPut: PagesFunction<Env> = async ({ request, env, params })
   try {
     const auth = await getAuthContext(env, request)
     await assertCanEditProject(env, String(params?.id || ''), auth.user?.id || null)
-    const records = await replaceCanvasProjectElements(env, String(params?.id || ''), elements)
+    await assertInputAssetAccess(env, { elements, projectId: String(params?.id || '') }, auth.user!.id)
+    const records = await replaceCanvasProjectElements(env, String(params?.id || ''), elements, Array.isArray(body.knownElementIds) ? body.knownElementIds.map(String) : undefined)
     if (!records) return json({ error: 'Canvas project not found' }, 404)
     return json({
       elements: records.map((record) => record.dataJson),

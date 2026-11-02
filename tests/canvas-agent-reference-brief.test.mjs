@@ -16,7 +16,8 @@ async function importCanvasAgent() {
     stdin: {
       contents: [
         "export { onRequestPost } from './functions/api/canvas/agent.ts'",
-        "export { createAsset, ensureSession } from './functions/_lib/v2-store.ts'",
+        "export { createAsset, ensureSession, createUser } from './functions/_lib/v2-store.ts'",
+        "export { createLoginResponse } from './functions/_lib/auth.ts'",
       ].join('\n'),
       resolveDir: process.cwd(),
       sourcefile: 'canvas-agent-brief-test-entry.mjs',
@@ -32,10 +33,11 @@ async function importCanvasAgent() {
   return { mod, cleanup: () => rm(outdir, { recursive: true, force: true }) }
 }
 
+let authCookie = ''
 function jsonPost(body = {}) {
   return new Request('https://example.com/api/canvas/agent', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Cookie: authCookie },
     body: JSON.stringify(body),
   })
 }
@@ -44,7 +46,7 @@ function chatResponse(content) {
   return new Response(JSON.stringify({
     choices: [{ message: { content: typeof content === 'string' ? content : JSON.stringify(content) } }],
   }), {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Cookie: authCookie },
   })
 }
 
@@ -54,10 +56,12 @@ test('canvas agent analyzes uploaded reference images before planning prompts', 
   const upstreamPayloads = []
   try {
     const env = { VISION_API_KEY: 'vision-key' }
-    const session = await mod.ensureSession(env, 'session_reference_brief', null)
+    const user = await mod.createUser(env, { email: 'agent-owner@example.com', passwordHash: '', passwordSalt: '' })
+    authCookie = (await mod.createLoginResponse(env, user, new Request('https://example.com'))).setCookie.split(';')[0]
+    const session = await mod.ensureSession(env, 'session_reference_brief', user.id)
     const asset = await mod.createAsset(env, {
       sessionId: session.id,
-      userId: null,
+      userId: user.id,
       kind: 'upload',
       source: 'test',
       filename: 'tmall-detail.png',
@@ -144,4 +148,37 @@ test('canvas agent analyzes uploaded reference images before planning prompts', 
     globalThis.fetch = originalFetch
     await cleanup()
   }
+})
+
+test('combined reference planning makes one multimodal request and retains plan-only enforcement', async () => {
+  const { mod, cleanup } = await importCanvasAgent()
+  const originalFetch = globalThis.fetch
+  const payloads = []
+  try {
+    const env = { VISION_API_KEY: 'fixture-key' }
+    const user = await mod.createUser(env, { email: 'combined-owner@example.com', passwordHash: '', passwordSalt: '' })
+    authCookie = (await mod.createLoginResponse(env, user, new Request('https://example.com'))).setCookie.split(';')[0]
+    const session = await mod.ensureSession(env, 'combined-session', user.id)
+    const asset = await mod.createAsset(env, { sessionId: session.id, userId: user.id, kind: 'upload', source: 'test', mime: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,cmVmZXJlbmNl' })
+    globalThis.fetch = async (_url, init) => {
+      payloads.push(JSON.parse(init.body))
+      return chatResponse({ reply: '**构图**：保留茶壶', shouldGenerate: true, mode: 'generate',
+        referenceBrief: { product: { type: '蓝色茶壶' }, evidence: ['可见蓝色壶身'] },
+        actions: [{ type: 'generate_image', prompt: 'retain product' }] })
+    }
+    const response = await mod.onRequestPost({ env, request: jsonPost({ sessionId: session.id, message: '分析参考图，不生图',
+      referenceStrategy: 'combined', executionPolicy: { mode: 'plan' }, referenceImages: [{ assetId: asset.id, role: 'subject' }] }) })
+    const result = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(payloads.length, 1)
+    const content = payloads[0].messages[1].content
+    assert.equal(content.filter(part => part.type === 'image_url').length, 1)
+    assert.equal(JSON.parse(content[0].text).referenceImages[0].role, 'subject')
+    assert.equal(result.referenceBrief.product.type, '蓝色茶壶')
+    assert.equal(result.referenceAnalysisSource, 'combined')
+    assert.equal(result.agentRequestId, result.referenceRequestId)
+    assert.equal(result.timings.modelCalls, 1)
+    assert.equal(result.shouldGenerate, false)
+    assert.deepEqual(result.actions, [])
+  } finally { globalThis.fetch = originalFetch; await cleanup() }
 })

@@ -19,7 +19,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       name: String(body?.name || ''),
     })
     const login = await createLoginResponse(env, user, request)
-    await claimSessionResourcesForUser(env, String(body?.sessionId || ''), user.id)
     await createUsageEvent(env, {
       userId: user.id,
       sessionId: String(body?.sessionId || '') || null,

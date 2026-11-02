@@ -135,7 +135,7 @@ test('style-transfer generate returns a pending task instead of synchronously wa
     return new Response(JSON.stringify({
       id: 'task_style_pending_1',
       status: 'queued',
-      poll_url: 'https://relay.example/v1/images/tasks/task_style_pending_1',
+      poll_url: 'https://api.1xm.ai/v1/images/tasks/task_style_pending_1',
       poll_after: 1,
     }), {
       status: 202,
@@ -183,7 +183,7 @@ test('style-transfer generate returns a pending task instead of synchronously wa
     assert.equal(response.status, 202)
     assert.equal(body.pending, true)
     assert.equal(body.task.status, 'queued')
-    assert.equal(body.pollUrl, 'https://relay.example/v1/images/tasks/task_style_pending_1')
+    assert.equal(body.pollUrl, 'https://api.1xm.ai/v1/images/tasks/task_style_pending_1')
     assert.equal(calls.length, 1)
     assert.equal(calls[0].input, 'https://api.1xm.ai/v1/images/tasks')
   } finally {

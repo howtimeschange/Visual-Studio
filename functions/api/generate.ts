@@ -19,7 +19,7 @@
 // { type: 'error', error, status? }
 
 import {
-  Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
+  Env, resolveRelayBaseUrl, resolveAgentModel, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
 } from '../_shared'
 import type { ImageTaskStepResult } from '../_shared'
@@ -149,6 +149,9 @@ type GenerateExecutionResult = {
 }
 
 type GenerateTaskStepOptions = {
+  beforeSubmit?: () => Promise<void>
+  onAccepted?: (task: any) => Promise<void>
+  requestId?: string
   existingTask?: any
   maxPollAttempts?: number
   finalPrompt?: string
@@ -193,10 +196,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
 }
 
-function resolveDesignAgentConfig(visionKey: string): DesignAgentConfig {
+function resolveDesignAgentConfig(visionKey: string, visionModel = DESIGN_AGENT_MODEL): DesignAgentConfig {
   return {
     apiKey: String(visionKey || '').trim(),
-    model: DESIGN_AGENT_MODEL,
+    model: visionModel,
   }
 }
 
@@ -218,14 +221,14 @@ export function buildGenerateExecutionContext(body: GenerateRequestBody, env: En
   }
   if (!MODEL_MAP[modelId]) throw createStatusError(`Unknown modelId: ${modelId}`, 400)
 
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { visionKey, genKey } = resolveKeys(modelId, env, clientKeys)
   const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
   imageModelOptions.aspectRatio = normalizeAspectRatio(aspectRatio)
   imageModelOptions.resolution = normalizeResolution(resolution)
   if (!genKey) throw createStatusError(`Missing API key for ${modelId}`, 400)
 
-  const agentConfig = resolveDesignAgentConfig(visionKey)
+  const agentConfig = resolveDesignAgentConfig(visionKey, resolveAgentModel(env, clientKeys))
   if (useDesignAgent && !agentConfig.apiKey) {
     throw createStatusError('Missing Vision Key for design agent', 400)
   }
@@ -262,6 +265,7 @@ export async function executeGenerateTaskStep(
   emit?: (event: StreamEvent) => Promise<void> | void,
   stepOptions: GenerateTaskStepOptions = {},
 ): Promise<GenerateTaskStepResult> {
+  Object.assign(ctx.imageModelOptions, { beforeSubmit: stepOptions.beforeSubmit, onAccepted: stepOptions.onAccepted, requestId: stepOptions.requestId })
   const normalizedMessage = ctx.userMessage.trim()
     || (ctx.previousResult
       ? 'Refine the previous image into a cleaner and more polished commercial draft.'
@@ -347,8 +351,8 @@ export async function executeGenerateTaskStep(
     })
 
     const [visualRefs, previousFrame] = await Promise.all([
-      analyzeReferenceImages(ctx.baseUrl, ctx.visionKey, ctx.referenceImages),
-      analyzePreviousResult(ctx.baseUrl, ctx.visionKey, ctx.previousResult),
+      analyzeReferenceImages(ctx.baseUrl, ctx.visionKey, ctx.referenceImages, ctx.agentConfig.model),
+      analyzePreviousResult(ctx.baseUrl, ctx.visionKey, ctx.previousResult, ctx.agentConfig.model),
     ])
 
     await emit?.({
@@ -571,6 +575,7 @@ async function analyzeReferenceImages(
   baseUrl: string,
   visionKey: string,
   refs: RefImage[],
+  visionModel = VISION_MODEL,
 ): Promise<DesignAgentVisualRef[]> {
   if (refs.length === 0) return []
 
@@ -581,7 +586,7 @@ async function analyzeReferenceImages(
     const raw = await callTextModel(
       baseUrl,
       visionKey,
-      VISION_MODEL,
+      visionModel,
       [
         {
           role: 'system',
@@ -633,13 +638,14 @@ async function analyzePreviousResult(
   baseUrl: string,
   visionKey: string,
   previousResult: PreviousResultPart | null,
+  visionModel = VISION_MODEL,
 ): Promise<PreviousFrameAnalysis | null> {
   if (!previousResult || !visionKey) return null
 
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    VISION_MODEL,
+    visionModel,
     [
       {
         role: 'system',

@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
+import { canShowAgentSuggestions } from '../public/js/design-agent-harness.js'
+import { agentMarkdownToHtml } from '../public/js/agent-markdown.js'
 
 const APP_PATH = new URL('../public/app.js', import.meta.url)
 
@@ -92,6 +94,9 @@ async function createHarness() {
   const source = await readFile(APP_PATH, 'utf8')
   const document = new FakeDocument()
   const context = {
+    agentMarkdownToHtml,
+    canShowAgentSuggestions,
+    renderDesignAgentContext: () => {},
     document,
     state: {
       generate: {

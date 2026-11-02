@@ -76,6 +76,7 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
   const { mod, cleanup } = await importRunner()
   const sent = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     CREDENTIAL_KEK: 'pages-only-account-secret',
     VS_JOB_CREDENTIAL_KEK: 'shared-job-secret',
     VS_TRANSLATE_JOBS_QUEUE: {
@@ -96,14 +97,14 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
     const credential = await mod.getSealedCredential(env, String(job.configJson.sealedCredentialId))
 
     assert.equal(sent.length, 1)
-    assert.deepEqual(sent[0].clientKeys, { banana2ApiKey: 'job-api-key' })
+    assert.equal(sent[0].clientKeys, undefined)
     await assert.rejects(
       () => mod.unsealJson(credential.ciphertext, env.CREDENTIAL_KEK),
       /decrypt|operation failed|operation-specific/i,
     )
     assert.deepEqual(
       await mod.unsealJson(credential.ciphertext, env.VS_JOB_CREDENTIAL_KEK),
-      { banana2ApiKey: 'job-api-key' },
+      { banana2ApiKey: 'job-api-key', provider: '1xm' },
     )
   } finally {
     await cleanup()
@@ -113,6 +114,7 @@ test('submitTranslateBatch seals queued job credentials with the worker-shared j
 test('batch submit defaults use gpt image 2 for translation and async image concurrency 10', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_TRANSLATE_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -151,6 +153,7 @@ test('batch submit defaults use gpt image 2 for translation and async image conc
 test('batch submit clamps async image concurrency to 10 for every image model', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_TRANSLATE_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -196,6 +199,7 @@ test('batch submit clamps async image concurrency to 10 for every image model', 
 test('submitTranslateBatch stores uploaded font reference fields and treats removed preset as match original', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_TRANSLATE_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -241,6 +245,7 @@ test('submitStyleTransferBatch queues one style item per subject and seals crede
   const { mod, cleanup } = await importRunner()
   const sent = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOB_CREDENTIAL_KEK: 'shared-style-secret',
     VS_JOBS_QUEUE: {
       send: async (message) => {
@@ -285,7 +290,7 @@ test('submitStyleTransferBatch queues one style item per subject and seals crede
     assert.equal(sent[0].jobType, 'style_transfer_batch')
     assert.deepEqual(
       await mod.unsealJson(credential.ciphertext, env.VS_JOB_CREDENTIAL_KEK),
-      { banana2ApiKey: 'style-key' },
+      { banana2ApiKey: 'style-key', provider: '1xm' },
     )
   } finally {
     await cleanup()
@@ -297,6 +302,7 @@ test('runStyleTransferBatchJob stores completed style transfer results', async (
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -368,6 +374,7 @@ test('runStyleTransferBatchJob resumes a pending image task across queue invocat
   const calls = []
   const inputStats = {}
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_JOBS_QUEUE: {
@@ -490,6 +497,7 @@ test('runStyleTransferBatchJob keeps an existing image task queued after transie
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_JOBS_QUEUE: {
@@ -597,6 +605,7 @@ test('runStyleTransferBatchJob fails after repeated transient poll failures exha
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_IMAGE_RETRY_DELAY_MS: '0',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -832,6 +841,7 @@ test('runTranslateBatchJob sends uploaded font reference as Image 2 with scoped 
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_TRANSLATE_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -903,6 +913,7 @@ test('runTranslateBatchJob passes source asset dimensions so font references can
   const originalFetch = globalThis.fetch
   const prompts = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_TRANSLATE_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -971,6 +982,7 @@ test('runTranslateBatchJob reuses one OCR plan and one asset read per source ima
   let visionCalls = 0
   let imageCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(resultStats),
     VS_TRANSLATE_JOBS_QUEUE: {
@@ -1064,6 +1076,7 @@ test('runTranslateBatchJob processes at most 10 queued items per queue invocatio
   const sent = []
   let imageCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_TRANSLATE_JOBS_QUEUE: {
@@ -1135,6 +1148,7 @@ test('submitGenerateDirectJob queues 4k canvas generation and runner stores the 
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async (message) => {
         sent.push(message)
@@ -1192,6 +1206,7 @@ test('runGenerateBatchJob resumes a pending image task across queue invocations'
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_GENERATE_TASK_MAX_POLLS_PER_RUN: '1',
     VS_JOBS_QUEUE: {
       send: async (message) => {
@@ -1283,6 +1298,7 @@ test('submitAiTestBatch queues one ai test cell per image count and seals creden
   const { mod, cleanup } = await importRunner()
   const sent = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOB_CREDENTIAL_KEK: 'shared-job-secret',
     VS_JOBS_QUEUE: {
       send: async (message) => {
@@ -1337,10 +1353,10 @@ test('submitAiTestBatch queues one ai test cell per image count and seals creden
     assert.equal(items[0].inputJson.resolution, '2k')
     assert.equal(sent.length, 1)
     assert.equal(sent[0].jobType, 'ai_test_batch')
-    assert.deepEqual(sent[0].clientKeys, { gptImageApiKey: 'ai-test-key' })
+    assert.equal(sent[0].clientKeys, undefined)
     assert.deepEqual(
       await mod.unsealJson(credential.ciphertext, env.VS_JOB_CREDENTIAL_KEK),
-      { gptImageApiKey: 'ai-test-key' },
+      { gptImageApiKey: 'ai-test-key', provider: '1xm' },
     )
   } finally {
     await cleanup()
@@ -1352,6 +1368,7 @@ test('runAiTestBatchJob stores completed ai test result assets', async () => {
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -1422,6 +1439,7 @@ test('runAiTestBatchJob resumes pending image tasks without creating duplicates'
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_GENERATE_TASK_MAX_POLLS_PER_RUN: '1',
     VS_JOBS_QUEUE: {
       send: async (message) => {
@@ -1520,6 +1538,7 @@ test('runAiTestBatchJob limits new ai test task creation per queue invocation', 
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async (message) => {
         sent.push(message)
@@ -1582,6 +1601,7 @@ test('retryJobItem supports failed ai test batch items', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -1650,6 +1670,7 @@ test('retryJobItem creates a fresh ai test task after stored upstream task failu
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_GENERATE_TASK_MAX_POLLS_PER_RUN: '1',
     VS_JOBS_QUEUE: {
       send: async () => {},
@@ -1757,6 +1778,7 @@ test('runQueuedJob claims a generate batch item once under duplicate delivery', 
     markFetchStarted = resolve
   })
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -1806,6 +1828,7 @@ test('retryJob supports failed generate batch jobs', async () => {
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -1869,6 +1892,7 @@ test('runOutfitBatchJob reuses outfit analysis and asset reads for duplicate mod
   let visionCalls = 0
   let imageCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_ITEMS_PER_RUN: '2',
     VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(resultStats),
@@ -1972,6 +1996,7 @@ test('runOutfitBatchJob processes 2 queued outfit items per queue invocation by 
   let visionCalls = 0
   let imageCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_OUTFIT_JOBS_QUEUE: {
@@ -2077,6 +2102,7 @@ test('runOutfitBatchJob prioritizes existing outfit image tasks before creating 
   const calls = []
   let visionCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     BANANA2_API_KEY: 'image-key',
     VISION_API_KEY: 'vision-key',
     VS_INPUTS_BUCKET: createMemoryBucket(),
@@ -2227,6 +2253,7 @@ test('runOutfitBatchJob resumes a pending outfit image task across queue invocat
   const inputStats = {}
   let visionCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '1',
     VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -2366,6 +2393,7 @@ test('runOutfitBatchJob keeps job recoverable while another outfit item is still
   const originalFetch = globalThis.fetch
   const sent = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     BANANA2_API_KEY: 'image-key',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -2488,6 +2516,7 @@ test('runQueuedJob recovers a stale running outfit image task on duplicate deliv
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOB_ITEM_TIMEOUT_MS: '60000',
     BANANA2_API_KEY: 'image-key',
     VS_INPUTS_BUCKET: createMemoryBucket(),
@@ -2611,6 +2640,7 @@ test('runQueuedJob recovers a ready running outfit image task without waiting fo
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOB_ITEM_TIMEOUT_MS: '600000',
     BANANA2_API_KEY: 'image-key',
     VS_INPUTS_BUCKET: createMemoryBucket(),
@@ -2719,6 +2749,7 @@ test('runOutfitBatchJob resumes an outfit image task from stored poll URL metada
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     BANANA2_API_KEY: 'image-key',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -2825,6 +2856,7 @@ test('runOutfitBatchJob stores a newly created outfit image task before polling'
   const inputStats = {}
   let visionCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '5',
     VS_INPUTS_BUCKET: createMemoryBucket(inputStats),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -2931,6 +2963,7 @@ test('runOutfitBatchJob polls an existing outfit image task immediately after qu
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     BANANA2_API_KEY: 'image-key',
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_OUTFIT_JOBS_QUEUE: {
@@ -3019,6 +3052,7 @@ test('runQueuedJob leaves an active running outfit image task alone before the s
   const originalFetch = globalThis.fetch
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_JOB_ITEM_TIMEOUT_MS: '600000',
     BANANA2_API_KEY: 'image-key',
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -3105,6 +3139,7 @@ test('runOutfitBatchJob retries a failed upstream image task with a fresh task i
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '1',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -3276,6 +3311,7 @@ test('runOutfitBatchJob preserves created task when polling hits worker subreque
   const sent = []
   const calls = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_TASK_MAX_POLLS_PER_RUN: '5',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
@@ -3416,6 +3452,7 @@ test('runOutfitBatchJob fails item when image task result is empty', async () =>
   const { mod, cleanup } = await importRunner()
   const originalFetch = globalThis.fetch
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_OUTFIT_JOBS_QUEUE: {
@@ -3509,6 +3546,7 @@ test('runOutfitBatchJob retries transient outfit analysis upstream failures', as
   let visionCalls = 0
   let imageCalls = 0
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_INPUTS_BUCKET: createMemoryBucket(),
     VS_RESULTS_BUCKET: createMemoryBucket(),
     VS_OUTFIT_JOBS_QUEUE: {
@@ -3600,6 +3638,7 @@ test('runOutfitBatchJob retries transient outfit analysis upstream failures', as
 test('submitOutfitBatch stores per-garment instructions on each queued look item', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -3647,6 +3686,7 @@ test('submitOutfitBatch stores per-garment instructions on each queued look item
 test('submitOutfitBatch stores per-model instructions on each queued look item', async () => {
   const { mod, cleanup } = await importRunner()
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_OUTFIT_JOBS_QUEUE: {
       send: async () => {},
     },
@@ -3688,6 +3728,7 @@ test('pauseJob prevents a queued job from running until it is resumed', async ()
   const { mod, cleanup } = await importRunner()
   const sent = []
   const env = {
+    RELAY_BASE_URL: 'https://relay.example/v1',
     VS_TRANSLATE_JOBS_QUEUE: {
       send: async (message) => {
         sent.push(message)

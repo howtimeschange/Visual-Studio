@@ -79,8 +79,8 @@ test('recoverJobs fails a stale running batch item without task id after its ret
     assert.equal(nextJob.progressFailed, 1)
     assert.equal(nextItem.id, item.id)
     assert.equal(nextItem.status, 'failed')
-    assert.equal(nextItem.errorCode, 'job_item_timeout')
-    assert.match(nextItem.errorMessage, /timed out/i)
+    assert.equal(nextItem.errorCode, 'unknown_submit_result')
+    assert.match(nextItem.errorMessage, /UNKNOWN_SUBMIT_RESULT/)
   } finally {
     await cleanup()
   }

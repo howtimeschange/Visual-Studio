@@ -1,7 +1,7 @@
 // POST /api/translate — Two-stage image translation
 import {
-  Env, DEFAULT_BASE, VISION_MODEL, MODEL_MAP, LANG_NAMES,
-  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callTextModel,
+  Env, resolveRelayBaseUrl, resolveVisionModel, DEFAULT_BASE, VISION_MODEL, MODEL_MAP, LANG_NAMES,
+  json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModel, callImageModelTaskStep, callTextModel,
 } from '../_shared'
 import { requireAuth } from '../_lib/auth'
 import { mergeUserClientKeys } from '../_lib/user-api-keys'
@@ -99,6 +99,12 @@ const OCR_LANG_ALIASES: Record<string, string> = {
 export const onRequestOptions: PagesFunction = async () => corsPreflight()
 
 export async function executeTranslate(body: any, env: Env) {
+  const result = await executeTranslateTaskStep(body, env)
+  if (result.pending) throw createTranslateError('Image task is still running.', 202)
+  return { resultDataUrl: result.resultDataUrl, ocr: result.ocr }
+}
+
+export async function executeTranslateTaskStep(body: any, env: Env, stepOptions: { existingTask?: any; maxPollAttempts?: number; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean; beforeSubmit?: () => Promise<void>; onAccepted?: (task: any) => Promise<void>; requestId?: string } = {}) {
   const {
     imageBase64, mime = 'image/jpeg',
     sourceLanguage = 'auto', targetLanguage,
@@ -109,23 +115,23 @@ export async function executeTranslate(body: any, env: Env) {
     clientKeys = {},
   } = body ?? {}
 
-  if (!imageBase64) throw createTranslateError('imageBase64 required', 400)
+  if (!imageBase64 && !stepOptions.existingTask) throw createTranslateError('imageBase64 required', 400)
   if (!targetLanguage) throw createTranslateError('targetLanguage required', 400)
   if (!MODEL_MAP[modelId]) throw createTranslateError(`Unknown modelId: ${modelId}`, 400)
 
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { visionKey, genKey } = resolveKeys(modelId, env, clientKeys)
-  const imageModelOptions = resolveImageModelOptions(modelId, env, clientKeys)
+  const imageModelOptions = { ...resolveImageModelOptions(modelId, env, clientKeys), ...stepOptions }
   if (!genKey) throw createTranslateError(`Missing API key for ${modelId}`, 400)
 
   let ocr: OcrResult | null = body?.ocrPlan
     ? selectOcrPlanForTarget(body.ocrPlan as OcrResult, targetLanguage)
     : null
-  if (!ocr && visionKey) {
-    ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, [targetLanguage], preserveBrand)
+  if (!stepOptions.existingTask && !ocr && visionKey) {
+    ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, [targetLanguage], preserveBrand, resolveVisionModel(env, clientKeys))
     if (ocr) {
       ocr.sourceLang = normalizeLanguageCode(ocr.sourceLang, sourceLanguage)
-      ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, [targetLanguage], preserveBrand) ?? ocr
+      ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, [targetLanguage], preserveBrand, resolveVisionModel(env, clientKeys)) ?? ocr
       ocr = selectOcrPlanForTarget(ocr, targetLanguage)
     }
   }
@@ -145,7 +151,7 @@ export async function executeTranslate(body: any, env: Env) {
   })
   const imageInputs = [{ base64: imageBase64, mime }]
   if (fontReference) imageInputs.push(fontReference)
-  const generated = await callImageModel(
+  const generated = await callImageModelTaskStep(
     baseUrl,
     genKey,
     MODEL_MAP[modelId],
@@ -154,9 +160,11 @@ export async function executeTranslate(body: any, env: Env) {
     imageModelOptions,
   )
 
+  if (generated.pending) return { ...generated, ocr }
   if (!generated.ok) throw createTranslateError(generated.error, generated.status || 502)
 
   return {
+    pending: false as const,
     resultDataUrl: generated.dataUrl,
     ocr: ocr ? {
       textCount: ocr.textCount, keepCount: ocr.keepCount,
@@ -178,14 +186,14 @@ export async function prepareTranslatePlan(body: any, env: Env): Promise<OcrResu
   if (targetLanguages.length === 0) throw createTranslateError('targetLanguages required', 400)
   if (!MODEL_MAP[modelId]) throw createTranslateError(`Unknown modelId: ${modelId}`, 400)
 
-  const baseUrl = env.RELAY_BASE_URL || DEFAULT_BASE
+  const baseUrl = resolveRelayBaseUrl(env, clientKeys)
   const { visionKey } = resolveKeys(modelId, env, clientKeys)
   if (!visionKey) return null
 
-  let ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, targetLanguages, preserveBrand)
+  let ocr = await analyzeImageText(baseUrl, visionKey, imageBase64, mime, sourceLanguage, targetLanguages, preserveBrand, resolveVisionModel(env, clientKeys))
   if (!ocr) return null
   ocr.sourceLang = normalizeLanguageCode(ocr.sourceLang, sourceLanguage)
-  ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, targetLanguages, preserveBrand) ?? ocr
+  ocr = await reviewOcrPlan(baseUrl, visionKey, ocr, targetLanguages, preserveBrand, resolveVisionModel(env, clientKeys)) ?? ocr
   return normalizeOcrPlan(ocr, targetLanguages)
 }
 
@@ -211,7 +219,7 @@ function createTranslateError(message: string, status = 502) {
 async function analyzeImageText(
   baseUrl: string, visionKey: string,
   base64: string, mime: string,
-  sourceLanguage: string, targetLanguages: string[], preserveBrand: boolean,
+  sourceLanguage: string, targetLanguages: string[], preserveBrand: boolean, visionModel = VISION_MODEL,
 ): Promise<OcrResult | null> {
   const targetLangName = formatTargetLanguageNames(targetLanguages)
   const sourceLangHint = sourceLanguage === 'auto'
@@ -266,7 +274,7 @@ CRITICAL: Do NOT omit ANY text. Small/tiny text must all be listed.
 For every item where keep=false, fill "translations" for EACH target language code: ${targetLanguages.join(', ')}.`
 
   const raw = await callTextModel(
-    baseUrl, visionKey, VISION_MODEL,
+    baseUrl, visionKey, visionModel,
     [{ role: 'user', content: [
       { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
       { type: 'text', text: prompt },
@@ -285,6 +293,7 @@ async function reviewOcrPlan(
   ocr: OcrResult,
   targetLanguages: string[],
   preserveBrand: boolean,
+  visionModel = VISION_MODEL,
 ): Promise<OcrResult | null> {
   const reviewable = ocr.texts.filter((item) => item.original?.trim())
   if (reviewable.length === 0) return ocr
@@ -321,7 +330,7 @@ ${itemLines}`
   const raw = await callTextModel(
     baseUrl,
     visionKey,
-    VISION_MODEL,
+    visionModel,
     [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     { maxTokens: 4096, temperature: 0.1 },
   )
