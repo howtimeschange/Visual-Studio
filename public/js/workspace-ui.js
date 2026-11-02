@@ -1,10 +1,11 @@
 // Presentation helpers shared by the workspace. No requests or account state.
+const ICON_SPRITE_URL = '/icons.svg?v=20261102-workspace'
 export function createUiIcon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('class', 'ui-icon')
   svg.setAttribute('aria-hidden', 'true')
   const use = document.createElementNS('http://www.w3.org/2000/svg', 'use')
-  use.setAttribute('href', `/icons.svg#${name}`)
+  use.setAttribute('href', `${ICON_SPRITE_URL}#${name}`)
   svg.append(use)
   return svg
 }
