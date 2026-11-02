@@ -52,7 +52,7 @@
         <section class="auth-copy">
           <div class="auth-mark">Visual Studio</div>
           <span class="eyebrow">你的创作空间</span><h1>一个账号，<br>连接创作与算力。</h1>
-          <p>登录后继续你的项目、保存每一次灵感，<br>也可以连接 ModelJetty，直接使用账户算力。</p>
+          <p>使用 ModelJetty 账号登录，<br>连接账户算力，开始你的下一张作品。</p>
           <div class="auth-points">
             <span>项目与素材自动保存</span><span>与团队共享创作</span><span>ModelJetty 账户算力</span>
           </div>
@@ -68,17 +68,21 @@
           </div>
 
           <div class="modeljetty-account">
-            <button type="button" id="account-modeljetty" class="ghost" disabled>使用 ModelJetty 登录</button>
+            <div class="modeljetty-login-intro" id="account-modeljetty-intro">
+              <h2>用 ModelJetty 开始创作</h2>
+              <p>一个账号，连接项目、作品与账户算力。</p>
+            </div>
+            <button type="button" id="account-modeljetty" class="primary" disabled>使用 ModelJetty 登录</button>
             <button type="button" id="account-modeljetty-refresh" class="ghost hidden">刷新算力余额</button>
             <button type="button" id="account-modeljetty-disconnect" class="ghost hidden">断开 ModelJetty 授权</button>
             <p id="account-modeljetty-status" class="hint">正在检查 ModelJetty 连接…</p>
           </div>
-          <div class="auth-divider"><span>或使用邮箱账号</span></div>
-          <div class="auth-form-head" id="account-form-head">
-            <h2>欢迎回到工作台</h2><p>登录你的账号，继续创作。</p>
-          </div>
-
-          <div class="dialog-grid" id="account-form">
+          <details class="auth-email" id="account-email-details">
+            <summary>Visual Studio 邮箱登录 / 注册</summary>
+            <div class="auth-form-head" id="account-form-head">
+              <p>已有邮箱账号或管理员可在这里继续登录。</p>
+            </div>
+            <div class="dialog-grid" id="account-form">
             <label class="dialog-field">
               <span class="dialog-label">邮箱</span>
               <input id="account-email-input" type="email" autocomplete="email" placeholder="name@example.com" />
@@ -92,10 +96,11 @@
               <input id="account-password-input" type="password" autocomplete="current-password" placeholder="至少 8 位" />
             </label>
             <div class="account-actions">
-              <button type="button" id="account-login" class="primary">登录</button>
+              <button type="button" id="account-login" class="ghost">邮箱登录</button>
               <button type="button" id="account-register" class="ghost">注册并登录</button>
             </div>
-          </div>
+            </div>
+          </details>
 
           <div id="account-usage" class="account-usage"></div>
           <div id="account-status" class="status"></div>

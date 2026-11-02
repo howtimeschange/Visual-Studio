@@ -465,17 +465,25 @@ body[data-view='generate'] .main { height: 100%; min-height: 0; }
 .account-summary .ghost { font-size: 10px; padding: 6px 10px; min-height: 32px; }
 .auth-form-head h2 { font-size: 20px; font-weight: 500; letter-spacing: -.5px; }
 .auth-form-head p { font-size: 11px; color: var(--muted); margin-top: 6px; }
-.auth-divider { position: relative; text-align: center; font-size: 10px; color: var(--muted); margin-block: 2px; }
-.auth-divider::before { content: ''; position: absolute; height: 1px; background: var(--line-subtle); top: 50%; left: 0; width: 100%; }
-.auth-divider span { position: relative; padding: 0 12px; background: var(--bg-2); }
-.auth-panel:has(#account-form.hidden) .auth-divider { display: none; }
+.auth-email { border-top: 1px solid var(--line-subtle); padding-top: 6px; }
+.auth-email > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; list-style: none; cursor: pointer; color: var(--text-soft); font-size: 12px; border-radius: 5px; }
+.auth-email > summary::-webkit-details-marker { display: none; }
+.auth-email > summary::after { content: '+'; font-size: 18px; line-height: 1; }
+.auth-email[open] > summary::after { content: '−'; }
+.auth-email > summary:hover { color: var(--text); }
+.auth-email > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.auth-email .auth-form-head { margin: 2px 0 18px; }
+.auth-email .dialog-grid { display: grid; }
+.auth-email .account-actions > button { font-size: 12px; }
 .account-actions { display: flex; gap: 8px; padding-top: 8px; }
 .account-actions > button { flex: 1; }
 .account-usage { font-size: 11px; color: var(--muted); }
 .account-usage:empty { display: none; }
 .modeljetty-account { display: grid; gap: 10px; }
-#account-modeljetty { color: var(--text); background: var(--bg-3); border-color: var(--line); min-height: 44px; }
-#account-modeljetty:not(:disabled):hover { background: var(--bg-4); }
+.modeljetty-login-intro { margin-bottom: 10px; }
+.modeljetty-login-intro h2 { margin: 0; font-size: 21px; font-weight: 550; line-height: 1.4; letter-spacing: -.4px; }
+.modeljetty-login-intro p { margin: 8px 0 0; font-size: 12px; color: var(--text-soft); line-height: 1.8; }
+#account-modeljetty { min-height: 48px; font-size: 14px; }
 .modeljetty-account .hint { font-size: 11px; }
 dialog { max-width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); padding: 28px; color: var(--text); background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg); }
 dialog::backdrop { background: var(--dialog-backdrop); backdrop-filter: blur(3px); }

@@ -8746,6 +8746,10 @@ function renderAccount() {
   if (!dom.accountSummary) return
   const user = state.account.user
   const signedIn = Boolean(user)
+  const emailDetails = $('#account-email-details')
+  emailDetails?.classList.toggle('hidden', signedIn)
+  if (emailDetails && state.account.modeljetty?.loginEnabled === false) emailDetails.open = true
+  $('#account-modeljetty-intro')?.classList.toggle('hidden', signedIn)
   dom.accountSummary.classList.toggle('hidden', !signedIn)
   dom.accountForm.classList.toggle('hidden', signedIn)
   dom.accountFormHead?.classList.toggle('hidden', signedIn)
