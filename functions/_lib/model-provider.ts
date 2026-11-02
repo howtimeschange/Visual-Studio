@@ -48,3 +48,14 @@ export function resolveProviderImageOptions(modelId: string, env: Env, keys: any
     modelName: typeof models?.[modelId] === 'string' ? models[modelId].trim() : '',
   }
 }
+
+export async function assertManagedImageModelAvailable(env: Env, keys: any, modelId: string) {
+  if (resolveProvider(env, keys) !== 'modeljetty' || keys.modeljettyManaged !== 'true') return
+  const modelName = resolveProviderImageOptions(modelId, env, keys).modelName
+  const origin = new URL(resolveRelayBaseUrl(env, keys)).origin
+  const response = await fetch(`${origin}/account/model-catalog`, { headers: { Authorization: `Bearer ${keys.modeljettyApiKey}` }, redirect: 'manual', signal: AbortSignal.timeout(15000) })
+  if (!response.ok) throw Object.assign(new Error('暂时无法确认生图模型权限，请刷新目录后重试。'), { status: 503 })
+  const data: any = await response.json()
+  const model = Array.isArray(data?.models) ? data.models.find((m: any) => m?.id === modelName) : null
+  if (!model || model.available === false) throw Object.assign(new Error('当前 ModelJetty 账号未开通所选生图模型，请选择列表中的可用模型。'), { status: 403 })
+}

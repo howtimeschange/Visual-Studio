@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
-import { groupModelCatalog, agentModelUnavailableReason } from '../public/js/model-catalog.js'
+import { groupModelCatalog, agentModelUnavailableReason, imageModelChoices } from '../public/js/model-catalog.js'
 
 test('catalog groups the whole platform by vendor and explains unselectable image and unauthorized models', () => {
   const models = [
@@ -47,4 +47,17 @@ test('Responses Agent transport sends multimodal input once and rejects incomple
     assert.equal(catalog.models[0].capabilities.imageInput, true)
     assert.doesNotMatch(JSON.stringify(catalog), /not-exported|script/)
   } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }) }
+})
+
+
+test('image choices explain account membership restrictions while manual keys keep their own capabilities', () => {
+  const options=[{id:'gemini',label:'Nano Banana 2'},{id:'gpt-fast',label:'GPT Image 快速'}]
+  const catalog=[{id:'gemini',available:true},{id:'gpt-fast',available:false,unavailableReason:'paid_model_access_required'}]
+  const choices=imageModelChoices(options,catalog)
+  assert.equal(choices[0].disabled,false)
+  assert.equal(choices[1].disabled,true)
+  assert.equal(choices[1].unavailableReason,'需要付费模型权限')
+  assert.equal(imageModelChoices(options,[{id:'gpt-fast',available:false,unavailableReason:'membership_or_paid_access_required'}])[1].unavailableReason,'需要会员或付费模型权限')
+  assert.ok(imageModelChoices(options,null).every(m=>!m.disabled))
+  assert.ok(imageModelChoices(options,[]).every(m=>m.disabled))
 })

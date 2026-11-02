@@ -11,11 +11,11 @@
 - OIDC Authorization Code + PKCE S256，显式 `prompt=consent` 获取并校验 refresh token；服务端单次 state、浏览器 HttpOnly state cookie、nonce、RS256/JWKS、issuer/audience/expiry/subject 校验。只使用配置的 ModelJetty 固定端点，不接收浏览器提供的服务商地址。
 - `/api/auth/modeljetty/start` 跳转授权，`/api/auth/modeljetty/callback` 绑定身份并签发本地 HttpOnly session。
 - 身份按 `(issuer, sub)` 唯一绑定。不会按相同邮箱自动合并账号。已登录 Visual Studio 时发起授权表示关联当前账号，回调必须仍为同一账号；未登录则登录已绑定账号或创建独立本地身份。
-- ModelJetty access/refresh token 使用 `CREDENTIAL_KEK` 加密保存到 D1，不进入浏览器 localStorage、API 响应或 Queue 消息。
+- ModelJetty access/refresh token 加密保存到 D1，不进入浏览器 localStorage、API 响应或 Queue 消息。配置共享 `VS_JOB_CREDENTIAL_KEK` 时，以独立用途派生的封装密钥供 Pages/Queue 读取；兼容已有 `CREDENTIAL_KEK` 连接，并在正常刷新时迁移到共享封装。
 - 提交队列作业时固定服务商和凭据快照。托管作业只封存连接标记，执行时从该作业所属用户的连接读取/刷新短期 access token。凭据失效后报错，不切换到别人的 Key 或默认服务商。
 - Refresh token 轮换用 D1 CAS 锁；锁竞争返回 409。交换超时、进程中断或结果不明后要求重新授权，不重发可能已消费的 refresh token。
 - `/api/account/modeljetty` 登录后读取 `/account/me` 和 `/account/allowance`，展示 ModelJetty 返回的 CNY 可用钱包余额；不把 API token 的“无限额度”误称为用户余额。余额读取失败不显示估算值。
-- Visual Studio 退出只结束本地登录，保留用户明确建立的账号关联；再次使用需要登录。此版本未实现解除关联或远程注销所有 ModelJetty 会话。
+- Visual Studio 退出只结束本地登录，保留用户明确建立的账号关联；再次使用需要登录。可单独撤销当前应用的 ModelJetty 授权，保留身份归属供重新关联；不会注销账号的其他客户端。
 
 ## 生产能力边界与本地验证
 
@@ -50,8 +50,8 @@
 | `MODELJETTY_CLIENT_ID` | ModelJetty 已登记的专用 Web client |
 | `MODELJETTY_CLIENT_SECRET` | 若登记机密客户端，配置对应 secret |
 | `MODELJETTY_REDIRECT_URI` | 精确 callback，必须与当前站点 origin 一致 |
-| `CREDENTIAL_KEK` | 强随机 secret；Pages 和 Queue worker 必须一致，用于账号连接和账号 Key |
-| `VS_JOB_CREDENTIAL_KEK` | 可选单独作业加密 secret；若使用，两端必须一致 |
+| `CREDENTIAL_KEK` | Pages 账号 API Key 和授权 state 的加密 secret；保留旧值，避免现存账号配置不可读。未配置独立共享作业密钥时也作为连接封装的兼容值 |
+| `VS_JOB_CREDENTIAL_KEK` | Pages/Queue 必须一致的共享作业密钥；配置后也以独立用途封装新 ModelJetty 连接，使 Queue 无需读取旧账号 API Key 密钥即可使用托管算力 |
 | `MODELJETTY_IMAGE_TASKS_ENABLED` | 默认关闭，仅在异步契约真实验收后设为 `true` |
 | `MODELJETTY_IMAGE_MODEL_MAP` | JSON，将前端 modelId 映射为已验收的 ModelJetty 模型 ID |
 

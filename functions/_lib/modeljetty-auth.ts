@@ -12,6 +12,23 @@ type Flow = { verifier: string; nonce: string; returnTo: string; userId: string 
 type Tokens = { accessToken: string; refreshToken: string; expiresAt: number }
 const fault = (message: string, status = 503) => Object.assign(new Error(message), { status })
 
+// Managed account connections are used by Pages and Queue. Reuse their existing
+// shared job key with a separate encryption purpose, without rotating the Pages
+// account-key secret or making old user API-key records unreadable.
+function tokenSealSecret(env: Env): string {
+  if (env.VS_JOB_CREDENTIAL_KEK) return `visual-studio/modeljetty-token/v1:${env.VS_JOB_CREDENTIAL_KEK}`
+  if (env.CREDENTIAL_KEK) return env.CREDENTIAL_KEK
+  throw fault('ModelJetty 连接加密密钥未配置', 503)
+}
+
+async function readTokens(env: Env, ciphertext: string): Promise<Tokens> {
+  const secrets = [...new Set([tokenSealSecret(env), env.CREDENTIAL_KEK].filter(Boolean))]
+  for (const secret of secrets) {
+    try { return await unsealJson<Tokens>(ciphertext, secret) } catch { /* Legacy Pages-encrypted connection. */ }
+  }
+  throw fault('ModelJetty 连接密钥不匹配，请重新授权', 401)
+}
+
 function base64url(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
@@ -136,7 +153,7 @@ export async function finishModeljettyLogin(env: Env, request: Request) {
     newUser = { id: createId('user'), email: `${await sha256Hex(`${config.issuer}|${claims.sub}`)}@modeljetty.invalid`, name: String(profile.user.name || 'ModelJetty 用户').slice(0, 100), passwordHash: '', passwordSalt: '', createdAt: now, updatedAt: now }
     user = newUser
   }
-  await saveExternalIdentity(env, { issuer: config.issuer, subject: claims.sub, userId: user.id, ciphertext: await sealJson(tokens, env.CREDENTIAL_KEK), expiresAt: tokens.expiresAt }, newUser)
+  await saveExternalIdentity(env, { issuer: config.issuer, subject: claims.sub, userId: user.id, ciphertext: await sealJson(tokens, tokenSealSecret(env)), expiresAt: tokens.expiresAt }, newUser)
   const login = await createLoginResponse(env, user, request)
   const headers = new Headers({ Location: safeReturnTo(flow.returnTo), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' })
   headers.append('Set-Cookie', login.setCookie)
@@ -149,15 +166,15 @@ export async function loadModeljettyTokens(env: Env, userId: string): Promise<To
   let record = await getExternalIdentity(env, config.issuer, { userId })
   if (!record) return null
   if (record.expiresAt === -1 && !record.ciphertext) return null
-  if (!env.CREDENTIAL_KEK || !record.ciphertext) throw fault('ModelJetty 连接已失效，请重新授权', 401)
-  let tokens = await unsealJson<Tokens>(record.ciphertext, env.CREDENTIAL_KEK)
+  if (!record.ciphertext) throw fault('ModelJetty 连接已失效，请重新授权', 401)
+  let tokens = await readTokens(env, record.ciphertext)
   if (tokens.expiresAt > Date.now() + 60_000) return tokens
   if (!tokens.refreshToken) throw fault('ModelJetty 登录已过期，请重新授权', 401)
   if (!await claimIdentityRefresh(env, record)) {
     // Read once: another request may already have completed the rotation.
     record = await getExternalIdentity(env, config.issuer, { userId })
     if (record?.ciphertext) {
-      tokens = await unsealJson<Tokens>(record.ciphertext, env.CREDENTIAL_KEK)
+      tokens = await readTokens(env, record.ciphertext)
       if (tokens.expiresAt > Date.now() + 60_000) return tokens
     }
     throw Object.assign(fault('ModelJetty 连接正在刷新，请稍后再试', 409), { code: 'MODELJETTY_REFRESH_BUSY' })
@@ -166,7 +183,7 @@ export async function loadModeljettyTokens(env: Env, userId: string): Promise<To
     const data = await tokenRequest(env, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken }))
     const next = parseTokens(data)
     if (!next.refreshToken) throw fault('ModelJetty 未返回轮换令牌，请重新授权', 401)
-    if (!await finishIdentityRefresh(env, record, await sealJson(next, env.CREDENTIAL_KEK), next.expiresAt)) throw fault('ModelJetty 账号连接已变化，请重试', 409)
+    if (!await finishIdentityRefresh(env, record, await sealJson(next, tokenSealSecret(env)), next.expiresAt)) throw fault('ModelJetty 账号连接已变化，请重试', 409)
     return next
   } catch (error) {
     // Unknown rotation outcomes must not replay a possibly consumed refresh token.
@@ -193,8 +210,8 @@ export async function disconnectModeljetty(env: Env, userId: string) {
   const config = modeljettyConfig(env)
   const record = await getExternalIdentity(env, config.issuer, { userId })
   if (!record || record.expiresAt === -1) return { connected: false, revoked: true }
-  if (!record.ciphertext || !env.CREDENTIAL_KEK) throw fault('连接状态待确认，请重新授权后断开', 409)
-  const tokens = await unsealJson<Tokens>(record.ciphertext, env.CREDENTIAL_KEK)
+  if (!record.ciphertext) throw fault('连接状态待确认，请重新授权后断开', 409)
+  const tokens = await readTokens(env, record.ciphertext)
   if (tokens.expiresAt > Date.now()) {
     const data = await requestJson(`${config.origin}/account/authorization`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokens.accessToken}` } })
     if (data.revoked !== true || data.scope !== 'current_client' || data.client_id !== config.clientId) throw fault('服务商未确认撤销当前应用授权', 502)

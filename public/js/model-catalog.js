@@ -7,11 +7,23 @@ export function modelVendorLabel(value) {
 export function agentModelUnavailableReason(model) {
   if (model.kind === 'image' || model.capabilities?.textInput === false) return '生图模型，不能用于 Agent'
   if (!['openai', 'chat', 'openai-responses', 'responses'].includes(model.protocol)) return '当前工作台暂未支持此调用协议'
-  if (model.available === false) {
-    const reasons = { key_model_not_allowed: '当前 Key 未开通', membership_required: '需要对应会员权益', paid_model_access_required: '需要付费模型权限', plan_not_allowed: '当前套餐暂不可用' }
+  return modelAvailabilityReason(model)
+}
+
+export function modelAvailabilityReason(model) {
+  if (model?.available === false) {
+    const reasons = { key_model_not_allowed: '当前 Key 未开通', membership_required: '需要对应会员权益', membership_or_paid_access_required: '需要会员或付费模型权限', paid_model_access_required: '需要付费模型权限', plan_not_allowed: '当前套餐暂不可用' }
     return Object.hasOwn(reasons, model.unavailableReason) ? reasons[model.unavailableReason] : '当前账号暂不可用'
   }
   return ''
+}
+
+export function imageModelChoices(options, catalog) {
+  return options.map(option => {
+    const model = catalog?.find(model => model.id === option.id)
+    const reason = catalog ? model ? modelAvailabilityReason(model) : '当前账号未开放此模型' : ''
+    return { ...option, disabled: Boolean(reason), unavailableReason: reason }
+  })
 }
 
 export function groupModelCatalog(models, search = '') {

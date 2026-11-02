@@ -16,6 +16,7 @@ async function harness() {
   await build({ stdin: { contents: `
     export * from './functions/_shared.ts'
     export * from './functions/_lib/modeljetty-auth.ts'
+    export {assertManagedImageModelAvailable} from './functions/_lib/model-provider.ts'
     export * from './functions/_lib/user-api-keys.ts'
     export * from './functions/_lib/auth.ts'
     export * from './functions/_lib/v2-store.ts'
@@ -541,4 +542,37 @@ test('queued Agent planning preserves the trusted account-inference authenticati
     assert.equal(result.status,200)
     assert.deepEqual(calls,['https://modeljetty.com/account/inference/v1/chat/completions'])
   } finally {await cleanup()}
+}))
+
+test('managed connection refresh migrates to the shared Queue key without rotating existing account encryption', async () => withFetch(async () => {
+  const {mod,cleanup}=await harness()
+  const env={...environment(),VS_JOB_CREDENTIAL_KEK:'existing-shared-queue-key'}
+  const user=await mod.createUser(env,{email:'shared-managed-key@example.test',passwordHash:'',passwordSalt:''})
+  await mod.saveUserClientKeys(env,user.id,{visionApiKey:'legacy-account-key-stays-readable'})
+  const legacy=await mod.sealJson({accessToken:'expired',refreshToken:'original-refresh',expiresAt:Date.now()-1000},env.CREDENTIAL_KEK)
+  await mod.saveExternalIdentity(env,{issuer:'https://modeljetty.com/oidc',subject:'shared-connection',userId:user.id,ciphertext:legacy,expiresAt:Date.now()-1000})
+  let calls=0
+  globalThis.fetch=async(url,init)=>{calls++;assert.equal(url,'https://modeljetty.com/oidc/token');assert.equal(new URLSearchParams(init.body).get('refresh_token'),'original-refresh');return response({access_token:'rotated-access',refresh_token:'rotated-refresh',expires_in:900,token_type:'Bearer',scope:'openid models:invoke offline_access'})}
+  try {
+    assert.equal((await mod.loadModeljettyTokens(env,user.id)).accessToken,'rotated-access')
+    const queueEnv={MODELJETTY_CLIENT_ID:'visual-studio',VS_JOB_CREDENTIAL_KEK:env.VS_JOB_CREDENTIAL_KEK}
+    assert.equal((await mod.loadModeljettyTokens(queueEnv,user.id)).accessToken,'rotated-access')
+    assert.equal(calls,1)
+    assert.equal((await mod.loadUserClientKeys(env,user.id)).visionApiKey,'legacy-account-key-stays-readable')
+    await assert.rejects(mod.loadModeljettyTokens({...queueEnv,VS_JOB_CREDENTIAL_KEK:'wrong-key'},user.id),/密钥不匹配/)
+  }finally{await cleanup()}
+}))
+
+
+test('unavailable managed image model is rejected by read-only catalog before paid planning', async () => withFetch(async () => {
+  const {mod,cleanup}=await harness()
+  const calls=[]
+  globalThis.fetch=async(url,init)=>{calls.push({url,method:init.method || 'GET'});return response({models:[{id:'gpt-image-2.5-flare',available:false,unavailableReason:'paid_model_access_required'}]})}
+  try {
+    const keys={provider:'modeljetty',modeljettyManaged:'true',modeljettyApiKey:'fixture-account'}
+    await assert.rejects(mod.assertManagedImageModelAvailable({},keys,'gpt-image-2.5-flare'),{status:403})
+    assert.deepEqual(calls,[{url:'https://modeljetty.com/account/model-catalog',method:'GET'}])
+    await mod.assertManagedImageModelAvailable({},{provider:'modeljetty',modeljettyApiKey:'manual-key'},'gpt-image-2.5-flare')
+    assert.equal(calls.length,1)
+  }finally{await cleanup()}
 }))

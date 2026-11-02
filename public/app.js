@@ -6,7 +6,7 @@ import { createAgentRunRecord, createAgentManifestDialog } from './js/design-age
 import { agentMarkdownToHtml } from './js/agent-markdown.js'
 import { planAgentReferenceAddition } from './js/agent-references.js'
 import { getCanvasJobDisplayStatus } from './js/canvas-job-progress.js'
-import { groupModelCatalog, agentModelUnavailableReason } from './js/model-catalog.js'
+import { groupModelCatalog, agentModelUnavailableReason, imageModelChoices } from './js/model-catalog.js'
 import { createUiIcon, filterProjects, getCanvasFit, mergeWorkspaceSections } from './js/workspace-ui.js'
 import { loadPsdLibrary } from './js/psd-loader.js'
 import {
@@ -7202,7 +7202,11 @@ async function sendCanvasAiMessage() {
       canvasAgentWatcher.start(run.projectId, ownerId, true)
     }
   } catch (error) {
-    if (assistantMsg) { assistantMsg.loading = false; assistantMsg.run.phase = 'awaiting_result'; assistantMsg.run.error = trimError(error); assistantMsg.content = `任务提交未确认：${trimError(error)}。请刷新读取原任务。` }
+    if (assistantMsg) {
+      const rejected = [400,401,403,413,422,429].includes(Number(error.status))
+      assistantMsg.loading = false; assistantMsg.run.phase = rejected ? 'failed' : 'awaiting_result'; assistantMsg.run.error = trimError(error)
+      assistantMsg.content = rejected ? `任务未提交：${trimError(error)}` : `任务提交未确认：${trimError(error)}。请刷新读取原任务。`
+    }
     else { state.notice.message = trimError(error); state.notice.tone = ''; renderAppNotice() }
   } finally {
     if (!accepted) { state.generate.aiRunning = false; state.generate.activeAgentRun = null }
@@ -10756,10 +10760,16 @@ function closeDropdowns() {
 
 function populateModelSelects() {
   renderAgentModelInfo()
-  const models = state.keys.provider === 'modeljetty' ? MODELJETTY_MODEL_OPTIONS : MODEL_OPTIONS
-  const valid = new Set(models.map(model => model.id))
+  const catalog = state.account?.modelCatalog
+  const managed = state.keys.provider === 'modeljetty' && state.account?.modeljetty?.connected
+    && !state.keys.modeljettyApiKey && !state.account.apiKeys?.keys?.modeljettyApiKey?.saved
+  const models = state.keys.provider === 'modeljetty'
+    ? imageModelChoices(MODELJETTY_MODEL_OPTIONS, managed && catalog?.status === 'ready' && catalog.ownerId === state.account.user?.id ? catalog.models : null)
+    : MODEL_OPTIONS
+  const valid = new Set(models.filter(model => !model.disabled).map(model => model.id))
+  const fallback = models.find(model => !model.disabled)?.id || models[0].id
   for (const view of [state.translate, state.generate, state.outfit, state.style, state.aiTest]) {
-    if (view && !valid.has(view.model)) view.model = models[0].id
+    if (view && !valid.has(view.model)) view.model = fallback
   }
   if (!valid.has(state.generate.genModel)) state.generate.genModel = state.generate.model
   for (const select of [dom.tModel, dom.gModel, dom.oModel, dom.sModel, dom.gAiModel, dom.aiTestModel]) {
@@ -10768,11 +10778,12 @@ function populateModelSelects() {
     select.replaceChildren(...models.map((model) => {
       const option = document.createElement('option')
       option.value = model.id
-      option.textContent = model.label
-      option.title = `${model.label} · ${model.hint}`
+      option.disabled = Boolean(model.disabled)
+      option.textContent = model.unavailableReason ? `${model.label}（${model.unavailableReason}）` : model.label
+      option.title = `${model.label} · ${model.unavailableReason || model.hint}`
       return option
     }))
-    select.value = valid.has(previous) ? previous : models[0].id
+    select.value = valid.has(previous) ? previous : fallback
   }
 }
 
@@ -13190,6 +13201,8 @@ async function loadModeljettyModelCatalog(force = false) {
     catalog.status = 'error'; catalog.error = trimError(error)
   }
   renderModeljettyModelChoices()
+  populateModelSelects()
+  if (state.activeView === 'generate') renderGenerate()
 }
 
 function renderModeljettyModelChoices(selectedValue) {
