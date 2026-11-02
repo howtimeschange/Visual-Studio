@@ -12,6 +12,12 @@ type Flow = { verifier: string; nonce: string; returnTo: string; userId: string 
 type Tokens = { accessToken: string; refreshToken: string; expiresAt: number }
 const fault = (message: string, status = 503) => Object.assign(new Error(message), { status })
 
+function flowSealSecret(env: Env): string {
+  if (env.VS_JOB_CREDENTIAL_KEK) return `visual-studio/modeljetty-flow/v1:${env.VS_JOB_CREDENTIAL_KEK}`
+  if (env.CREDENTIAL_KEK) return env.CREDENTIAL_KEK
+  throw fault('ModelJetty 连接加密密钥未配置', 503)
+}
+
 // Managed account connections are used by Pages and Queue. Reuse their existing
 // shared job key with a separate encryption purpose, without rotating the Pages
 // account-key secret or making old user API-key records unreadable.
@@ -109,7 +115,7 @@ export async function verifyModeljettyIdToken(env: Env, raw: string, nonce: stri
 
 export async function startModeljettyLogin(env: Env, request: Request) {
   const config = modeljettyConfig(env)
-  if (!config.clientId || !config.redirectUri || !env.CREDENTIAL_KEK) throw fault('ModelJetty 联合登录尚未配置')
+  if (!config.clientId || !config.redirectUri || !(env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)) throw fault('ModelJetty 联合登录尚未配置')
   if (!env.VS_DB && new URL(request.url).protocol === 'https:') throw fault('ModelJetty 联合登录需要 D1 持久化')
   const callback = new URL(config.redirectUri)
   const requestUrl = new URL(request.url)
@@ -117,7 +123,7 @@ export async function startModeljettyLogin(env: Env, request: Request) {
   const auth = await getAuthContext(env, request)
   const state = randomToken()
   const flow: Flow = { verifier: randomToken(), nonce: randomToken(), userId: auth.user?.id || null, returnTo: safeReturnTo(requestUrl.searchParams.get('returnTo')) }
-  await putOAuthFlow(env, await sha256Hex(state), await sealJson(flow, env.CREDENTIAL_KEK), Date.now() + 600_000)
+  await putOAuthFlow(env, await sha256Hex(state), await sealJson(flow, flowSealSecret(env)), Date.now() + 600_000)
   const url = new URL(`${config.issuer}/auth`)
   url.search = new URLSearchParams({ client_id: config.clientId, redirect_uri: config.redirectUri, response_type: 'code', scope: 'openid offline_access models:invoke', prompt: 'consent',
     state, nonce: flow.nonce, code_challenge_method: 'S256', code_challenge: base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(flow.verifier)))) }).toString()
@@ -126,14 +132,19 @@ export async function startModeljettyLogin(env: Env, request: Request) {
 
 export async function finishModeljettyLogin(env: Env, request: Request) {
   const config = modeljettyConfig(env)
-  if (!config.clientId || !config.redirectUri || !env.CREDENTIAL_KEK) throw fault('ModelJetty 联合登录尚未配置')
+  if (!config.clientId || !config.redirectUri || !(env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)) throw fault('ModelJetty 联合登录尚未配置')
   const url = new URL(request.url)
   const state = url.searchParams.get('state') || ''
   const cookie = /(?:^|;\s*)vs_modeljetty_flow=([A-Za-z0-9_-]+)/.exec(request.headers.get('Cookie') || '')?.[1]
   if (!state || state !== cookie) throw fault('ModelJetty state mismatch，请重新登录', 400)
   const encrypted = await consumeOAuthFlow(env, await sha256Hex(state))
   if (!encrypted) throw fault('ModelJetty 授权已过期或已使用', 400)
-  const flow = await unsealJson<Flow>(encrypted, env.CREDENTIAL_KEK)
+  let flow: Flow
+  try { flow = await unsealJson<Flow>(encrypted, flowSealSecret(env)) }
+  catch (error) {
+    if (!env.CREDENTIAL_KEK) throw error
+    flow = await unsealJson<Flow>(encrypted, env.CREDENTIAL_KEK)
+  }
   const auth = await getAuthContext(env, request)
   if ((auth.user?.id || null) !== flow.userId) throw fault('授权期间账号发生变化，请重新登录', 409)
   if (url.searchParams.get('error') || !url.searchParams.get('code') || (url.searchParams.has('iss') && url.searchParams.get('iss') !== config.issuer)) throw fault('ModelJetty 授权未完成', 400)

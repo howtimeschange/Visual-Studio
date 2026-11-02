@@ -181,7 +181,7 @@ export async function getAuthPayload(env: Env, request: Request) {
   const issuer = `${(env.MODELJETTY_ORIGIN || 'https://modeljetty.com').replace(/\/+$/, '')}/oidc`
   const identity = auth.user ? await getExternalIdentity(env, issuer, { userId: auth.user.id }) : null
   return { user: auth.user, usage, modeljetty: {
-    loginEnabled: Boolean(env.MODELJETTY_CLIENT_ID && env.MODELJETTY_REDIRECT_URI && env.CREDENTIAL_KEK),
+    loginEnabled: Boolean(env.MODELJETTY_CLIENT_ID && env.MODELJETTY_REDIRECT_URI && (env.CREDENTIAL_KEK || env.VS_JOB_CREDENTIAL_KEK)),
     connected: Boolean(identity && identity.expiresAt !== -1),
     imageTasksEnabled: env.MODELJETTY_IMAGE_TASKS_ENABLED === 'true',
     agentModel: resolveAgentModel(env, { provider: 'modeljetty' }),

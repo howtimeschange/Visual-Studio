@@ -223,7 +223,7 @@ test('OIDC start uses PKCE S256, nonce, server-side single-use state and safe re
 test('OIDC callback verifies signature and subject, creates a separate local identity and never returns credentials', async () => withFetch(async () => {
   const { mod, cleanup } = await harness()
   const signer = await signing()
-  const env = environment()
+  const env = { ...environment(), CREDENTIAL_KEK: undefined, VS_JOB_CREDENTIAL_KEK: 'shared-flow-and-token-key' }
   try {
     const existing = await mod.createUser(env, { email: 'same@example.com', name: 'Existing', passwordHash: 'hash', passwordSalt: 'salt' })
     const flow = await begin(mod, env)
@@ -253,6 +253,7 @@ test('OIDC callback verifies signature and subject, creates a separate local ide
     const cookie = result.headers.get('Set-Cookie').match(/vs_auth=([^;]+)/)[0]
     const payload = await mod.getAuthPayload(env, new Request('http://localhost/api/auth/me', { headers: { Cookie: cookie } }))
     assert.equal(payload.modeljetty.connected, true)
+    assert.equal(payload.modeljetty.loginEnabled, true, 'The shared Queue key supports login without rotating account encryption')
     assert.doesNotMatch(JSON.stringify(payload), /server-only-/)
     const keys = await mod.mergeUserClientKeys(env, identity.userId, {})
     assert.equal(keys.modeljettyApiKey, 'server-only-access')
