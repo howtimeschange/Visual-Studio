@@ -52,6 +52,9 @@ max_retries = 3
 
 [vars]
 VS_IMAGE_TASK_POLL_INTERVAL_MS = "3000"
+# Keep a bounded 15-second receipt-query window in one delivery instead of
+# repeatedly paying the queue/credential/state-write overhead for the same job.
+VS_GENERATE_TASK_MAX_POLLS_PER_RUN = "6"
 MODELJETTY_ORIGIN = "https://modeljetty.com"
 MODELJETTY_CLIENT_ID = "visual-studio"
 MODELJETTY_AGENT_MODEL = "gemini-3.8-flash-medium"

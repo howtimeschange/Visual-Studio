@@ -6399,6 +6399,7 @@ async function executeCanvasGenerate() {
         resolution: state.generate.genResolution,
         hasReferenceImages: refImages.length > 0,
         referenceImages: refImages,
+        referenceStrategy: 'combined',
         clientKeys: { ...state.keys },
       })
       state.runtime.sessionId = agentData.sessionId || state.runtime.sessionId

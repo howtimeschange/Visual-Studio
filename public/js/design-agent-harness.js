@@ -43,7 +43,7 @@ export function serializeDesignAgentRun(value, { restore = false } = {}) {
     startedAt: Number(value.startedAt) || null, endedAt: Number(value.endedAt) || null,
     stopRequested: Boolean(value.stopRequested), context: normalizeContext(value.context),
     requestId: clean(value.requestId, 160), referenceRequestId: clean(value.referenceRequestId, 160), error: clean(value.error, 600),
-    timings: value.timings ? Object.fromEntries(['planningMs', 'referenceMs', 'totalMs', 'modelCalls'].map((key) => [key, Math.max(0, Number(value.timings[key]) || 0)])) : null,
+    timings: value.timings ? Object.fromEntries(['planningMs', 'referenceMs', 'totalMs', 'modelCalls', 'firstImageMs', 'queueMs'].filter(key => value.timings[key] != null).map((key) => [key, Math.max(0, Number(value.timings[key]) || 0)])) : null,
     skill: value.skill ? { id: clean(value.skill.id, 80), label: clean(value.skill.label, 80), source: clean(value.skill.source, 160),
       qualityChecklist: Array.isArray(value.skill.qualityChecklist) ? value.skill.qualityChecklist.slice(0, 8).map((item) => clean(item, 240)) : [] } : null,
     tasks: (Array.isArray(value.tasks) ? value.tasks : []).filter((task) => task && typeof task === 'object').slice(0, AGENT_TASK_LIMIT).map((task) => ({
@@ -51,7 +51,7 @@ export function serializeDesignAgentRun(value, { restore = false } = {}) {
       aspectRatio: clean(task.aspectRatio, 12), resolution: clean(task.resolution, 8), creativeMode: 'image',
       status: TASK_STATES.has(task.status) ? task.status : 'unknown',
       delivery: sanitizeReview(task.delivery), quality: sanitizeReview(task.quality),
-      timings: task.timings ? { resultTransferMs: Math.max(0, Number(task.timings.resultTransferMs) || 0) } : null,
+      timings: task.timings ? Object.fromEntries(['resultTransferMs', 'reviewMs'].filter(key => task.timings[key] != null).map(key => [key, Math.max(0, Number(task.timings[key]) || 0)])) : null,
       jobId: clean(task.jobId, 160), elementId: clean(task.elementId, 160), assetId: clean(task.assetId, 160), error: clean(task.error, 600),
     })),
     events: (Array.isArray(value.events) ? value.events : []).filter((event) => event && typeof event === 'object').slice(-40).map((event) => ({

@@ -2213,6 +2213,7 @@ export async function submitGenerateDirectJob(
   body: any,
   waitUntil?: WaitUntil,
   stableJobId?: string,
+  parentAgentJobId?: string,
 ) {
   const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
   const session = await ensureSession(env, body?.sessionId, userId)
@@ -2235,6 +2236,7 @@ export async function submitGenerateDirectJob(
     status: 'queued',
     configJson: {
       inputProjectId: String(body?.projectId || ''),
+      ...(parentAgentJobId ? { parentAgentJobId } : {}),
       ...request,
       referenceAssetIds: request.referenceEntries.map((entry) => entry.assetId),
       sealedCredentialId,
@@ -2383,6 +2385,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       progressDone: 1,
       summaryJson: { resultAssetId: resultAsset.id, timings:result.timings },
     })
+    await wakeParentAgent(env, initialJob)
     await publishEvent(env, 'item', claimedItem.id, 'item_completed', {
       jobId,
       resultAssetId: resultAsset.id,
@@ -2414,6 +2417,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       progressFailed: 1,
       summaryJson: { error: String(error?.message || 'Generate failed') },
     })
+    await wakeParentAgent(env, initialJob)
     await publishEvent(env, 'item', claimedItem.id, 'item_failed', {
       jobId,
       error: String(error?.message || 'Generate failed'),
@@ -2423,6 +2427,22 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
       error: String(error?.message || 'Generate failed'),
     })
   }
+}
+
+async function wakeParentAgent(env: Env, child: JobRecord) {
+  const parentId = String(child.configJson.parentAgentJobId || '')
+  if (!parentId) return
+  // A wake-up is a hint, never permission to replay the image or change its
+  // successful status. The persisted parent monitor/cron remain the fallback.
+  try {
+    const parent = await getJob(env, parentId)
+    const tasks = (parent?.summaryJson.run as any)?.tasks || []
+    if (parent?.type === 'canvas_agent' && parent.userId === child.userId
+      && !TERMINAL_JOB_STATUSES.has(parent.status) && parent.status !== 'paused'
+      && tasks.some((task: any) => task.jobId === child.id)) {
+      await scheduleJobExecution(env, parent, undefined, 'recover')
+    }
+  } catch { console.warn('Parent Agent wake-up unavailable; durable monitor will recover', parentId) }
 }
 
 async function failQueuedJobSetup(env: Env, job: JobRecord, error: any) {

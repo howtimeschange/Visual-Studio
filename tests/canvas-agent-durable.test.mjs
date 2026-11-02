@@ -134,3 +134,54 @@ test('missing run credential pauses safely and public state no longer spins as a
     assert.equal((await mod.listJobItems(env,jobId))[0].status,'queued')
   }finally{await f.cleanup()}
 })
+
+test('pending child monitoring is read-only and completed artwork is visible before review finishes', async () => {
+  const f = await fixture(); const { mod, env, input } = f
+  try {
+    env.plan = async () => Response.json({ shouldGenerate: true, actions: [{ type: 'generate_image', prompt: 'one' }] })
+    const { jobId } = await mod.submitCanvasAgentRun(env, input, 'owner')
+    await mod.runCanvasAgentJob(env, jobId)
+    const parent = await mod.getJob(env, jobId), task = parent.summaryJson.run.tasks[0]
+    const child = await mod.getJob(env, task.jobId)
+    assert.equal(child.configJson.parentAgentJobId, jobId)
+    const [before] = await mod.listJobItems(env, jobId)
+    await mod.runCanvasAgentJob(env, jobId)
+    const [after] = await mod.listJobItems(env, jobId)
+    assert.equal(after.attemptCount, before.attemptCount)
+    assert.equal((await mod.getJob(env, jobId)).updatedAt, parent.updatedAt)
+    const asset = await mod.createAsset(env, { sessionId: 's', userId: 'owner', kind: 'result', dataUrl: 'data:image/png;base64,aW1hZ2U=', width: 1024, height: 1024 })
+    await mod.updateJob(env, child.id, { status: 'completed', summaryJson: { resultAssetId: asset.id } })
+    env.review = async () => {
+      const visible = await mod.getJob(env, jobId)
+      assert.equal(visible.summaryJson.run.tasks[0].assetId, asset.id)
+      assert.ok(visible.summaryJson.run.timings.firstImageMs >= 0)
+      assert.equal((await mod.listCanvasProjectElements(env, input.projectId)).length, 1)
+      return { status: 'passed', issues: [] }
+    }
+    await mod.runCanvasAgentJob(env, jobId)
+    const finished = await mod.getJob(env, jobId)
+    assert.equal(finished.status, 'completed')
+    assert.ok(finished.summaryJson.run.tasks[0].timings.reviewMs >= 0)
+  } finally { await f.cleanup() }
+})
+
+test('image completion wakes its parent without delay; duplicate delivery never regenerates', async () => {
+  const f = await fixture(); const { mod, env, input } = f
+  const originalFetch = globalThis.fetch
+  try {
+    env.plan = async () => Response.json({ shouldGenerate: true, actions: [{ type: 'generate_image', prompt: 'one' }] })
+    const { jobId } = await mod.submitCanvasAgentRun(env, input, 'owner')
+    await mod.runCanvasAgentJob(env, jobId)
+    const task = (await mod.getJob(env, jobId)).summaryJson.run.tasks[0]
+    let calls = 0
+    globalThis.fetch = async () => { calls++; return Response.json({ status: 'succeeded', data: [{ b64_json: 'aW1hZ2U=' }] }) }
+    const before = f.messages.length
+    await mod.runQueuedJob(env, task.jobId)
+    assert.equal((await mod.getJob(env, task.jobId)).status, 'completed')
+    const wakes = f.messages.slice(before).filter(m => m.jobId === jobId)
+    assert.equal(wakes.length, 1)
+    assert.equal(wakes[0].delaySeconds, undefined)
+    await mod.runQueuedJob(env, task.jobId)
+    assert.equal(calls, 1)
+  } finally { globalThis.fetch = originalFetch; await f.cleanup() }
+})

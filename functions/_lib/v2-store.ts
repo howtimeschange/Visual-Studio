@@ -278,8 +278,9 @@ function inferMimeFromDataUrl(dataUrl: string): string {
 }
 
 function byteLengthFromDataUrl(dataUrl: string): number {
-  const payload = String(dataUrl || '').split(',', 2)[1] || ''
-  return Math.floor((payload.length * 3) / 4)
+  const payload = (String(dataUrl || '').split(',', 2)[1] || '').replace(/\s/g, '')
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding)
 }
 
 function normalizeAssetDimension(value: unknown): number | null {

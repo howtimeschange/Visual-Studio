@@ -37,7 +37,7 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
     summary.append(createUiIcon(run.phase === 'completed' ? 'check' : 'circle-help'))
     summary.append(element('strong', '', run.tasks.length ? `执行记录 · ${complete}/${run.tasks.length} 张` : AGENT_PHASE_LABELS[run.phase]))
   }
-  if (run.startedAt && run.endedAt && run.endedAt >= run.startedAt) summary.append(element('span', 'agent-run-duration', run.endedAt - run.startedAt < 1000 ? '不足 1 秒' : `${Math.round((run.endedAt - run.startedAt) / 1000)} 秒`))
+  if (run.startedAt && run.endedAt && run.endedAt >= run.startedAt) summary.append(element('span', 'agent-run-duration', run.endedAt - run.startedAt < 1000 ? '全流程不足 1 秒' : `全流程 ${Math.round((run.endedAt - run.startedAt) / 1000)} 秒`))
   summary.append(createUiIcon('chevron-down'))
   details.append(summary)
   const body = element('div', 'agent-run-body')
@@ -47,6 +47,7 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
   context.append(element('span', '', `${run.context.referenceCount} 张参考 · ${run.context.elementCount} 个画布元素`))
   body.append(context)
   if (run.execution === 'server') body.append(element('p', 'agent-run-context', '服务端持续执行 · 刷新或关闭页面后可恢复'))
+  if (run.timings?.firstImageMs != null) body.append(element('p', 'agent-run-context', `首图已保存 ${Math.round(run.timings.firstImageMs / 1000)} 秒 · 后续独立质检期间可查看和下载`))
   if (run.timings?.planningMs) body.append(element('p', 'agent-run-context', `规划 ${Math.round(run.timings.planningMs / 1000)} 秒 · ${run.timings.modelCalls} 次模型请求`))
   if (run.tasks.length) {
     const list = element('ol', 'agent-task-list')
@@ -57,7 +58,7 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
       const head = element('div', 'agent-task-head')
       head.append(element('span', 'agent-task-status', labels[task.status] || '待确认'), element('strong', '', task.title))
       row.append(head)
-      if (task.timings) row.append(element('p', 'agent-delivery', `结果传输 ${(task.timings.resultTransferMs / 1000).toFixed(1)} 秒`))
+      if (task.timings?.resultTransferMs != null) row.append(element('p', 'agent-delivery', `结果传输 ${(task.timings.resultTransferMs / 1000).toFixed(1)} 秒${task.timings.reviewMs != null ? ` · 独立质检 ${(task.timings.reviewMs / 1000).toFixed(1)} 秒` : ''}`))
       if (task.delivery) {
         row.append(element('p', 'agent-delivery', `实际 ${task.delivery.width || '?'}×${task.delivery.height || '?'} px · 所选 ${(task.delivery.requestedResolution || task.resolution || '').toUpperCase()} / ${task.aspectRatio || '1:1'}（检查最低长边 ${task.delivery.targetLongEdge || ({'1k':1024,'2k':2048,'4k':4096})[task.resolution] || 1024}px 与比例）`))
         for (const issue of task.delivery.issues || []) row.append(element('p', 'agent-task-error', issue))

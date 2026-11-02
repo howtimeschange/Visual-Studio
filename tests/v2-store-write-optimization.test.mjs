@@ -12,6 +12,8 @@ async function importStore() {
     stdin: {
       contents: `
         export {
+          createAsset,
+          ensureSession,
           replaceCanvasProjectElements,
           touchAuthSession,
           updateCanvasProject,
@@ -30,6 +32,20 @@ async function importStore() {
   const mod = await import(`${pathToFileURL(path.join(outdir, 'v2-store.mjs')).href}?t=${Date.now()}`)
   return { mod, cleanup: () => rm(outdir, { recursive: true, force: true }) }
 }
+
+test('asset size matches stored bytes for padded, unpadded and whitespace-containing base64', async () => {
+  const { mod, cleanup } = await importStore()
+  const writes = []
+  const env = { VS_INPUTS_BUCKET: { put: async (_key, bytes) => writes.push(bytes.byteLength) } }
+  try {
+    const session = await mod.ensureSession(env)
+    for (const payload of ['Zg==', 'Zm8=', 'Zm9v', 'Zg', 'Z m\n8=']) {
+      const record = await mod.createAsset(env, { sessionId: session.id, kind: 'upload', mime: 'application/octet-stream', dataUrl: `data:application/octet-stream;base64,${payload}` })
+      assert.equal(record.sizeBytes, Buffer.from(payload, 'base64').length)
+      assert.equal(record.sizeBytes, writes.at(-1))
+    }
+  } finally { await cleanup() }
+})
 
 test('touchAuthSession skips D1 writes when last_seen_at was recently refreshed', async () => {
   const { mod, cleanup } = await importStore()

@@ -94,6 +94,16 @@ export async function runCanvasAgentJob(env: Env, id: string) {
   const job = await getJob(env, id)
   if (!job || terminal.has(job.status) || job.status === 'paused') return
   await assertCanEditProject(env, String(job.configJson.inputProjectId), job.userId)
+  // Waiting for a durable child is read-only. Do not decrypt/refresh tokens,
+  // claim an item or rewrite the entire run every time the monitor wakes up.
+  const waitingTask = (job.summaryJson.run as any)?.tasks?.find((t: any) => !['completed', 'skipped'].includes(t.status))
+  if (job.status === 'queued' && waitingTask?.jobId) {
+    const child = await getJob(env, waitingTask.jobId)
+    if (child && ['queued', 'running'].includes(child.status)) {
+      await scheduleJobExecution(env, job, undefined, 'recover', {}, 3000)
+      return
+    }
+  }
   const item = await ensureItem(env, job)
   const keys = await loadJobClientKeys(env, job)
   const claimed = await claimQueuedJobItem(env, id, item.id, { startedAt: now(), attemptCount: item.attemptCount + 1 })
@@ -121,7 +131,7 @@ export async function runCanvasAgentJob(env: Env, id: string) {
   }
   try {
     run.phase = plan ? 'executing' : 'planning'
-    await save()
+    run.stopRequested = Boolean(job.configJson.stopRequested)
     if (run.stopRequested && !plan) { await finish('stopped'); return }
     if (!plan) {
       if (output.planningIntent) { await finish('awaiting_result', '规划请求结果待确认，未自动重发。'); return }
@@ -132,7 +142,7 @@ export async function runCanvasAgentJob(env: Env, id: string) {
       const response = await executeCanvasAgentPlan(env, { ...request, sessionId: job.sessionId }, job.userId!, keys)
       const result: any = await response.json()
       if (!response.ok) throw Object.assign(new Error(result.error || '规划未完成'), { status: response.status })
-      plan = result; run.timings = result.timings; run.skill = result.skill
+      plan = result; run.timings = { ...result.timings, queueMs: Date.parse(output.planningIntent.at) - run.startedAt }; run.skill = result.skill
       run.referenceRequestId = result.referenceRequestId || ''
       const actions = result.shouldGenerate ? (result.actions || []).filter((a: any) => a.type === 'generate_image' && a.prompt) : []
       if (actions.length > 8) throw fault('单次最多生成 8 张图片')
@@ -145,12 +155,13 @@ export async function runCanvasAgentJob(env: Env, id: string) {
     }
     const task = run.tasks.find((t: any) => t.status !== 'completed' && t.status !== 'skipped')
     if (!task) { await finish('completed'); return }
-    await save()
     let child = await getJob(env, task.jobId)
+    // Read the stop flag at the boundary before accepting a paid child.
+    run.stopRequested = Boolean((await getJob(env, id))?.configJson.stopRequested)
     if (run.stopRequested && !child) { await finish('stopped'); return }
     if (!child) {
       const submitted = await submitGenerateDirectJob(env, { ...request, sessionId: job.sessionId, _authUserId: job.userId,
-        prompt: task.prompt, aspectRatio: task.aspectRatio, resolution: task.resolution, useDesignAgent: false, clientKeys: keys }, undefined, task.jobId)
+        prompt: task.prompt, aspectRatio: task.aspectRatio, resolution: task.resolution, useDesignAgent: false, clientKeys: keys }, undefined, task.jobId, job.id)
       task.jobId = submitted.jobId; task.status = 'accepted'
       event(run, 'task_accepted', '图片任务已受理，关闭页面后仍会继续处理', task.id)
       child = await getJob(env, task.jobId)
@@ -182,21 +193,23 @@ export async function runCanvasAgentJob(env: Env, id: string) {
         content: `/api/results/${encodeURIComponent(asset.id)}?projectId=${encodeURIComponent(request.projectId)}`,
         assetId: asset.id, mime: asset.mime, originalWidth: asset.width, originalHeight: asset.height,
         aspectRatio: task.aspectRatio, resolution: task.resolution, prompt: task.prompt, agentRunId: run.id, delivery: task.delivery })
+      run.timings = { ...run.timings, firstImageMs: run.timings?.firstImageMs ?? Date.now() - run.startedAt }
       if (!task.quality) {
         if (output.reviewIntent?.taskId === task.id) task.quality = { status: 'unknown', issues: ['质检请求曾中断，未自动重发'], requestId: output.reviewIntent.requestId }
         else {
           output.reviewIntent = { taskId: task.id, requestId: `${run.id}-review-${i + 1}`, at: now() }
           event(run, 'progress', '作品已保存，正在独立检查画面质量', task.id)
           await save()
+          const reviewStartedAt = Date.now()
           try { task.quality = await reviewGeneratedImage(env, { userId: job.userId!, projectId: request.projectId, assetId: asset.id,
             references: request.referenceImages, prompt: task.prompt, requestId: output.reviewIntent.requestId, clientKeys: keys }) }
           catch (error: any) { task.quality = { status: 'unknown', issues: [clean(error.message, 400)], requestId: output.reviewIntent.requestId } }
+          task.timings = { ...task.timings, reviewMs: Date.now() - reviewStartedAt }
         }
       }
       await patchCanvasAgentReview(env, request.projectId, task.elementId, run.id, task.quality)
       task.status = 'completed'
       event(run, 'task_completed', task.delivery.status === 'passed' && task.quality.status === 'passed' ? '作品已保存，最低像素、比例与视觉检查通过' : '作品已保存，请查看规格和质检提示', task.id)
-      await save()
       if (run.stopRequested) { await finish('stopped'); return }
     } else if (child && ['failed', 'partial_failed', 'cancelled', 'paused'].includes(child.status)) {
       task.status = 'unknown'; task.error = clean(child.summaryJson.error || '图片任务未完成，请先读取原任务')

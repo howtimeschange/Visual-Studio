@@ -186,7 +186,7 @@ Return strict JSON only:
 {
   "reply": "Chinese reply shown in chat",
   "shouldGenerate": true,
-  "prompt": "Legacy first image-generation prompt if shouldGenerate is true, otherwise empty",
+  "prompt": "",
   "mode": "plan|generate|refine|analyze",
   "steps": ["short Chinese step", "..."],
   "suggestions": ["complete Chinese follow-up prompt users can click", "..."],
@@ -223,6 +223,7 @@ Rules:
 - When the user asks for multiple images, variants, a list of prompts, or a series, return one generate_image action per intended output.
 - Do not combine multiple requested outputs into one image unless the user explicitly asks for a collage, contact sheet, grid, or one combined image.
 - Each action must describe exactly one image output and be independently generatable.
+- Put each complete image prompt in actions only. Leave the top-level prompt empty; the host derives it from the first action. Do not repeat prompts in reply, steps or suggestions.
 - When generating, reply in Chinese with one concise sentence naming the chosen style direction.
 - The prompt must be concrete, complete, and image-model-ready. Reflect the user's intent, medium, visual language, composition, palette, material/texture, lighting, typography, readable copy, iconography, and product evidence when relevant; do not force a short prompt when useful detail matters.
 - Do not add blanket "no text" or "empty copy-space" restrictions. If the user's goal needs visible titles, selling points, icons, labels, or detail-page typography, plan those directly in the image prompt.
