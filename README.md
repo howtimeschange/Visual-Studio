@@ -4,6 +4,16 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 
 仓库地址：<https://github.com/howtimeschange/Visual-Studio>
 
+## 合作交流与赞助
+
+欢迎联系作者，交流电商视觉设计、AI 画布、图片批量翻译与品牌素材工作流，探讨场景对接和项目合作，或赞助支持持续开发。
+
+使用微信扫描下方二维码添加作者，备注「品牌视觉工作台 + 合作 / 交流 / 赞助」。
+
+<a href="https://crawshrimp.com/wechat-qr.jpg">
+  <img src="https://crawshrimp.com/wechat-qr.jpg" alt="品牌视觉工作台作者的微信联系二维码，用于合作交流与赞助联系" width="280" />
+</a>
+
 ## 当前能力
 
 - **首页**：OpenLovart 风格的中心对话入口，支持从一句设计需求进入画布；展示已有功能入口和最近画布项目。
