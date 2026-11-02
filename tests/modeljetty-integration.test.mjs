@@ -590,3 +590,22 @@ test('dedicated shared credential key executes queued credentials without requir
     await assert.rejects(mod.unsealJson(sealed.ciphertext,undefined))
   }finally{await cleanup()}
 })
+
+test('dedicated account encryption saves default models while historical configurations remain readable and unchanged', async () => {
+  const {mod,cleanup}=await harness()
+  const legacyEnv={CREDENTIAL_KEK:'historical-account-secret'}
+  const nextEnv={...legacyEnv,MODELJETTY_CREDENTIAL_KEK:'new-shared-secret'}
+  try {
+    const legacy=await mod.createUser(legacyEnv,{email:'legacy-key-read@example.test',passwordHash:'',passwordSalt:''})
+    await mod.saveUserClientKeys(legacyEnv,legacy.id,{visionApiKey:'historical-user-key'})
+    const before=await mod.getUserApiKeys(legacyEnv,legacy.id)
+    assert.equal((await mod.loadUserClientKeys(nextEnv,legacy.id)).visionApiKey,'historical-user-key')
+    assert.equal((await mod.getUserApiKeys(nextEnv,legacy.id)).ciphertext,before.ciphertext)
+    const fresh=await mod.createUser(nextEnv,{email:'new-model-prefs@example.test',passwordHash:'',passwordSalt:''})
+    const managedEnv={MODELJETTY_CREDENTIAL_KEK:nextEnv.MODELJETTY_CREDENTIAL_KEK}
+    await mod.saveUserClientKeys(managedEnv,fresh.id,{provider:'modeljetty',modeljettyAgentModel:'gemini-3.8-flash-medium'})
+    assert.equal((await mod.loadUserClientKeys(managedEnv,fresh.id)).modeljettyAgentModel,'gemini-3.8-flash-medium')
+    const stored=await mod.getUserApiKeys(managedEnv,fresh.id)
+    await assert.rejects(mod.unsealJson(stored.ciphertext,undefined))
+  }finally{await cleanup()}
+})

@@ -76,11 +76,18 @@ export async function loadUserClientKeys(env: Env, userId?: string | null): Prom
   if (!userId) return {}
   const record = await getUserApiKeys(env, userId)
   if (!record?.ciphertext) return {}
-  try {
-    return sanitizeClientKeys(await unsealJson<Record<string, unknown>>(record.ciphertext, env.CREDENTIAL_KEK))
-  } catch {
-    return {}
+  const secrets = [...new Set([accountCredentialSecret(env), env.CREDENTIAL_KEK])]
+  for (const secret of secrets) {
+    try { return sanitizeClientKeys(await unsealJson<Record<string, unknown>>(record.ciphertext, secret)) }
+    catch { /* Read historical account encryption without rewriting the record. */ }
   }
+  return {}
+}
+
+function accountCredentialSecret(env: Env): string | undefined {
+  return env.MODELJETTY_CREDENTIAL_KEK
+    ? `visual-studio/account-keys/v1:${env.MODELJETTY_CREDENTIAL_KEK}`
+    : env.CREDENTIAL_KEK
 }
 
 export async function mergeUserClientKeys(
@@ -116,7 +123,8 @@ export async function getUserApiKeyStatus(env: Env, userId: string) {
 }
 
 export async function saveUserClientKeys(env: Env, userId: string, value: unknown) {
-  if (env.VS_DB && !env.CREDENTIAL_KEK) throw Object.assign(new Error('CREDENTIAL_KEK is required for persistent API keys'), { status: 503 })
+  const secret = accountCredentialSecret(env)
+  if (env.VS_DB && !secret) throw Object.assign(new Error('CREDENTIAL_KEK or MODELJETTY_CREDENTIAL_KEK is required for persistent API keys'), { status: 503 })
   const incomingKeys = sanitizeClientKeys(value)
   if (Object.keys(incomingKeys).length === 0) {
     const error = new Error('At least one API key is required') as Error & { status?: number }
@@ -127,7 +135,7 @@ export async function saveUserClientKeys(env: Env, userId: string, value: unknow
     ...await loadUserClientKeys(env, userId),
     ...incomingKeys,
   }
-  const ciphertext = await sealJson(keys, env.CREDENTIAL_KEK)
+  const ciphertext = await sealJson(keys, secret)
   const record = await upsertUserApiKeys(env, {
     userId,
     ciphertext,
