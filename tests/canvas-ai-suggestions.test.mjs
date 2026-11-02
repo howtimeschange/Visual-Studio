@@ -35,6 +35,13 @@ class FakeElement {
     this.attributes = {}
     this.dataset = {}
     this.className = ''
+    this.classList = { toggle: (name, force) => {
+      const names = new Set(this.className.split(/\s+/).filter(Boolean))
+      const active = force ?? !names.has(name)
+      if (active) names.add(name); else names.delete(name)
+      this.className = [...names].join(' ')
+      return active
+    } }
     this.textContent = ''
     this.type = ''
     this.disabled = false
@@ -97,6 +104,7 @@ async function createHarness() {
     agentMarkdownToHtml,
     canShowAgentSuggestions,
     renderDesignAgentContext: () => {},
+    createUiIcon: () => document.createElement('svg'),
     document,
     state: {
       generate: {

@@ -174,14 +174,48 @@ test('image completion wakes its parent without delay; duplicate delivery never 
     await mod.runCanvasAgentJob(env, jobId)
     const task = (await mod.getJob(env, jobId)).summaryJson.run.tasks[0]
     let calls = 0
-    globalThis.fetch = async () => { calls++; return Response.json({ status: 'succeeded', data: [{ b64_json: 'aW1hZ2U=' }] }) }
+    globalThis.fetch = async () => { calls++; return Response.json({ status: 'succeeded', data: [{ b64_json: 'aW1hZ2U=' }], delivery:{requested:{model:'gpt-image-2.5-flare',quality:'high'},upstream:{quality:'low'},secret:'never-store'} }) }
     const before = f.messages.length
     await mod.runQueuedJob(env, task.jobId)
     assert.equal((await mod.getJob(env, task.jobId)).status, 'completed')
+    const summary = (await mod.getJob(env, task.jobId)).summaryJson
+    assert.equal(summary.providerDelivery.reportedQuality, 'low')
+    assert.equal(JSON.stringify(summary).includes('never-store'), false)
     const wakes = f.messages.slice(before).filter(m => m.jobId === jobId)
     assert.equal(wakes.length, 1)
     assert.equal(wakes[0].delaySeconds, undefined)
     await mod.runQueuedJob(env, task.jobId)
     assert.equal(calls, 1)
   } finally { globalThis.fetch = originalFetch; await f.cleanup() }
+})
+
+test('GPT quality selection does not skip visual review; delivery mismatches keep the original paid result', async () => {
+  const f = await fixture(); const { mod,env,input }=f
+  try {
+    env.plan=async()=>Response.json({shouldGenerate:true,actions:[{type:'generate_image',prompt:'one'}]})
+    const {jobId}=await mod.submitCanvasAgentRun(env,{...input,modelId:'gpt-image-2.5-flare',size:'3840x2160',quality:'high',aspectRatio:'16:9',resolution:'4k',clientKeys:{provider:'modeljetty'}},'owner')
+    await mod.runCanvasAgentJob(env,jobId)
+    const task=(await mod.getJob(env,jobId)).summaryJson.run.tasks[0]
+    assert.equal(task.generationQuality,'high'); assert.equal(task.quality,undefined)
+    const asset=await mod.createAsset(env,{sessionId:'s',userId:'owner',kind:'result',dataUrl:'data:image/png;base64,aW1hZ2U=',width:1672,height:941})
+    await mod.updateJob(env,task.jobId,{status:'completed',summaryJson:{resultAssetId:asset.id,providerDelivery:{requestedModel:'gpt-image-2.5-flare',requestedQuality:'high',reportedQuality:'low'}}})
+    await mod.runCanvasAgentJob(env,jobId)
+    const final=await mod.getJob(env,jobId)
+    assert.equal(final.status,'completed'); assert.equal(f.counts().reviews,1)
+    assert.equal(final.summaryJson.run.tasks[0].delivery.status,'mismatch')
+    assert.equal(final.summaryJson.run.tasks[0].delivery.provider.reportedQuality,'low')
+    assert.equal((await mod.listCanvasProjectElements(env,input.projectId))[0].dataJson.assetId,asset.id)
+    await mod.runCanvasAgentJob(env,jobId); assert.equal(f.counts().reviews,1)
+  } finally { await f.cleanup() }
+})
+
+test('unsupported ModelJetty aspect ratios and excess references fail before a paid plan or queue dispatch', async () => {
+  const f = await fixture()
+  try {
+    const base = { ...f.input, modelId: 'gpt-image-2.5-flare', clientKeys: { provider: 'modeljetty' } }
+    await assert.rejects(f.mod.submitCanvasAgentRun(f.env, { ...base, aspectRatio: '1:4', resolution: '4k' }, 'owner'), { status: 400 })
+    await assert.rejects(f.mod.submitCanvasAgentRun(f.env, { ...base, referenceImages: Array.from({ length: 5 }, (_, i) => ({ assetId: `reference-${i}` })) }, 'owner'), { status: 400 })
+    assert.equal(f.counts().plans, 0)
+    assert.equal(f.messages.length, 0)
+  } finally { await f.cleanup() }
 })

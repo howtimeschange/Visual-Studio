@@ -310,7 +310,7 @@ body[data-view='generate'] .nav-item[data-view='translate'] { margin-top: 20px; 
 body[data-view='generate'] .sidebar-account, body[data-view='generate'] .sidebar-settings { width: 44px; height: 44px; margin: auto; padding: 0; justify-content: center; border: 0; border-radius: 8px; }
 body[data-view='generate'] .main { height: 100%; min-height: 0; }
 #view-generate.view.active { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 64px minmax(0, 1fr); max-width: none; height: 100%; min-height: 0; gap: 0; padding: 0; overflow: hidden; }
-#view-generate:has(.ai-sidebar:not(.hidden)) { grid-template-columns: minmax(0, 1fr) var(--agent-w); }
+#view-generate:has(.ai-sidebar:not(.hidden)) { grid-template-columns: var(--agent-w) minmax(0, 1fr); }
 .canvas-header { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 24px 0 16px; background: var(--bg-2); border-bottom: 1px solid var(--line); z-index: 40; }
 .canvas-header-left, .canvas-header-right { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .canvas-header-left { flex: 1; }

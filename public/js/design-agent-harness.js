@@ -30,16 +30,20 @@ function normalizeContext(context = {}) {
     referenceLabels: Array.isArray(context.referenceLabels) ? context.referenceLabels.map((item) => clean(item, 80)).slice(0, 6) : [],
     references: Array.isArray(context.references) ? context.references.filter((ref) => ref && typeof ref === 'object').slice(0, 6).map((ref) => ({ assetId: clean(ref.assetId, 160), role: clean(ref.role, 20), label: clean(ref.label, 80) })) : [],
     imageModel: clean(context.imageModel, 160), aspectRatio: clean(context.aspectRatio, 12), resolution: clean(context.resolution, 8),
+    size: clean(context.size, 24), quality: clean(context.quality, 12),
   }
 }
 
 export function serializeDesignAgentRun(value, { restore = false } = {}) {
   if (!value || typeof value !== 'object' || !['id', 'projectId', 'conversationId'].every((key) => typeof value[key] === 'string' && value[key])) return null
   const phase = Object.hasOwn(AGENT_PHASE_LABELS, value.phase) ? value.phase : 'interrupted'
+  const preparingClient = ['preparing', 'uploading', 'submitting'].includes(value.clientStage)
   return {
     version: 1, id: clean(value.id, 80), projectId: clean(value.projectId, 160), conversationId: clean(value.conversationId, 160),
     execution: value.execution === 'server' ? 'server' : 'browser', jobId: clean(value.jobId, 160),
-    mode: normalizeAgentMode(value.mode), phase: restore && value.execution !== 'server' && ACTIVE.has(phase) ? 'interrupted' : phase,
+    mode: normalizeAgentMode(value.mode), phase: restore && ACTIVE.has(phase) && preparingClient ? value.clientStage === 'submitting' ? 'awaiting_result' : 'interrupted' : restore && value.execution !== 'server' && ACTIVE.has(phase) ? 'interrupted' : phase,
+    ...(!restore && preparingClient ? { clientStage: value.clientStage, clientStageAt: Number(value.clientStageAt) || null } : {}),
+    clientTimings: value.clientTimings ? { preparationMs: Math.max(0, Number(value.clientTimings.preparationMs) || 0) } : null,
     startedAt: Number(value.startedAt) || null, endedAt: Number(value.endedAt) || null,
     stopRequested: Boolean(value.stopRequested), context: normalizeContext(value.context),
     requestId: clean(value.requestId, 160), referenceRequestId: clean(value.referenceRequestId, 160), error: clean(value.error, 600),
@@ -49,6 +53,7 @@ export function serializeDesignAgentRun(value, { restore = false } = {}) {
     tasks: (Array.isArray(value.tasks) ? value.tasks : []).filter((task) => task && typeof task === 'object').slice(0, AGENT_TASK_LIMIT).map((task) => ({
       id: clean(task.id, 80), mime: clean(task.mime, 80), title: clean(task.title, 100), prompt: clean(task.prompt, 12000),
       aspectRatio: clean(task.aspectRatio, 12), resolution: clean(task.resolution, 8), creativeMode: 'image',
+      size: clean(task.size, 24), generationQuality: clean(task.generationQuality, 12),
       status: TASK_STATES.has(task.status) ? task.status : 'unknown',
       delivery: sanitizeReview(task.delivery), quality: sanitizeReview(task.quality),
       timings: task.timings ? Object.fromEntries(['resultTransferMs', 'reviewMs'].filter(key => task.timings[key] != null).map(key => [key, Math.max(0, Number(task.timings[key]) || 0)])) : null,
@@ -65,7 +70,8 @@ function sanitizeReview(value) {
   return { status: clean(value.status, 40), width: Math.max(0, Number(value.width) || 0), height: Math.max(0, Number(value.height) || 0),
     issues: Array.isArray(value.issues) ? value.issues.slice(0, 8).map(v => clean(v, 400)) : [],
     summary: clean(value.summary, 1000), model: clean(value.model, 160), requestId: clean(value.requestId, 160), reviewedAt: clean(value.reviewedAt, 80),
-    targetLongEdge: Math.max(0, Number(value.targetLongEdge) || 0), requestedResolution: clean(value.requestedResolution, 8), requestedAspectRatio: clean(value.requestedAspectRatio, 12) }
+    provider: value.provider ? Object.fromEntries(['requestedModel','reportedModel','requestedQuality','reportedQuality'].map(key => [key, clean(value.provider[key], 160)])) : null,
+    targetLongEdge: Math.max(0, Number(value.targetLongEdge) || 0), requestedSize: clean(value.requestedSize, 24), requestedResolution: clean(value.requestedResolution, 8), requestedAspectRatio: clean(value.requestedAspectRatio, 12) }
 }
 
 export function requestDesignAgentStop(run) {

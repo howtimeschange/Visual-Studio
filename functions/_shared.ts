@@ -1,5 +1,6 @@
 // Shared helpers for model services. Image jobs keep an asynchronous task contract.
 import { resolveProvider, resolveProviderImageOptions } from './_lib/model-provider'
+import { imageOptionError, gptImageRequestSize } from '../public/js/image-model-constraints.js'
 export { resolveProvider, resolveRelayBaseUrl, resolveVisionModel, resolveAgentModel } from './_lib/model-provider'
 
 export interface Env {
@@ -208,6 +209,13 @@ export function resolveImageModelOptions(modelId: string, env: Env, clientKeys: 
   }
 }
 
+export function assertImageRequestOptions(modelId: string, env: Env, keys: any, aspectRatio = '1:1', resolution = '1k', size = '', quality = '') {
+  const options = resolveProviderImageOptions(modelId, env, keys)
+  const error = imageOptionError(options.provider, options.modelName || modelId, aspectRatio, resolution, size, quality)
+  if (error) throw Object.assign(new Error(error), { status: 400 })
+  return options
+}
+
 export interface ImagePart {
   base64: string
   mime: string
@@ -386,7 +394,11 @@ function buildAsyncImageTaskPayload(
   }
 
   if (modelName.startsWith('gpt-image-')) {
-    const settings = resolveGptImage2Settings(opts)
+    const error = imageOptionError(opts.provider, modelName, opts.aspectRatio || '1:1', opts.resolution || '1k', opts.size, opts.quality)
+    if (error) throw Object.assign(new Error(error), { status: 400 })
+    const settings = opts.provider === 'modeljetty'
+      ? { size: opts.size || gptImageRequestSize(opts.aspectRatio || '1:1', opts.resolution || '1k'), quality: normalizeGptImage2Quality(opts.quality) }
+      : resolveGptImage2Settings(opts)
     payload.size = settings.size
     payload.quality = settings.quality
     if (opts.group) payload.group = opts.group
@@ -635,7 +647,7 @@ function resolveGptImage2Settings(opts: ImageModelOptions = {}) {
 
 function normalizeGptImage2Quality(value: unknown): string {
   const quality = String(value || '').trim().toLowerCase()
-  return ['auto', 'high', 'medium', 'low'].includes(quality) ? quality : 'high'
+  return ['auto', 'high', 'medium', 'low', 'xhigh', 'max'].includes(quality) ? quality : 'high'
 }
 
 function normalizeGptImage2Size(value: unknown): string {

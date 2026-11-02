@@ -1,5 +1,6 @@
 import { createUiIcon } from './workspace-ui.js'
 import { AGENT_PHASE_LABELS, isAgentRunActive } from './design-agent-harness.js'
+import { agentRunProgress, formatAgentElapsed } from './agent-progress.js'
 
 function element(tag, className, text) {
   const node = document.createElement(tag)
@@ -24,7 +25,7 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
     }
     root.append(notice)
   }
-  if (!active && run.tasks.some(t => t.delivery?.status === 'mismatch' || t.quality?.status === 'needs_review' || t.quality?.status === 'unknown')) {
+  if (!active && run.tasks.some(t => ['mismatch','unverified'].includes(t.delivery?.status) || t.quality?.status === 'needs_review' || t.quality?.status === 'unknown')) {
     const notice = element('p', 'agent-run-alert', '作品已保存，规格或画面有待复核。展开执行记录查看详情。'); root.append(notice)
   }
   const details = element('details', 'agent-run-details')
@@ -32,7 +33,16 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
   details.open = expanded ?? false
   const summary = element('summary', 'agent-run-summary')
   const complete = run.tasks.filter((task) => task.status === 'completed').length
-  if (active && renderLoading) summary.append(renderLoading(loadingText || AGENT_PHASE_LABELS[run.phase]))
+  const progress = agentRunProgress(run, loadingText)
+  if (active && renderLoading) {
+    const loading = renderLoading(progress.label || loadingText || AGENT_PHASE_LABELS[run.phase])
+    const label = loading.querySelector?.('span:not(.spinner):not(.msg-loading-dots)')
+    if (label) label.dataset.agentStageLabel = ''
+    summary.append(loading)
+    const clock = element('span', 'agent-stage-clock', formatAgentElapsed(progress.elapsed))
+    clock.dataset.agentStageClock = String(progress.startedAt)
+    summary.append(clock)
+  }
   else {
     summary.append(createUiIcon(run.phase === 'completed' ? 'check' : 'circle-help'))
     summary.append(element('strong', '', run.tasks.length ? `执行记录 · ${complete}/${run.tasks.length} 张` : AGENT_PHASE_LABELS[run.phase]))
@@ -46,9 +56,10 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
   if (run.skill?.label) context.append(element('span', '', `能力：${run.skill.label}`))
   context.append(element('span', '', `${run.context.referenceCount} 张参考 · ${run.context.elementCount} 个画布元素`))
   body.append(context)
-  if (run.execution === 'server') body.append(element('p', 'agent-run-context', '服务端持续执行 · 刷新或关闭页面后可恢复'))
+  if (run.execution === 'server' && !run.clientStage) body.append(element('p', 'agent-run-context', '服务端持续执行 · 刷新或关闭页面后可恢复'))
   if (run.timings?.firstImageMs != null) body.append(element('p', 'agent-run-context', `首图已保存 ${Math.round(run.timings.firstImageMs / 1000)} 秒 · 后续独立质检期间可查看和下载`))
   if (run.timings?.planningMs) body.append(element('p', 'agent-run-context', `规划 ${Math.round(run.timings.planningMs / 1000)} 秒 · ${run.timings.modelCalls} 次模型请求`))
+  if (run.clientTimings?.preparationMs != null) body.append(element('p', 'agent-run-context', `发送前准备与剩余上传 ${(run.clientTimings.preparationMs / 1000).toFixed(1)} 秒`))
   if (run.tasks.length) {
     const list = element('ol', 'agent-task-list')
     const labels = { queued: '等待', running: '准备提交', accepted: '已受理', completed: '已保存', failed: '失败', unknown: '待确认', skipped: '未执行' }
@@ -60,7 +71,7 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
       row.append(head)
       if (task.timings?.resultTransferMs != null) row.append(element('p', 'agent-delivery', `结果传输 ${(task.timings.resultTransferMs / 1000).toFixed(1)} 秒${task.timings.reviewMs != null ? ` · 独立质检 ${(task.timings.reviewMs / 1000).toFixed(1)} 秒` : ''}`))
       if (task.delivery) {
-        row.append(element('p', 'agent-delivery', `实际 ${task.delivery.width || '?'}×${task.delivery.height || '?'} px · 所选 ${(task.delivery.requestedResolution || task.resolution || '').toUpperCase()} / ${task.aspectRatio || '1:1'}（检查最低长边 ${task.delivery.targetLongEdge || ({'1k':1024,'2k':2048,'4k':4096})[task.resolution] || 1024}px 与比例）`))
+        row.append(element('p', 'agent-delivery', `实际 ${task.delivery.width || '?'}×${task.delivery.height || '?'} px${task.delivery.requestedSize ? ` · 请求 ${task.delivery.requestedSize.replace('x','×')} px` : ` · 所选 ${(task.resolution || '').toUpperCase()} / ${task.aspectRatio || '1:1'}`}`))
         for (const issue of task.delivery.issues || []) row.append(element('p', 'agent-task-error', issue))
       }
       if (task.quality) {
@@ -95,6 +106,22 @@ export function createAgentRunRecord(run, { onFocusTask, onExport, expanded, loa
   }
   details.append(body)
   root.append(details)
+  if (active) {
+    const status = element('div', 'agent-stage-progress')
+    status.dataset.stage = progress.stage
+    const rail = element('ol', 'agent-stage-rail')
+    for (const [index, label] of ['准备', '规划', '生成', '检查'].entries()) {
+      const item = element('li', '', label)
+      item.dataset.state = index < progress.index ? 'done' : index === progress.index ? 'current' : 'next'
+      if (index === progress.index) item.setAttribute('aria-current', 'step')
+      rail.append(item)
+    }
+    const hint = element('p', 'agent-stage-hint', progress.hint)
+    hint.dataset.agentStageHint = String(progress.startedAt)
+    hint.dataset.slowHint = !run.clientStage ? '仍在等待原任务，请勿重复提交。' : '请保留当前页面，完成后将自动继续。'
+    status.append(rail, hint)
+    root.append(status)
+  }
   return root
 }
 

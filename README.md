@@ -17,7 +17,7 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 ## 当前能力
 
 - **首页**：OpenLovart 风格的中心对话入口，支持从一句设计需求进入画布；展示已有功能入口和最近画布项目。
-- **画布**：无限画布、AI 生图卡片、参考图连线、AI 助手侧边栏、深浅色主题、画布项目自动保存和 PSD 分层导出。
+- **画布**：左侧 Agent 对话与右侧无限画布，项目标签从画布左边缘向右追加；支持 AI 生图卡片、参考图连线、深浅色主题、自动保存和 PSD 分层导出。
 - **Canvas AI Agent**：读取当前画布上下文，识别用户意图和视觉语言；由智能体自主规划生成路径、提示词和多图 action，并在缺少关键信息时先给出澄清建议。
 - **项目管理**：列出已保存画布项目，支持新建、刷新、打开项目，画布路由使用 `/lovart/canvas?id=...`。
 - **账号与共享**：支持邮箱密码注册/登录、HttpOnly session、项目 owner / viewer / editor 权限、邀请链接、共享项目列表和基础用量统计。
@@ -51,19 +51,26 @@ Visual Studio 是一个面向电商视觉设计、品牌素材本地化和广告
 - 当用户上传或引用参考图时，Agent 将视觉理解与规划合并为一次多模态请求，结合商品、文案、画面结构和素材细节生成 `actions[].prompt`；参考图随后仍作为图像输入传给生图模型。未发送的文字与参考图按账号和画布保存为草稿。
 - 选中图片可导出 PSD：默认保留原图尺寸底层，也可通过 Vision / Design Agent 识别文字、规划语义图层、生成透明主体层和修补背景。
 - 首次进入画布默认展开 AI 助手。
+- 文件拖入对话区添加参考图，拖到画布添加素材；参考图即时预览、后台上传，发送后立即显示消息与准备/规划/生成/检查阶段。模型、画幅和设置使用紧凑浮层。
+- 项目标签支持切换和关闭，关闭标签不删除项目；切换前等待保存，分别恢复项目草稿、参考图和视口。
 - 画布项目通过 `/api/canvas/projects` 系列接口保存；localStorage 作为快速缓存和恢复兜底。
 - 登录后，新建项目、素材、任务和对话会绑定到当前 user；匿名 session 下已有资源会在登录/注册时自动归属到账号。
 - 项目可共享给 viewer 或 editor。viewer 只能查看，editor 可保存画布内容，owner 可邀请、修改和移除成员。
 
 ## 模型支持
 
-| 前端 modelId | 上游模型 |
-| --- | --- |
-| `nano-banana-2` | `gemini-3.1-flash-image-preview` |
-| `nano-banana-pro` | `gemini-3-pro-image-preview` |
-| `gpt-image-2` | `gpt-image-2` |
+| 服务 | 前端 modelId / 显示名 | 上游模型 |
+| --- | --- | --- |
+| 1xm | `nano-banana-2` | `gemini-3.1-flash-image-preview` |
+| 1xm | `nano-banana-pro` | `gemini-3-pro-image-preview` |
+| 1xm | `gpt-image-2` | `gpt-image-2` |
+| ModelJetty | `gemini-3.1-flash-image` / Nano Banana 2 | `gemini-3.1-flash-image` |
+| ModelJetty | `gpt-image-2.5-flare` / GPT image 2.5 快速 | `gpt-image-2.5-flare` |
+| ModelJetty | `gpt-image-2.5-sunburst` / GPT image 2.5 精细 | `gpt-image-2.5-sunburst` |
 
-图片模型统一使用 1xm.ai 的异步任务接口：`POST /v1/images/tasks` 创建任务，`GET /v1/images/tasks/{task_id}` 或 `poll_url` 轮询，成功后读取 `data[].url`/`data[].b64_json`。参考图通过 JSON `image` 字段传 data URL 数组；不要在批量任务里走长连接同步接口。
+选择 1xm 时，图片模型使用其异步任务接口：`POST /v1/images/tasks` 创建任务，`GET /v1/images/tasks/{task_id}` 或 `poll_url` 轮询，成功后读取 `data[].url`/`data[].b64_json`。参考图通过 JSON `image` 字段传 data URL 数组；不要在批量任务里走长连接同步接口。
+
+选择 ModelJetty 时走其账号服务的 `/account/inference/v1/images/tasks` 创建/查询合同。GPT 两款模型支持具体像素预设、自定义宽高和独立质量；尺寸需满足 16px 步长、最长边 3840、比例 1:3–3:1、总像素 655360–8294400。实际交付像素及上游质量回执单独显示，当前 Codex OAuth 通道不保证按请求输出原生 4K。详见[联调与交互记录](docs/agent-upload-and-size-validation-2026-11-02.md)。
 
 批量图片任务的并发契约固定为：
 

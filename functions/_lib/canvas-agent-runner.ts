@@ -1,4 +1,4 @@
-import type { Env } from '../_shared'
+import { assertImageRequestOptions, type Env } from '../_shared'
 import type { JobRecord, JobItemRecord } from '../../packages/contracts/v2'
 import { stableHash } from '../../packages/core/hash'
 import { assessImageDelivery } from '../../packages/core/image-delivery'
@@ -24,6 +24,7 @@ function normalizeRequest(body: any) {
   if (!/^[\w-]{1,160}$/.test(body.conversationId || '')) throw fault('Valid conversationId required')
   return { runId: body.runId, conversationId: body.conversationId, projectId: clean(body.projectId, 160), message,
     modelId: clean(body.modelId || 'nano-banana-2', 160), aspectRatio: clean(body.aspectRatio || '1:1', 10), resolution: clean(body.resolution || '1k', 5),
+    size: clean(body.size, 24), quality: clean(body.quality, 12),
     skillId: clean(body.skillId || 'auto', 80), referenceStrategy: 'combined', executionPolicy: { mode: 'auto' },
     history: (Array.isArray(body.history) ? body.history : []).filter((m: any) => ['user', 'assistant'].includes(m?.role))
       .slice(-8).map((m: any) => ({ role: m.role, content: clean(m.content, 6000) })),
@@ -35,6 +36,10 @@ function normalizeRequest(body: any) {
 
 export function publicCanvasAgentJob(job: JobRecord) {
   const run: any = { ...(job.summaryJson.run as any) }
+  if (/^(?:Upstream 400: )?image_size_unsupported$/.test(run.error || job.summaryJson.error || '')) {
+    run.phase = 'failed'
+    run.error = '图片适配层拒绝了请求尺寸（image_size_unsupported）。本轮未出图；请核对当前模型规格与适配版本后重新提交。原任务未自动重发。'
+  }
   if (['preparing', 'planning', 'executing'].includes(run.phase) && ['paused', 'failed', 'partial_failed', 'cancelled'].includes(job.status)) {
     run.phase = job.status === 'paused' ? 'awaiting_result' : job.status === 'cancelled' ? 'stopped' : job.status
     run.error = job.summaryJson.error || run.error || '服务端任务已暂停，请检查账号连接和原任务。'
@@ -60,6 +65,8 @@ async function ensureItem(env: Env, job: JobRecord) {
 export async function submitCanvasAgentRun(env: Env, body: any, userId: string, waitUntil?: (p: Promise<unknown>) => void) {
   if (!env.VS_JOBS_QUEUE?.send && !env.VS_LOCAL_QUEUE_ENDPOINT) throw fault('创作助手需要持久化任务队列，请先配置 Queue 或本地队列服务。', 503)
   const request = normalizeRequest(body)
+  const imageOptions = assertImageRequestOptions(request.modelId, env, body.clientKeys || {}, request.aspectRatio, request.resolution, request.size, request.quality)
+  if (imageOptions.provider === 'modeljetty' && request.referenceImages.length > 4) throw fault('当前 ModelJetty 生图最多支持 4 张参考图，请移除多余图片。')
   await assertCanEditProject(env, request.projectId, userId)
   await assertInputAssetAccess(env, request, userId)
   const hash = await stableHash({ request, userId })
@@ -73,7 +80,7 @@ export async function submitCanvasAgentRun(env: Env, body: any, userId: string, 
       conversationId: request.conversationId, mode: 'auto', phase: 'preparing', startedAt: Date.now(), endedAt: null,
       stopRequested: false, context: { ...request.canvasContext, referenceCount: request.referenceImages.length,
         references: request.referenceImages, referenceLabels: request.referenceImages.map((r: any) => r.label),
-        imageModel: request.modelId, aspectRatio: request.aspectRatio, resolution: request.resolution }, tasks: [], events: [], error: '' }
+        imageModel: request.modelId, aspectRatio: request.aspectRatio, resolution: request.resolution, size: request.size, quality: request.quality }, tasks: [], events: [], error: '' }
     try { job = await createJob(env, { id: jobId, sessionId: session.id, userId, type: 'canvas_agent', status: 'queued',
       configJson: { request, inputProjectId: request.projectId, sealedCredentialId: credentialId, configHash: hash },
       summaryJson: { run }, progressTotal: 0, progressDone: 0, progressFailed: 0 }) } catch (error) {
@@ -147,7 +154,8 @@ export async function runCanvasAgentJob(env: Env, id: string) {
       const actions = result.shouldGenerate ? (result.actions || []).filter((a: any) => a.type === 'generate_image' && a.prompt) : []
       if (actions.length > 8) throw fault('单次最多生成 8 张图片')
       run.tasks = actions.map((a: any, i: number) => ({ id: `${run.id}-image-${i + 1}`, title: clean(a.title, 200) || `作品 ${i + 1}`,
-        prompt: clean(a.prompt, 16000), aspectRatio: a.aspectRatio || request.aspectRatio, resolution: a.resolution || request.resolution,
+        prompt: clean(a.prompt, 16000), aspectRatio: request.size ? request.aspectRatio : a.aspectRatio || request.aspectRatio, resolution: request.size ? request.resolution : a.resolution || request.resolution,
+        size: request.size, generationQuality: request.quality,
         status: 'queued', jobId: `job_agent_image_${run.id}_${i + 1}`, elementId: `agent_image_${run.id}_${i + 1}`, assetId: '', error: '' }))
       run.phase = 'executing'
       await save()
@@ -173,7 +181,9 @@ export async function runCanvasAgentJob(env: Env, id: string) {
       task.assetId = asset.id
       task.mime = asset.mime
       task.timings = child.summaryJson.timings || null
-      task.delivery = assessImageDelivery({ ...asset, resolution: task.resolution, aspectRatio: task.aspectRatio })
+      // Earlier local runs stored the request's quality in the visual-review slot.
+      if (typeof task.quality === 'string') { task.generationQuality = task.quality; task.quality = null }
+      task.delivery = assessImageDelivery({ ...asset, modelId: request.modelId, size: task.size, resolution: task.resolution, aspectRatio: task.aspectRatio, providerDelivery:child.summaryJson.providerDelivery })
       task.status = 'accepted'
       const i = run.tasks.indexOf(task)
       if (!run.placement) {
@@ -192,7 +202,7 @@ export async function runCanvasAgentJob(env: Env, id: string) {
         x, y, width: 500, height,
         content: `/api/results/${encodeURIComponent(asset.id)}?projectId=${encodeURIComponent(request.projectId)}`,
         assetId: asset.id, mime: asset.mime, originalWidth: asset.width, originalHeight: asset.height,
-        aspectRatio: task.aspectRatio, resolution: task.resolution, prompt: task.prompt, agentRunId: run.id, delivery: task.delivery })
+        aspectRatio: task.aspectRatio, resolution: task.resolution, size: task.size, generationQuality: task.generationQuality, prompt: task.prompt, agentRunId: run.id, delivery: task.delivery })
       run.timings = { ...run.timings, firstImageMs: run.timings?.firstImageMs ?? Date.now() - run.startedAt }
       if (!task.quality) {
         if (output.reviewIntent?.taskId === task.id) task.quality = { status: 'unknown', issues: ['质检请求曾中断，未自动重发'], requestId: output.reviewIntent.requestId }
@@ -212,6 +222,10 @@ export async function runCanvasAgentJob(env: Env, id: string) {
       event(run, 'task_completed', task.delivery.status === 'passed' && task.quality.status === 'passed' ? '作品已保存，最低像素、比例与视觉检查通过' : '作品已保存，请查看规格和质检提示', task.id)
       if (run.stopRequested) { await finish('stopped'); return }
     } else if (child && ['failed', 'partial_failed', 'cancelled', 'paused'].includes(child.status)) {
+      if (/^(?:Upstream 400: )?image_size_unsupported$/.test(String(child.summaryJson.error || ''))) {
+        task.status = 'failed'; task.error = '所选尺寸被上游拒绝，请调整为当前模型支持的尺寸。'
+        await finish('failed', task.error); return
+      }
       task.status = 'unknown'; task.error = clean(child.summaryJson.error || '图片任务未完成，请先读取原任务')
       await finish('awaiting_result', task.error); return
     }

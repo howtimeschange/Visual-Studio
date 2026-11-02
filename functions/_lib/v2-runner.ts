@@ -1,5 +1,5 @@
 import { assertCanReadAsset, getAuthorizedAssetDataUrl } from './permissions'
-import type { Env } from '../_shared'
+import { assertImageRequestOptions, type Env } from '../_shared'
 import type {
   ConversationRecord,
   ConversationTurnRecord,
@@ -2218,6 +2218,8 @@ export async function submitGenerateDirectJob(
   const userId = typeof body?._authUserId === 'string' ? body._authUserId : null
   const session = await ensureSession(env, body?.sessionId, userId)
   const request = normalizeDirectGenerateRequest(body)
+  const imageOptions = assertImageRequestOptions(request.modelId, env, body?.clientKeys || {}, request.aspectRatio, request.resolution, request.size, request.quality)
+  if (imageOptions.provider === 'modeljetty' && request.referenceEntries.length > 4) throw createRunnerError('当前 ModelJetty 生图最多支持 4 张参考图，请移除多余图片。', 400)
   if (!request.prompt) throw createRunnerError('prompt required', 400)
 
   const jobId = stableJobId || createId('job')
@@ -2263,6 +2265,8 @@ export async function submitGenerateDirectJob(
       prompt: request.prompt,
       aspectRatio: request.aspectRatio,
       resolution: request.resolution,
+      size: request.size,
+      quality: request.quality,
       modelId: request.modelId,
     },
     outputJson: {},
@@ -2383,7 +2387,7 @@ async function runGenerateBatchJob(env: Env, jobId: string) {
     await updateJob(env, jobId, {
       status: 'completed',
       progressDone: 1,
-      summaryJson: { resultAssetId: resultAsset.id, timings:result.timings },
+      summaryJson: { resultAssetId: resultAsset.id, timings:result.timings, providerDelivery:result.providerDelivery },
     })
     await wakeParentAgent(env, initialJob)
     await publishEvent(env, 'item', claimedItem.id, 'item_completed', {

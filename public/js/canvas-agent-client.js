@@ -41,6 +41,8 @@ export function mergeAgentRunMessages(messages, record) {
   let assistant = result.find(m => m.run?.id === run.id)
   if (!assistant) { assistant = { id: `${run.id}-assistant`, role: 'assistant' }; result.push(assistant) }
   const plan = record.plan || {}
+  // Keep browser preparation time after the first durable server snapshot.
+  if (assistant.run?.clientTimings && !run.clientTimings) run.clientTimings = assistant.run.clientTimings
   const active = ['preparing', 'planning', 'executing'].includes(run.phase)
   const completed = run.tasks.filter(t => t.status === 'completed').length
   Object.assign(assistant, { run, loading: active, loadingText: run.events.at(-1)?.label || '正在恢复服务端任务',

@@ -6,9 +6,10 @@ import { assertInputAssetAccess } from '../_lib/permissions'
 import {
   Env, resolveProvider, resolveRelayBaseUrl, resolveAgentModel, DEFAULT_BASE, VISION_MODEL, MODEL_MAP,
   json, corsPreflight, resolveKeys, resolveImageModelOptions, callImageModelTaskStep, callTextModel,
-  readImageDimensions,
+  readImageDimensions, assertImageRequestOptions,
 } from '../_shared'
 import type { ImageTaskStepResult } from '../_shared'
+import { sanitizeImageProviderDelivery } from '../../packages/core/image-delivery'
 import {
   createAsset,
   createJob,
@@ -173,6 +174,8 @@ export function normalizeDirectGenerateRequest(body: any) {
     prompt: String(body?.prompt || '').trim(),
     aspectRatio: normalizeAspectRatio(body?.aspectRatio),
     resolution: normalizeResolution(body?.resolution),
+    size: String(body?.size || '').slice(0, 24),
+    quality: String(body?.quality || '').slice(0, 12),
     useDesignAgent: Boolean(body?.useDesignAgent),
     referenceEntries,
   }
@@ -199,7 +202,7 @@ export async function executeDirectGenerateTaskStep(
   clientKeys: any = {},
   stepOptions: { beforeSubmit?: () => Promise<void>; onAccepted?: (task: any) => Promise<void>; requestId?: string; existingTask?: any; maxPollAttempts?: number; finalPrompt?: string; returnAfterCreate?: boolean; skipInitialPollDelay?: boolean } = {},
 ): Promise<
-  | { pending: false; dataUrl: string; finalPrompt: string; width: number | null; height: number | null; timings?: { resultTransferMs: number; taskStepMs: number } }
+  | { pending: false; dataUrl: string; finalPrompt: string; width: number | null; height: number | null; providerDelivery?: any; timings?: { resultTransferMs: number; taskStepMs: number } }
   | (Extract<ImageTaskStepResult, { pending: true }> & { finalPrompt: string })
 > {
   const baseUrl = resolveRelayBaseUrl(env, clientKeys)
@@ -207,6 +210,9 @@ export async function executeDirectGenerateTaskStep(
   const imageModelOptions = resolveImageModelOptions(request.modelId, env, clientKeys)
   imageModelOptions.aspectRatio = request.aspectRatio
   imageModelOptions.resolution = request.resolution
+  imageModelOptions.size = request.size
+  imageModelOptions.quality = request.quality
+  assertImageRequestOptions(request.modelId, env, clientKeys, request.aspectRatio, request.resolution, request.size, request.quality)
   Object.assign(imageModelOptions, { beforeSubmit: stepOptions.beforeSubmit, onAccepted: stepOptions.onAccepted, requestId: stepOptions.requestId })
   imageModelOptions.existingTask = stepOptions.existingTask
   imageModelOptions.maxPollAttempts = stepOptions.maxPollAttempts
@@ -232,7 +238,7 @@ export async function executeDirectGenerateTaskStep(
       throw createError(result.error, result.status)
     }
     const size = getImageDataUrlDimensions(result.dataUrl)
-    return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height, timings:result.timings }
+    return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height, providerDelivery:sanitizeImageProviderDelivery(result.task?.delivery), timings:result.timings }
   }
 
   const refImages: Array<{ base64: string; mime: string; role: string; label: string }> = []
@@ -279,7 +285,7 @@ export async function executeDirectGenerateTaskStep(
   if (result.pending) return { ...result, finalPrompt }
   if (!result.ok) throw createError(result.error, result.status)
   const size = getImageDataUrlDimensions(result.dataUrl)
-  return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height, timings:result.timings }
+  return { pending: false, dataUrl: result.dataUrl, finalPrompt, width: size.width, height: size.height, providerDelivery:sanitizeImageProviderDelivery(result.task?.delivery), timings:result.timings }
 }
 
 function getImageDataUrlDimensions(dataUrl: string): { width: number | null; height: number | null } {
@@ -385,7 +391,7 @@ The references will be passed directly as images — you only need to describe t
 
 function normalizeAspectRatio(value: unknown): string {
   const ratio = String(value || '').trim()
-  return ['1:1', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(ratio) ? ratio : '1:1'
+  return ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '1:4', '1:8'].includes(ratio) ? ratio : '1:1'
 }
 
 function normalizeResolution(value: unknown): string {
