@@ -4829,6 +4829,7 @@ function handleCanvasWheel(e) {
 
 function handleCanvasKeyDown(e) {
   if (state.activeView !== 'generate') return
+  if (typeof e.key !== 'string' || e.isComposing) return
   if (document.activeElement?.matches('input, textarea, select, [contenteditable="true"]') || document.querySelector('dialog[open]')) return
   if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return
 

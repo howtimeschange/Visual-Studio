@@ -238,7 +238,7 @@ type ImageModelOptions = {
 }
 
 type ImageSourceResult =
-  | { ok: true; dataUrl: string }
+  | { ok: true; dataUrl: string; transferTimings?: { resultTtfbMs: number; resultBodyMs: number; resultEncodeMs: number } }
   | { ok: false; error: string }
 
 export type ImageTaskStepResult =
@@ -334,7 +334,7 @@ export async function callImageModelTaskStep(
     if (!dataUrl.ok) {
       return { ok: false, error: dataUrl.error, status: 502 }
     }
-    return { ok: true, dataUrl: dataUrl.dataUrl, task: finalTask.data, timings: { resultTransferMs: Date.now() - transferStartedAt, taskStepMs: Date.now() - startedAt } }
+    return { ok: true, dataUrl: dataUrl.dataUrl, task: finalTask.data, timings: { ...dataUrl.transferTimings, resultTransferMs: Date.now() - transferStartedAt, taskStepMs: Date.now() - startedAt } }
   } catch (e: any) {
     if (isTimeoutError(e)) {
       return { ok: false, error: `Upstream image task timed out after ${formatDuration(e.timeoutMs)}.`, status: 504 }
@@ -884,7 +884,9 @@ async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IM
   }
 
   try {
+    const transferStartedAt = Date.now()
     const res = await fetchWithTimeout(source, forbidRedirect ? {redirect:'manual'} : {}, timeoutMs)
+    const headersAt = Date.now()
     if (!res.ok) {
       const detail = await readResponseText(res)
       return { ok: false, error: `Image result fetch failed (${res.status}) from ${formatUrlForError(source)}${detail ? `: ${detail}` : ''}` }
@@ -895,12 +897,13 @@ async function coerceImageSourceToDataUrl(source: string, timeoutMs = DEFAULT_IM
       return { ok: false, error: `Image result fetch returned non-image content-type: ${contentType}` }
     }
     const buffer = await res.arrayBuffer()
+    const bodyAt = Date.now()
     if (buffer.byteLength <= 0) {
       return { ok: false, error: 'Image result fetch returned an empty body.' }
     }
     const dataUrl = `data:${mime};base64,${arrayBufferToBase64(buffer)}`
     return isUsableImageDataUrl(dataUrl)
-      ? { ok: true, dataUrl }
+      ? { ok: true, dataUrl, transferTimings: { resultTtfbMs: headersAt - transferStartedAt, resultBodyMs: bodyAt - headersAt, resultEncodeMs: Date.now() - bodyAt } }
       : { ok: false, error: 'Image result fetch returned invalid image data.' }
   } catch (error: any) {
     const message = isTimeoutError(error)

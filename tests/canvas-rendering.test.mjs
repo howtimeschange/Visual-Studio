@@ -49,6 +49,21 @@ async function loadHarness(functionNames, overrides = {}) {
   return context
 }
 
+test('canvas shortcuts ignore keyless and composing events while normal tool shortcuts work', async () => {
+  const selected = []
+  const harness = await loadHarness(['handleCanvasKeyDown'], {
+    state: { activeView: 'generate', generate: { selectedIds: [] } },
+    document: { activeElement: null, querySelector: () => null },
+    dom: { gToolbar: {} },
+    $: selector => ({ click: () => selected.push(selector) }),
+  })
+  assert.doesNotThrow(() => harness.handleCanvasKeyDown({}))
+  harness.handleCanvasKeyDown({ key: 'v', isComposing: true })
+  assert.equal(selected.length, 0)
+  harness.handleCanvasKeyDown({ key: 'V', preventDefault() {} })
+  assert.match(selected[0], /data-tool="select"/)
+})
+
 test('canvas displays explicit image dimensions at half of the original size', async () => {
   const harness = await loadHarness(['getCanvasImageSize'])
 
