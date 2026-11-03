@@ -65,4 +65,14 @@
 
 模型推理、上游图片回传、超大画布/海量批任务的生产 p95 未在本轮重新付费测量；旧模型调用和上游传输证据见 `docs/agent-ui-performance-2026-11-01.md`。此次性能结论只覆盖本轮实测层，不把页面提速称为模型推理提速。管理员页面的真实登录走查受当前 QA 账号权限限制，统计查询由 API/SQL 回归验证，不扩大权限。
 
-发布结果在完成 GitHub 同步、Pages 部署与线上读取后追加。
+## 已发布与线上回读
+
+- 代码提交 `63f9727`，包含 `81cf93f` 主优化、`911d116` 账号恢复修复、`f33836f` 工作区样式指纹修复；GitHub main 已同步。
+- Pages 生产部署 `57c261ef-298d-4e21-9bb8-eb95ffe1833a`，域名 `https://image.crawshrimp.com`，部署来源确认 `63f9727`。
+- 生产 JS `app-NJ554P55.js`、CSS `styles-A2ZYB55R.css` 已下载，SHA256 均与该次本地构建完全一致；生产 HTML 不再引用独立 workspace-layout.css。
+- 实际线上画布首次读取切换 902ms，近期往返 50 / 54 / 42ms，均含自动化开销，只有这一小组样本，不作为公网 p95。原图读取不再阻塞画布激活。
+- 线上项目计数 2 / 0 正确；两张原图 1024×1024、1254×1254 均 ready，重试按钮 display:none；尺寸触发区域实际 56.21px；原图地址恢复前为 loading。浏览器 error/warn 为空。
+- 发布时 Wrangler 初始 GET 曾连接失败，回查确认未创建新部署；改用单次命令的直接 IPv4 路径后成功，没有修改系统网络配置或重复未知外部写入。
+- 本次只发 Pages；Queue 与 ModelJetty 无需发版。没有重放历史未知任务，没有新增付费模型请求，没有生产 schema 迁移。
+
+线上证据：`/tmp/vs-platform-performance-20261103/production-readback.json`、`production-switch.json`、`production-assets-verified.json`、`production-final.png` 和 `deployments-final.log`。
