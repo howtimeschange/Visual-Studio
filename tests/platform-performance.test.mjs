@@ -95,6 +95,9 @@ test('project list reads are shared, cache empty lists, and discard late account
   context.canvasWorkspaceScope=()=>context.state.account.user.id
   vm.createContext(context)
   vm.runInContext(section('let canvasProjectListInFlight = null','function scheduleCanvasProjectSave('),context)
+  context.state.account.loading=true;context.state.account.user=null
+  await context.loadCanvasProjects();assert.equal(requests.length,0);assert.equal(context.state.projects.loading,true)
+  context.state.account.loading=false;context.state.account.user={id:'a'}
   const first=context.loadCanvasProjects(), duplicate=context.loadCanvasProjects()
   assert.equal(requests.length,1);assert.equal(requests[0].url,'/api/canvas/projects?summary=1')
   requests[0].resolve({projects:[]});await Promise.all([first,duplicate])
@@ -105,4 +108,16 @@ test('project list reads are shared, cache empty lists, and discard late account
   requests[2].resolve({projects:[{id:'b-project'}]});await current
   requests[1].resolve({projects:[{id:'private-a'}]});await old
   assert.equal(context.state.projects.items[0].id,'b-project')
+})
+
+test('account restoration finishing after fast workspace restoration reloads the project browser',async()=>{
+  let listed=0, release
+  const context={state:{account:{user:null},keys:{},activeView:'projects'},runtimeStateReady:true,
+    getJson:()=>new Promise(resolve=>{release=resolve}),loadAccountApiKeys:async()=>{},renderAccount(){},
+    loadCanvasProjects:async()=>{listed++},handlePendingInvite(){},trimError:e=>e.message}
+  vm.createContext(context)
+  vm.runInContext(section('async function loadAccount(', 'async function handlePendingInvite('),context)
+  const pending=context.loadAccount()
+  release({user:{id:'account'},usage:null,modeljetty:null});await pending
+  assert.equal(listed,1)
 })

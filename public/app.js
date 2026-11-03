@@ -843,6 +843,7 @@ function init() {
   bindOutfit()
   bindStyle()
   bindAiTest()
+  state.projects.loading = ['home','projects'].includes(state.activeView)
   renderAll()
   renderAppNotice()
   void loadAccount()
@@ -3925,6 +3926,7 @@ function renderModeljettyAccount() {
 }
 
 async function loadAccount({ handleInvite = true } = {}) {
+  state.account.loading = true
   try {
     const data = await getJson('/api/auth/me')
     if (state.account.user?.id !== data.user?.id) state.account.modeljettyUsage = null
@@ -3946,8 +3948,13 @@ async function loadAccount({ handleInvite = true } = {}) {
   } catch (error) {
     state.account.error = trimError(error)
   } finally {
+    state.account.loading = false
     renderAccount()
     if (runtimeStateReady && state.activeView === 'generate') renderGenerate()
+    if (runtimeStateReady && ['home','projects'].includes(state.activeView)) {
+      if (state.account.user) void loadCanvasProjects()
+      else { state.projects.loading = false; renderProjects(); renderHome() }
+    }
     if (state.account.modeljetty?.connected && !state.account.modeljettyUsage) void loadModeljettyUsage()
     if (handleInvite) void handlePendingInvite()
   }
@@ -11911,6 +11918,9 @@ let canvasProjectListInFlight = null
 let canvasProjectListEpoch = 0
 async function loadCanvasProjects({ force = false } = {}) {
   if (!dom.pList) return
+  if (state.account.loading && !state.account.user) {
+    state.projects.loading = true; renderProjects(); renderHome(); return
+  }
   const sessionId = state.runtime.sessionId || ''
   if (!sessionId && !state.account.user) {
     state.projects.items = []
