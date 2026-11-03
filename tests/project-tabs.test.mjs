@@ -27,6 +27,7 @@ async function navigationFixture() {
     dom:{gInput:{value:'draft'},gAiMessages:{scrollTop:12}}, canvasProjectViews:new Map(),
     window:{clearTimeout(){}}, syncCanvasProjectTabScope(){}, persistCurrentAiSession(){}, canvasWorkspaceScope:()=> 'owner',
     saveCanvasDraft:async()=>events.push('draft'), persistCanvasProject:async()=>events.push('save'),renderAppNotice(){},
+    setCanvasNavigationStage(){},
   }
   vm.createContext(context)
   vm.runInContext(source.slice(source.indexOf('async function prepareCanvasProjectNavigation()'),source.indexOf('async function closeCanvasProjectTab(')),context)

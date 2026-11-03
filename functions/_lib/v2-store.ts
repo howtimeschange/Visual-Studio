@@ -4,6 +4,7 @@ import type {
   AuthSessionRecord,
   CanvasProjectElementRecord,
   CanvasProjectRecord,
+  CanvasProjectCardRecord,
   ConversationRecord,
   ConversationTurnRecord,
   EventScope,
@@ -1605,6 +1606,46 @@ export async function listCanvasProjectsForUser(env: any, userId: string, sessio
   return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
+// The project browser needs a count and one preview, not every conversation and
+// every element. Keep the permission predicate in the same bounded SQL read.
+export async function listCanvasProjectCardsForUser(env: any, userId: string): Promise<CanvasProjectCardRecord[]> {
+  if (!userId) return []
+  const previewUrl = (preview: any, projectId: string) => preview?.assetId
+    ? `/api/results/${encodeURIComponent(preview.assetId)}?projectId=${encodeURIComponent(projectId)}`
+    : String(preview?.content || '')
+  const db = dbFor(env)
+  if (db) {
+    const result = await db.prepare(`
+      SELECT cp.id, cp.session_id, cp.owner_user_id, cp.title, cp.created_at, cp.updated_at,
+        CASE WHEN cp.owner_user_id = ? THEN 'owner' ELSE pm.role END AS access_role,
+        (SELECT COUNT(*) FROM canvas_project_elements e WHERE e.project_id = cp.id AND e.element_type != 'connector') AS element_count,
+        (SELECT json_object('assetId', json_extract(e.data_json, '$.assetId'),
+          'content', CASE WHEN COALESCE(json_extract(e.data_json, '$.assetId'), '') != '' THEN '' ELSE json_extract(e.data_json, '$.content') END)
+          FROM canvas_project_elements e WHERE e.project_id = cp.id AND e.element_type = 'image'
+            AND (COALESCE(json_extract(e.data_json, '$.assetId'), '') != '' OR COALESCE(json_extract(e.data_json, '$.content'), '') != '')
+          ORDER BY e.z_index, e.id LIMIT 1) AS preview_json
+      FROM canvas_projects cp
+      LEFT JOIN project_members pm ON pm.project_id = cp.id AND pm.user_id = ?
+      WHERE cp.owner_user_id = ? OR pm.user_id IS NOT NULL
+      ORDER BY cp.updated_at DESC
+    `).bind(userId, userId, userId).all<any>()
+    return (result.results || []).map(row => ({
+      id: row.id, sessionId: row.session_id, ownerUserId: row.owner_user_id,
+      title: row.title, createdAt: row.created_at, updatedAt: row.updated_at,
+      accessRole: row.access_role, elementCount: Number(row.element_count || 0),
+      previewUrl: previewUrl(parseJson(row.preview_json, {}), row.id),
+    }))
+  }
+  const projects = await listCanvasProjectsForUser(env, userId)
+  return Promise.all(projects.map(async ({ metadataJson: _metadata, ...project }) => {
+    const elements = await listCanvasProjectElements(env, project.id)
+    const preview = elements.find(e => e.elementType === 'image' && (e.dataJson.assetId || e.dataJson.content))
+    return { ...project, accessRole: project.accessRole || 'owner',
+      elementCount: elements.filter(e => e.elementType !== 'connector').length,
+      previewUrl: previewUrl(preview?.dataJson, project.id) }
+  }))
+}
+
 export async function createCanvasProject(envOrInput: any, maybeInput?: {
   sessionId: string
   ownerUserId?: string | null
@@ -2257,37 +2298,39 @@ export async function getAdminOverview(env: any, opts: { onlineWindowMinutes?: n
   const since30d = isoDaysAgo(30)
   const db = dbFor(env)
   if (db) {
-    const userRow = await db.prepare('SELECT COUNT(*) AS total FROM users').first<any>()
-    const activeRow = await db.prepare(`
-      SELECT COUNT(*) AS active_sessions, COUNT(DISTINCT user_id) AS active_users
-      FROM auth_sessions
-      WHERE expires_at > ?
-    `).bind(now).first<any>()
-    const onlineRow = await db.prepare(`
-      SELECT COUNT(*) AS online_sessions, COUNT(DISTINCT user_id) AS online_users, MAX(last_seen_at) AS last_seen_at
-      FROM auth_sessions
-      WHERE expires_at > ? AND last_seen_at >= ?
-    `).bind(now, onlineCutoff).first<any>()
-    const recentLoginRow = await db.prepare(`
-      SELECT COUNT(*) AS login_events, COUNT(DISTINCT user_id) AS login_users
-      FROM usage_events
-      WHERE event_type IN ('auth_login', 'auth_register') AND created_at >= ?
-    `).bind(since24h).first<any>()
-    const usageRow = await db.prepare(`
-      SELECT
-        COALESCE(SUM(amount), 0) AS amount,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(SUM(api_cost_usd), 0) AS api_cost_usd
-      FROM usage_events
-      WHERE created_at >= ? AND event_type NOT LIKE 'auth_%'
-    `).bind(since30d).first<any>()
-    const jobRow = await db.prepare(`
-      SELECT COUNT(*) AS total, SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_24h
-      FROM jobs
-    `).bind(since24h).first<any>()
-    const statusRows = await db.prepare('SELECT status, COUNT(*) AS total FROM jobs GROUP BY status').all<any>()
-    const projectRow = await db.prepare('SELECT COUNT(*) AS total FROM canvas_projects').first<any>()
+    const [userRow, activeRow, onlineRow, recentLoginRow, usageRow, jobRow, statusRows, projectRow] = await Promise.all([
+      db.prepare('SELECT COUNT(*) AS total FROM users').first<any>(),
+      db.prepare(`
+        SELECT COUNT(*) AS active_sessions, COUNT(DISTINCT user_id) AS active_users
+        FROM auth_sessions
+        WHERE expires_at > ?
+      `).bind(now).first<any>(),
+      db.prepare(`
+        SELECT COUNT(*) AS online_sessions, COUNT(DISTINCT user_id) AS online_users, MAX(last_seen_at) AS last_seen_at
+        FROM auth_sessions
+        WHERE expires_at > ? AND last_seen_at >= ?
+      `).bind(now, onlineCutoff).first<any>(),
+      db.prepare(`
+        SELECT COUNT(*) AS login_events, COUNT(DISTINCT user_id) AS login_users
+        FROM usage_events
+        WHERE event_type IN ('auth_login', 'auth_register') AND created_at >= ?
+      `).bind(since24h).first<any>(),
+      db.prepare(`
+        SELECT
+          COALESCE(SUM(amount), 0) AS amount,
+          COALESCE(SUM(input_tokens), 0) AS input_tokens,
+          COALESCE(SUM(output_tokens), 0) AS output_tokens,
+          COALESCE(SUM(api_cost_usd), 0) AS api_cost_usd
+        FROM usage_events
+        WHERE created_at >= ? AND event_type NOT LIKE 'auth_%'
+      `).bind(since30d).first<any>(),
+      db.prepare(`
+        SELECT COUNT(*) AS total, SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_24h
+        FROM jobs
+      `).bind(since24h).first<any>(),
+      db.prepare('SELECT status, COUNT(*) AS total FROM jobs GROUP BY status').all<any>(),
+      db.prepare('SELECT COUNT(*) AS total FROM canvas_projects').first<any>(),
+    ])
     const byStatus: Record<string, number> = {}
     for (const row of statusRows.results || []) byStatus[String(row.status || '')] = Number(row.total || 0)
     return {

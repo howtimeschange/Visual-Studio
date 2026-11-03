@@ -1,6 +1,6 @@
 # Agent Code Map
 
-Last reviewed: 2026-11-01 (frontend layout, design Agent harness and module map)
+Last reviewed: 2026-11-03 (project summaries, navigation cache, pooled asset reads and adaptive observation)
 
 ## Overview
 
@@ -49,6 +49,7 @@ Browser SPA in public/
 | Durable canvas Agent | `functions/_lib/canvas-agent-runner.ts`, `functions/api/canvas/agent-runs*`, `functions/_lib/image-quality.ts`, `public/js/canvas-agent-client.js`, `public/js/canvas-drafts.js` | Queue owns planning and subsequent image tasks; browser observes. Keep deterministic IDs, unknown-operation intents, scoped drafts and concurrent saves intact. |
 | Admin UI | `public/admin/index.html`, `public/admin.js`, `public/admin.css`, `functions/api/admin/*` | Admin auth is enforced server-side. |
 | Canvas and projects | `functions/api/canvas/projects.ts`, `functions/api/canvas/agent.ts`, `public/js/canvas-psd-export.js` | Project sharing and PSD flows touch permissions and storage. |
+| Project navigation and reads | `public/js/project-navigation.js`, `public/js/read-pool.js`, `listCanvasProjectCardsForUser` in `functions/_lib/v2-store.ts` | Project lists use `summary=1` with counts/preview in one D1 read. Navigation overlaps source save and target read, applies only after save succeeds, and caches six snapshots for 10 seconds per account. Asset byte reads are pooled at four concurrent GETs. |
 | Direct generation | `functions/api/generate.ts`, `functions/api/generate-direct.ts`, `functions/api/jobs/generate-*` | Uses async image task semantics through shared helpers. |
 | Batch jobs | `functions/api/jobs/*-batch.ts`, `functions/_lib/v2-runner.ts`, `functions/_lib/v2-queue.ts` | Job creation, dispatch, retry, polling, pause/resume, and recovery. |
 | AI test | `functions/api/ai-test/templates.ts`, `functions/api/jobs/ai-test-batch.ts`, `packages/core/ai-test.ts`, `migrations/0005_ai_test_prompts.sql` | Prompt templates are data-backed and versioned. |

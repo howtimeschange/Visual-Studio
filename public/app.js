@@ -9,6 +9,8 @@ import { createAgentUploadQueue, agentUploadLabel, isFileDrag, selectAgentImageF
 import { imageOptionError, isModeljettyGptImage, gptImageRequestSize, gptImageSizeError, gptImageSizePresets, gptImageSizeRatio, gptImageSizeIsExperimental, GPT_IMAGE_QUALITIES } from './js/image-model-constraints.js'
 import { createImageSizeDialog } from './js/image-size-dialog.js'
 import { createProjectTabStore } from './js/project-tabs.js'
+import { createProjectSnapshotCache, prepareProjectNavigation, presentCanvasElements } from './js/project-navigation.js'
+import { createReadPool } from './js/read-pool.js'
 import { createModelPicker } from './js/model-picker.js'
 import { formatAgentElapsed } from './js/agent-progress.js'
 import { getCanvasJobDisplayStatus } from './js/canvas-job-progress.js'
@@ -1958,9 +1960,14 @@ function persistCurrentAiSession() {
     session = createAiSessionRecord({ id: state.generate.aiSessionId, messages: [] })
     state.generate.aiSessions.push(session)
   }
-  session.messages = sanitizeAiMessages(state.generate.aiMessages)
-  session.title = inferAiSessionTitle(session.messages)
-  session.updatedAt = new Date().toISOString()
+  const messages = sanitizeAiMessages(state.generate.aiMessages)
+  const title = inferAiSessionTitle(messages)
+  // Rendering and saving call this too. An unchanged session must not make the
+  // project dirty again immediately after a successful save.
+  const changed = session.title !== title || JSON.stringify(session.messages) !== JSON.stringify(messages)
+  session.messages = messages
+  session.title = title
+  if (changed) session.updatedAt = new Date().toISOString()
 }
 
 function activateAiSession(sessionId) {
@@ -4319,6 +4326,12 @@ function bindGenerate() {
     const tab = event.target.closest('[data-project-tab]')
     if (tab) void openCanvasProject(tab.dataset.projectTab)
   })
+  for (const eventName of ['pointerover', 'focusin']) $('#g-project-tabs').addEventListener(eventName, event => {
+    const projectId = event.target.closest('[data-project-tab]')?.dataset.projectTab
+    if (projectId && projectId !== state.generate.projectId && !canvasProjectNavigation) {
+      void loadCanvasProjectSnapshot(projectId).catch(() => {})
+    }
+  })
   $('#g-project-tabs').addEventListener('keydown', event => {
     const buttons = [...$('#g-project-tabs').querySelectorAll('[role="tab"]')]
     const index = buttons.indexOf(event.target)
@@ -4385,6 +4398,7 @@ function applyCanvasToolCursor() {
 }
 
 function bindCanvas() {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) canvasAgentWatcher.refresh() })
   dom.gCanvasContainer.addEventListener('mousedown', handleCanvasMouseDown)
   document.addEventListener('mousemove', handleCanvasMouseMove)
   document.addEventListener('mouseup', handleCanvasMouseUp)
@@ -4392,7 +4406,7 @@ function bindCanvas() {
   dom.gCanvasContainer.addEventListener('contextmenu', (e) => e.preventDefault())
 
   document.addEventListener('keydown', (e) => {
-    if (state.activeView !== 'generate') return
+    if (state.activeView !== 'generate' || canvasProjectNavigation) return
     if (e.code === 'Space' && !e.repeat && document.activeElement?.tagName !== 'TEXTAREA' && document.activeElement?.tagName !== 'INPUT') {
       e.preventDefault()
       canvasSpaceHeld = true
@@ -5208,7 +5222,7 @@ function renderCanvas() {
     // Update image src if changed
     if (el.type === 'image') {
       const img = node.querySelector('.canvas-el-image')
-      if (img && img.getAttribute('src') !== el.content) img.src = el.content
+      if (img && img.getAttribute('src') !== el.content) { node.dataset.imageState = 'loading'; img.src = el.content }
       const size = node.querySelector('.canvas-el-size')
       if (size) size.textContent = el.type === 'image' && el.originalWidth && el.originalHeight ? `原图 ${el.originalWidth} × ${el.originalHeight} px` : `${Math.round(el.width)} × ${Math.round(el.height)}`
     } else if (el.type === 'text') {
@@ -5240,10 +5254,27 @@ function renderCanvasElement(el) {
   if (el.type === 'image') {
     const img = document.createElement('img')
     img.className = 'canvas-el-image'
+    img.decoding = 'async'
+    node.dataset.imageState = 'loading'
+    img.addEventListener('load', () => {
+      node.dataset.imageState = 'ready'
+      // Keep original pixels distinct from the resized element's display size.
+      if ((!el.originalWidth || !el.originalHeight) && state.generate.elements.includes(el)) {
+        el.originalWidth ||= img.naturalWidth; el.originalHeight ||= img.naturalHeight
+        saveRuntimeState(); renderCanvas()
+      }
+    })
+    img.addEventListener('error', () => { node.dataset.imageState = 'error' })
     img.src = el.content || ''
     img.alt = el.name || 'image'
     img.draggable = false
     node.append(img)
+    const retry = document.createElement('button')
+    retry.type = 'button'; retry.className = 'canvas-image-retry'; retry.textContent = '图片未加载 · 重试'
+    retry.addEventListener('pointerdown', event => event.stopPropagation())
+    retry.addEventListener('mousedown', event => event.stopPropagation())
+    retry.addEventListener('click', event => { event.stopPropagation(); node.dataset.imageState = 'loading'; img.src = el.content || '' })
+    node.append(retry)
     node.append(createCanvasElementActions(el))
   } else if (el.type === 'text') {
     const text = document.createElement('div')
@@ -6785,7 +6816,7 @@ function renderAiRefList() {
     card.title = ref.uploadError || ref.name || ''
 
     const img = document.createElement('img')
-    img.src = ref.dataUrl
+    img.src = ref.dataUrl || assetImageSrc(ref, state.generate.projectId)
     img.alt = ref.name || 'ref'
     card.append(img)
 
@@ -6873,7 +6904,8 @@ function renderAiMessages() {
       refsWrap.style.marginBottom = '4px'
       for (const ref of msg.refs) {
         const img = document.createElement('img')
-        img.src = ref.dataUrl
+        img.src = assetImageSrc(ref, state.generate.projectId)
+        img.loading = 'lazy'; img.decoding = 'async'
         img.dataset.refId = ref.id || ''
         img.alt = ref.name || 'ref'
         img.style.maxWidth = '60px'
@@ -6944,7 +6976,8 @@ function renderAiMessages() {
     }
     const messageImages = Array.isArray(msg.images) && msg.images.length
       ? msg.images
-      : (msg.imageDataUrl ? [{
+      : (msg.imageDataUrl || msg.imageAssetId ? [{
+          assetId: msg.imageAssetId,
           dataUrl: msg.imageDataUrl,
           name: msg.imageName || '生成结果',
           prompt: msg.generatingPrompt || '',
@@ -6953,19 +6986,21 @@ function renderAiMessages() {
       const imgWrap = document.createElement('div')
       imgWrap.className = 'msg-images'
       for (const image of messageImages) {
-        if (!image?.dataUrl) continue
+        const src = assetImageSrc(image, state.generate.projectId)
+        if (!src) continue
         const img = document.createElement('img')
         img.className = 'msg-img'
-        img.src = image.dataUrl
+        img.src = src
+        img.loading = 'lazy'; img.decoding = 'async'
         img.alt = image.name || '生成结果'
         img.style.maxWidth = '200px'
         img.style.borderRadius = '8px'
         img.style.cursor = 'pointer'
-        img.addEventListener('click', () => openLightbox({ src: image.dataUrl, caption: image.name || '生成结果' }))
+        img.addEventListener('click', () => openLightbox({ src, caption: image.name || '生成结果' }))
         const card = document.createElement('figure')
         card.className = 'agent-result-image'
         card.append(img)
-        card.append(createAgentReferenceButton(image, 'agent-result-reference'))
+        card.append(createAgentReferenceButton({ ...image, dataUrl: src }, 'agent-result-reference'))
         imgWrap.append(card)
       }
       node.append(imgWrap)
@@ -7393,6 +7428,7 @@ function mergeServerCanvasElements(elements, projectId) {
   if (changed) renderCanvas()
 }
 const canvasAgentWatcher = createCanvasAgentWatcher({ getJson, recover: () => postJson('/api/jobs/recover', {}),
+  isVisible: () => !document.hidden && state.activeView === 'generate',
   onSnapshot: ({runs, elements, projectId, ownerId}) => {
     if (state.generate.projectId !== projectId || state.account.user?.id !== ownerId) return
     let changed = false
@@ -7415,6 +7451,7 @@ const canvasAgentWatcher = createCanvasAgentWatcher({ getJson, recover: () => po
     state.generate.aiRunning = Boolean(active || pendingAgentSubmission)
     state.generate.activeAgentRun = pendingAgentSubmission?.run || active?.run || null
     mergeServerCanvasElements(elements, projectId)
+    if (changed || elements.length) canvasProjectSnapshots.invalidate(projectId)
     if (changed) { saveRuntimeState(); renderAiMessages() }
     renderDesignAgentContext()
     if (wasRunning !== state.generate.aiRunning) renderAiRefList()
@@ -11016,6 +11053,7 @@ function setActiveView(view, { updateRoute = true } = {}) {
   renderShell()
   if (state.activeView === 'generate') {
     renderGenerate()
+    canvasAgentWatcher.refresh()
   } else if (state.activeView === 'auth') {
     renderAccount()
   } else if (state.activeView === 'home') {
@@ -11240,11 +11278,13 @@ async function uploadCanvasImageAsset(dataUrl, name, { kind = 'upload', source =
   }
 }
 
+const readWorkspaceAsset = createReadPool(4)
 async function hydrateAssetItems(items, projectId = '') {
   const hydrated = await Promise.all(items.map(async (item) => {
     try {
       const projectParam = projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''
-      const data = await getJson(`/api/assets/${encodeURIComponent(item.assetId || item.id)}?includeData=1${projectParam}`)
+      const url = `/api/assets/${encodeURIComponent(item.assetId || item.id)}?includeData=1${projectParam}`
+      const data = await readWorkspaceAsset(`${canvasWorkspaceScope()}:${url}`, () => getJson(url))
       if (!data?.asset) return null
       const dataUrl = normalizeImageResultSrc(data?.dataUrl, data.asset.mime || item.mime || 'image/png')
       return {
@@ -11272,7 +11312,8 @@ async function hydrateAssetRefs(items, projectId = '') {
     if (!assetId) return null
     try {
       const projectParam = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
-      const data = await getJson(`/api/assets/${encodeURIComponent(assetId)}${projectParam}`)
+      const url = `/api/assets/${encodeURIComponent(assetId)}${projectParam}`
+      const data = await readWorkspaceAsset(`${canvasWorkspaceScope()}:${url}`, () => getJson(url))
       if (!data?.asset) return null
       return {
         ...item,
@@ -11360,10 +11401,15 @@ async function hydrateAiMessages(messages, projectId = state.generate.projectId)
 
 const canvasProjectTabs = createProjectTabStore(localStorage)
 const canvasProjectViews = new Map()
+const canvasProjectSnapshots = createProjectSnapshotCache()
 let canvasProjectNavigation = false
+let canvasProjectNavigationTarget = ''
+let canvasProjectNavigationFocus = false
 function canvasWorkspaceScope() { return state.account.user?.id || state.runtime.sessionId || '' }
 function syncCanvasProjectTabScope() {
-  if (canvasProjectTabs.scope(canvasWorkspaceScope())) canvasProjectViews.clear()
+  const owner = canvasWorkspaceScope()
+  canvasProjectSnapshots.scope(owner)
+  if (canvasProjectTabs.scope(owner)) canvasProjectViews.clear()
 }
 function renderCanvasProjectTabs() {
   const root = $('#g-project-tabs')
@@ -11377,15 +11423,17 @@ function renderCanvasProjectTabs() {
     const tab = document.createElement('button'); tab.type = 'button'; tab.className = 'canvas-project-tab'
     tab.dataset.projectTab = project.id; tab.id = `project-tab-${project.id}`; tab.setAttribute('role','tab')
     const selected = state.generate.projectId === project.id
+    const pending = canvasProjectNavigationTarget === project.id
     tab.setAttribute('aria-selected', String(selected)); tab.setAttribute('aria-controls','g-canvas-container')
     tab.tabIndex = selected ? 0 : -1; tab.disabled = canvasProjectNavigation
-    tab.title = project.title
+    tab.title = pending ? `正在打开：${project.title}` : project.title
+    tab.setAttribute('aria-busy', String(pending))
     const title = document.createElement('span'); title.textContent = project.title
     tab.append(createUiIcon('panels-top-left'), title)
     const close = document.createElement('button'); close.type = 'button'; close.className = 'canvas-project-tab-close'
     close.dataset.tabClose = project.id; close.tabIndex = -1; close.setAttribute('aria-label', `关闭项目标签：${project.title}`)
     close.title = '关闭标签，不删除项目'; close.disabled = canvasProjectNavigation; close.append(createUiIcon('x'))
-    wrap.classList.toggle('active', selected); wrap.append(tab,close); return wrap
+    wrap.classList.toggle('active', selected); wrap.classList.toggle('pending', pending); wrap.append(tab,close); return wrap
   })
   root.replaceChildren(...nodes)
   root.scrollLeft = scroll
@@ -11405,11 +11453,31 @@ function renderCanvasProjectPicker() {
   }))
   if (!projects.length) { const hint = document.createElement('p'); hint.textContent = state.projects.loading ? '正在读取项目…' : state.projects.error || '暂无其他项目，点击＋新建画布。'; root.append(hint) }
 }
-function setCanvasNavigationBusy(value) {
+function setCanvasNavigationBusy(value, projectId = '') {
+  if (value) canvasProjectNavigationFocus = Boolean($('#g-project-tabs')?.contains(document.activeElement))
   canvasProjectNavigation = value
+  canvasProjectNavigationTarget = value ? projectId : ''
   $('#view-generate').classList.toggle('is-project-switching', value)
   dom.gCanvasContainer.setAttribute('aria-busy', String(value))
+  const status = $('#g-project-navigation-status')
+  if (status) { status.hidden = !value; status.textContent = value ? '正在切换画布…' : '' }
+  for (const id of ['g-new','g-project-title','g-home','g-share','g-all-projects']) {
+    const control = document.getElementById(id)
+    if (control) control.disabled = value
+  }
+  for (const id of ['g-canvas-container','g-ai-sidebar','g-toolbar','g-zoom']) {
+    const surface = document.getElementById(id)
+    if (surface) surface.inert = value
+  }
   renderCanvasProjectTabs()
+  if (!value && canvasProjectNavigationFocus) {
+    $('#g-project-tabs')?.querySelector('[aria-selected="true"]')?.focus({ preventScroll: true })
+    canvasProjectNavigationFocus = false
+  }
+}
+function setCanvasNavigationStage(text) {
+  const status = $('#g-project-navigation-status')
+  if (status && canvasProjectNavigation) status.textContent = text
 }
 async function prepareCanvasProjectNavigation() {
   if (pendingAgentSubmission || state.generate.genRunning || state.generate.psdExporting) {
@@ -11425,6 +11493,7 @@ async function prepareCanvasProjectNavigation() {
     prefs:{genModel:state.generate.genModel,model:state.generate.model,genRatio:state.generate.genRatio,genResolution:state.generate.genResolution,genSize:state.generate.genSize,genQuality:state.generate.genQuality} })
   await saveCanvasDraft()
   window.clearTimeout(canvasSaveTimer)
+  setCanvasNavigationStage('正在保存当前画布…')
   if (canvasSaveInFlight) await canvasSaveInFlight
   await persistCanvasProject()
   if (state.generate.projectSaveStatus !== 'saved') {
@@ -11528,23 +11597,27 @@ async function startNewCanvasProject({ initialPrompt = '' } = {}) {
 async function openCanvasProject(projectId) {
   if (!projectId || canvasProjectNavigation) return
   if (projectId === state.generate.projectId) { setActiveView('generate'); return }
-  setCanvasNavigationBusy(true)
+  setCanvasNavigationBusy(true, projectId)
   const owner = canvasWorkspaceScope()
   try {
-    if (!await prepareCanvasProjectNavigation()) return
-    state.projects.error = '正在打开项目…'; renderCanvasProjectPicker()
-    const snapshot = await loadCanvasProjectSnapshot(projectId)
-    const elements = await hydrateCanvasElements(snapshot.elements || [], projectId)
-    const messages = await hydrateAiMessages(resolveCanvasAiHistory(snapshot.project, projectId), projectId)
+    const snapshot = await prepareProjectNavigation(async () => {
+      const ready = await prepareCanvasProjectNavigation()
+      if (ready) setCanvasNavigationStage('正在打开画布…')
+      return ready
+    }, () => loadCanvasProjectSnapshot(projectId))
+    if (!snapshot) return
     if (canvasWorkspaceScope() !== owner) return
     canvasAgentWatcher.stop()
     state.generate.projectId = projectId
     state.generate.projectTitle = snapshot.project?.title || DEFAULT_CANVAS_PROJECT_TITLE
     state.generate.projectMetadata = getProjectMetadata(snapshot.project)
-    state.generate.elements = elements
+    // Let the browser stream/decode authenticated images after the canvas is
+    // visible. Export and byte-oriented workflows still hydrate on demand.
+    state.generate.elements = presentCanvasElements(snapshot.elements || [], projectId, assetResultUrl)
+    canvasKnownElementIds.set(projectId, new Set(state.generate.elements.map(el => el.id)))
     state.generate.aiSessions = resolveCanvasAiSessions(snapshot.project, projectId)
     ensureCurrentAiSession()
-    state.generate.aiMessages = messages
+    state.generate.aiMessages = resolveCanvasAiHistory(snapshot.project, projectId)
     persistCurrentAiSession()
     canvasLastSavedSignature = getCanvasProjectSaveSignature(createCanvasProjectSaveSnapshot())
     const view = canvasProjectViews.get(`${owner}:${projectId}`)
@@ -11560,6 +11633,7 @@ async function openCanvasProject(projectId) {
     saveRuntimeState({ persistCanvas:false }); renderShell(); renderGenerate()
     if (view) dom.gAiMessages.scrollTop = view.scroll || 0
   } catch (error) {
+    if (canvasWorkspaceScope() !== owner) return
     state.projects.error = trimError(error); state.notice.message = `打开项目失败：${trimError(error)}`; renderAppNotice(); renderProjects()
   } finally { setCanvasNavigationBusy(false) }
 }
@@ -11610,6 +11684,7 @@ async function deleteCanvasProjectFromDialog() {
     await deleteJson(`/api/canvas/projects/${encodeURIComponent(projectId)}${sessionParam}`)
     canvasProjectTabs.close(projectId)
     canvasProjectViews.delete(`${canvasWorkspaceScope()}:${projectId}`)
+    canvasProjectSnapshots.invalidate(projectId)
     state.projects.items = state.projects.items.filter((item) => item.id !== projectId)
     state.projects.loadedSessionId = ''
     state.projects.error = ''
@@ -11832,6 +11907,8 @@ function createShareMemberRow({ label, sub, role, fixed, userId }) {
   return row
 }
 
+let canvasProjectListInFlight = null
+let canvasProjectListEpoch = 0
 async function loadCanvasProjects({ force = false } = {}) {
   if (!dom.pList) return
   const sessionId = state.runtime.sessionId || ''
@@ -11845,52 +11922,42 @@ async function loadCanvasProjects({ force = false } = {}) {
     return
   }
   const loadKey = `${state.account.user?.id || sessionId || 'anon'}:${state.projects.filterShared ? 'shared' : 'all'}`
-  if (!force && state.projects.loadedSessionId === loadKey && state.projects.items.length) {
+  if (!force && state.projects.loadedSessionId === loadKey) {
     renderProjects()
     renderHome()
     return
   }
+  if (!force && canvasProjectListInFlight?.key === loadKey) return canvasProjectListInFlight.promise
+  const epoch = ++canvasProjectListEpoch
+  const owner = canvasWorkspaceScope()
+  const isCurrent = () => epoch === canvasProjectListEpoch && canvasWorkspaceScope() === owner
 
   state.projects.loading = true
   state.projects.error = ''
   renderProjects()
   renderHome()
 
-  try {
+  const promise = (async () => { try {
     const data = state.projects.filterShared && state.account.user
-      ? await getJson('/api/canvas/projects/shared')
-      : await getJson(`/api/canvas/projects?sessionId=${encodeURIComponent(sessionId)}`)
+      ? await getJson('/api/canvas/projects/shared?summary=1')
+      : await getJson('/api/canvas/projects?summary=1')
+    if (!isCurrent()) return
     const projects = Array.isArray(data.projects) ? data.projects : []
-    const enriched = await Promise.all(projects.map(enrichCanvasProjectCard))
-    state.projects.items = enriched.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
+    state.projects.items = projects.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
     state.projects.loadedSessionId = loadKey
   } catch (error) {
+    if (!isCurrent()) return
     state.projects.error = trimError(error)
   } finally {
+    if (canvasProjectListInFlight?.epoch === epoch) canvasProjectListInFlight = null
+    if (!isCurrent()) return
     state.projects.loading = false
     renderProjects()
     renderHome()
   }
-}
-
-async function enrichCanvasProjectCard(project) {
-  try {
-    const data = await getJson(`/api/canvas/projects/${encodeURIComponent(project.id)}/elements`)
-    const elements = Array.isArray(data.elements) ? data.elements : []
-    const visibleElements = elements.filter((el) => el?.type !== 'connector')
-    const firstImage = visibleElements.find((el) => el?.type === 'image' && (el.content || el.assetId))
-    return {
-      ...project,
-      elementCount: visibleElements.length,
-      previewUrl: firstImage?.content || (firstImage?.assetId ? assetResultUrl(firstImage.assetId, project.id) : ''),
-    }
-  } catch {
-    return {
-      ...project,
-      elementCount: 0,
-      previewUrl: '',
-    }
-  }
+  })()
+  canvasProjectListInFlight = { key: loadKey, promise, epoch }
+  return promise
 }
 
 function scheduleCanvasProjectSave() {
@@ -11999,6 +12066,10 @@ async function persistCanvasProject() {
       canvasKnownElementIds.set(savedProjectId, new Set((result.elements || snapshot.elements).map(e => e.id)))
       canvasLastSavedSignature = signature || getCanvasProjectSaveSignature(snapshot)
       state.generate.projectSaveStatus = 'saved'
+      canvasProjectSnapshots.put(savedProjectId, {
+        project: { title: snapshot.title, metadataJson: snapshot.metadataJson },
+        elements: (result.elements || snapshot.elements).map(el => sanitizeCanvasElement(el)).filter(Boolean),
+      }, canvasWorkspaceScope())
       state.projects.loadedSessionId = ''
     } catch {
       state.generate.projectSaveStatus = 'local'
@@ -12018,12 +12089,15 @@ async function persistCanvasProject() {
 
 async function loadCanvasProjectSnapshot(projectId) {
   if (!projectId) return null
+  return canvasProjectSnapshots.load(projectId, canvasWorkspaceScope(), () => readCanvasProjectSnapshot(projectId))
+}
+
+async function readCanvasProjectSnapshot(projectId) {
   const projectUrl = `/api/canvas/projects/${encodeURIComponent(projectId)}`
   const [projectData, elementsData] = await Promise.all([
     getJson(projectUrl),
     getJson(`${projectUrl}/elements`),
   ])
-  canvasKnownElementIds.set(projectId, new Set((elementsData.elements || []).map(e => e.id)))
   return {
     project: projectData.project,
     elements: Array.isArray(elementsData.elements)
@@ -12105,6 +12179,7 @@ async function restoreRuntimeState() {
     try {
       const snapshot = await loadCanvasProjectSnapshot(state.generate.projectId)
       if (snapshot) {
+        canvasKnownElementIds.set(state.generate.projectId, new Set(snapshot.elements.map(el => el.id)))
         state.generate.projectTitle = snapshot.project?.title || state.generate.projectTitle
         state.generate.projectMetadata = getProjectMetadata(snapshot.project)
         canvasElements = snapshot.elements
@@ -12114,7 +12189,7 @@ async function restoreRuntimeState() {
       state.generate.projectSaveStatus = 'local'
     }
   }
-  state.generate.elements = await hydrateCanvasElements(canvasElements)
+  state.generate.elements = presentCanvasElements(canvasElements, state.generate.projectId, assetResultUrl)
   const aiHistory = resolveCanvasAiHistory(
     { metadataJson: state.generate.projectMetadata },
     state.generate.projectId,
@@ -12127,7 +12202,7 @@ async function restoreRuntimeState() {
     runtime.generate.aiMessages,
   )
   ensureCurrentAiSession()
-  if (aiHistory.length) state.generate.aiMessages = await hydrateAiMessages(aiHistory)
+  if (aiHistory.length) state.generate.aiMessages = aiHistory
   persistCurrentAiSession()
   canvasLastSavedSignature = state.generate.projectSaveStatus === 'saved'
     ? getCanvasProjectSaveSignature(createCanvasProjectSaveSnapshot())
@@ -12523,10 +12598,7 @@ function shouldStopPollingJobSnapshot(job, items = []) {
 }
 
 async function fetchJobSnapshot(jobId) {
-  const [{ job }, { items }] = await Promise.all([
-    getJson(`/api/jobs/${encodeURIComponent(jobId)}`),
-    getJson(`/api/jobs/${encodeURIComponent(jobId)}/items`),
-  ])
+  const { job, items = [] } = await getJson(`/api/jobs/${encodeURIComponent(jobId)}?includeItems=1`)
   if (!TERMINAL_JOB_STATUSES.has(String(job?.status || '')) || isTerminalJobItemSnapshotReady(job, items)) {
     return { job, items }
   }
@@ -12563,10 +12635,12 @@ function watchStoredJobTasks(kind) {
 async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
   const token = ++translateWatcherToken
   translateJobWatchers.set(jobId, token)
+  let lastSnapshotSignature = ''
 
   while (translateJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      if (translateJobWatchers.get(jobId) !== token) return
       clearTranslateSubmitLock(jobId)
       if (job?.type && job.type !== 'translate_batch') {
         removeJobTask('translate', jobId)
@@ -12576,6 +12650,13 @@ async function syncTranslateJob(jobId, { passive404 = false, applyToWorkspace = 
       }
 
       const shouldApply = applyToWorkspace || getLoadedJobId('translate') === jobId
+      const signature = createJobSnapshotSignature(job, items) + `:${getLoadedJobId('translate')}`
+      const taskError = getJobTasks('translate').find(task => task.jobId === jobId)?.error
+      if (signature === lastSnapshotSignature && !taskError) {
+        if (shouldStopPollingJobSnapshot(job, items)) { translateJobWatchers.delete(jobId); break }
+        await wait(getJobPollInterval('translate', job)); continue
+      }
+      lastSnapshotSignature = signature
       upsertJobTask('translate', jobId, { job, items, loaded: shouldApply })
       const task = getJobTasks('translate').find((entry) => entry.jobId === jobId)
       if (shouldApply && task && job.status === 'completed') {
@@ -12887,10 +12968,12 @@ function applyStyleJobSnapshot(job, items) {
 async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
   const token = ++styleWatcherToken
   styleJobWatchers.set(jobId, token)
+  let lastSnapshotSignature = ''
 
   while (styleJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      if (styleJobWatchers.get(jobId) !== token) return
       clearStyleSubmitLock(jobId)
       if (job?.type && job.type !== 'style_transfer_batch') {
         removeJobTask('style', jobId)
@@ -12900,6 +12983,13 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
       }
 
       const shouldApply = applyToWorkspace || getLoadedJobId('style') === jobId
+      const signature = createJobSnapshotSignature(job, items) + `:${getLoadedJobId('style')}`
+      const taskError = getJobTasks('style').find(task => task.jobId === jobId)?.error
+      if (signature === lastSnapshotSignature && !taskError) {
+        if (shouldStopPollingJobSnapshot(job, items)) { styleJobWatchers.delete(jobId); break }
+        await wait(getJobPollInterval('style', job)); continue
+      }
+      lastSnapshotSignature = signature
       upsertJobTask('style', jobId, { job, items, loaded: shouldApply })
       const task = getJobTasks('style').find((entry) => entry.jobId === jobId)
       if (shouldApply && task && job.status === 'completed') {
@@ -12964,10 +13054,12 @@ async function syncStyleJob(jobId, { passive404 = false, applyToWorkspace = fals
 async function syncAiTestJob(jobId, { passive404 = false, applyToWorkspace = false } = {}) {
   const token = ++aiTestWatcherToken
   aiTestJobWatchers.set(jobId, token)
+  let lastSnapshotSignature = ''
 
   while (aiTestJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      if (aiTestJobWatchers.get(jobId) !== token) return
       clearAiTestSubmitLock(jobId)
       if (job?.type && job.type !== 'ai_test_batch') {
         removeJobTask('aiTest', jobId)
@@ -12977,6 +13069,13 @@ async function syncAiTestJob(jobId, { passive404 = false, applyToWorkspace = fal
       }
 
       const shouldApply = applyToWorkspace || getLoadedJobId('aiTest') === jobId
+      const signature = createJobSnapshotSignature(job, items) + `:${getLoadedJobId('aiTest')}`
+      const taskError = getJobTasks('aiTest').find(task => task.jobId === jobId)?.error
+      if (signature === lastSnapshotSignature && !taskError) {
+        if (shouldStopPollingJobSnapshot(job, items)) { aiTestJobWatchers.delete(jobId); break }
+        await wait(getJobPollInterval('aiTest', job)); continue
+      }
+      lastSnapshotSignature = signature
       upsertJobTask('aiTest', jobId, { job, items, loaded: shouldApply })
       const task = getJobTasks('aiTest').find((entry) => entry.jobId === jobId)
       if (shouldApply && task && job.status === 'completed') {
@@ -13046,6 +13145,7 @@ async function syncOutfitJob(jobId, { passive404 = false, applyToWorkspace = fal
   while (outfitJobWatchers.get(jobId) === token) {
     try {
       const { job, items } = await fetchJobSnapshot(jobId)
+      if (outfitJobWatchers.get(jobId) !== token) return
       clearOutfitSubmitLock(jobId)
       if (job?.type && job.type !== 'outfit_batch') {
         removeJobTask('outfit', jobId)
@@ -14006,16 +14106,19 @@ function loadResultsStore() {
 
 function saveResultsStore(data) {
   try {
-    const json = JSON.stringify(data)
+    let json = JSON.stringify(data)
     if (json.length > 4_500_000) {
       pruneResultsStore(data)
+      json = JSON.stringify(data)
     }
-    localStorage.setItem(RESULTS_STORAGE, JSON.stringify(data))
+    localStorage.setItem(RESULTS_STORAGE, json)
+    return true
   } catch {
     pruneResultsStore(data)
     try {
       localStorage.setItem(RESULTS_STORAGE, JSON.stringify(data))
-    } catch { /* storage full, skip */ }
+      return true
+    } catch { return false /* Storage remains full; a later save can retry. */ }
   }
 }
 
@@ -14043,11 +14146,15 @@ function getStoredStyleHistory(store, fallbackHistory = []) {
   return sanitizeStyleHistoryEntries(fallbackHistory)
 }
 
+let styleHistorySavedSignature = ''
 function saveStyleHistory() {
+  const history = serializeStyleHistoryEntries(state.style.history)
+  const signature = JSON.stringify([canvasWorkspaceScope(), history])
+  if (signature === styleHistorySavedSignature) return
   const store = loadResultsStore()
   if (!store.style) store.style = { history: [] }
-  store.style.history = serializeStyleHistoryEntries(state.style.history)
-  saveResultsStore(store)
+  store.style.history = history
+  if (saveResultsStore(store)) styleHistorySavedSignature = signature
 }
 
 async function hydrateStyleHistory(entries) {

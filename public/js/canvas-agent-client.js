@@ -1,20 +1,31 @@
 // The browser observes durable server runs. It never replays model operations.
-export function createCanvasAgentWatcher({ getJson, recover, onSnapshot, onError, interval = 3000 }) {
-  let scope = '', timer, busy = false, epoch = 0
+export function createCanvasAgentWatcher({ getJson, recover, onSnapshot, onError, interval = 3000, idleInterval = 15000, isVisible = () => true, schedule = setTimeout, cancel = clearTimeout }) {
+  let scope = '', timer, busy = false, epoch = 0, project = '', owner = ''
+  let elementsKey = '', cachedElements = []
   async function tick(projectId, ownerId, token) {
     if (token !== epoch || busy) return
+    if (!isVisible()) { timer = schedule(() => tick(projectId, ownerId, token), idleInterval); return }
     busy = true
+    let delay = interval
     try {
       const data = await getJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/agent-runs`)
       if (token !== epoch) return
       const runs = data.runs || []
-      const elements = runs.some(r => r.run?.tasks?.some(t => t.assetId))
-        ? (await getJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/elements`)).elements || [] : []
-      if (token === epoch) await onSnapshot({ runs, elements, projectId, ownerId })
+      const key = JSON.stringify(runs.map(r => r.run?.tasks || []))
+      const hasAssets = runs.some(r => r.run?.tasks?.some(t => t.assetId))
+      if (!hasAssets) cachedElements = []
+      if (key !== elementsKey && hasAssets) {
+        const data = await getJson(`/api/canvas/projects/${encodeURIComponent(projectId)}/elements`)
+        if (token !== epoch) return
+        cachedElements = data.elements || []
+      }
+      elementsKey = key
+      delay = runs.some(r => ['preparing','planning','executing'].includes(r.run?.phase)) ? interval : idleInterval
+      if (token === epoch) await onSnapshot({ runs, elements: cachedElements, projectId, ownerId })
     } catch (error) { if (token === epoch) onError?.(error) }
     finally {
       busy = false
-      if (token === epoch) timer = setTimeout(() => tick(projectId, ownerId, token), interval)
+      if (token === epoch) timer = schedule(() => tick(projectId, ownerId, token), delay)
     }
   }
   return {
@@ -22,14 +33,16 @@ export function createCanvasAgentWatcher({ getJson, recover, onSnapshot, onError
       const next = `${ownerId}:${projectId}`
       if (!projectId || !ownerId || (scope === next && !force)) return
       const changed = scope !== next
-      scope = next; epoch++; clearTimeout(timer)
+      scope = next; project = projectId; owner = ownerId; epoch++; cancel(timer)
+      elementsKey = ''; cachedElements = []
       if (changed) void recover?.().catch(error => onError?.(error))
       // Wait for the previous read to leave its finally block before switching.
       const token = epoch
-      const launch = () => { if (token !== epoch) return; if (busy) timer = setTimeout(launch, 50); else void tick(projectId, ownerId, token) }
+      const launch = () => { if (token !== epoch) return; if (busy) timer = schedule(launch, 50); else void tick(projectId, ownerId, token) }
       launch()
     },
-    stop() { scope = ''; epoch++; clearTimeout(timer) },
+    refresh() { if (scope && !busy) { cancel(timer); void tick(project, owner, epoch) } },
+    stop() { scope = ''; epoch++; cancel(timer); elementsKey = ''; cachedElements = [] },
   }
 }
 

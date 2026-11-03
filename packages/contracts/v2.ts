@@ -176,6 +176,12 @@ export interface CanvasProjectRecord {
   updatedAt: string
 }
 
+export interface CanvasProjectCardRecord extends Omit<CanvasProjectRecord, 'metadataJson'> {
+  accessRole: ProjectRole | 'legacy'
+  elementCount: number
+  previewUrl: string
+}
+
 export interface CanvasProjectElementRecord {
   id: string
   projectId: string

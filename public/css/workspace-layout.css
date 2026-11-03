@@ -6,6 +6,12 @@
 .canvas-project-tabs { display: flex; flex: 1; gap: 4px; align-items: center; justify-content: flex-start; overflow-x: auto; scrollbar-width: thin; min-width: 0; }
 .canvas-project-tab-wrap { display: flex; align-items: center; flex: 0 0 auto; max-width: 190px; border-radius: 8px; border: 1px solid transparent; color: var(--text-soft); }
 .canvas-project-tab-wrap.active { border-color: var(--line); background: var(--bg-3); color: var(--text); }
+.canvas-project-tab-wrap { transition: background 100ms ease, border-color 100ms ease; }
+.canvas-project-tab-wrap.pending { border-color: var(--line-strong); background: var(--bg-3); color: var(--text); }
+.canvas-project-tab:disabled, .canvas-project-tab-close:disabled { opacity: 1; cursor: progress; }
+.canvas-project-tab-wrap.pending .canvas-project-tab > .ui-icon { visibility: hidden; }
+.canvas-project-tab-wrap.pending .canvas-project-tab { position: relative; }
+.canvas-project-tab-wrap.pending .canvas-project-tab::before { content: ''; position: absolute; left: 10px; width: 11px; height: 11px; border: 1.5px solid var(--line-strong); border-top-color: var(--text); border-radius: 50%; animation: canvas-project-spin 650ms linear infinite; }
 .canvas-project-tab { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 8px 4px 8px 10px; font-size: 11px; border: 0; background: transparent; }
 .canvas-project-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 122px; }
 .canvas-project-tab .ui-icon { width: 13px; height: 13px; flex: 0 0 13px; opacity: .6; }
@@ -20,8 +26,17 @@
 .canvas-project-picker button:hover { background: var(--bg-3); }
 .canvas-project-picker p { color: var(--muted); padding: 10px 8px; font-size: 12px; }
 #g-all-projects { color: var(--muted); border-top: 1px solid var(--line); margin-top: 6px; border-radius: 0; }
-.is-project-switching .canvas-container, .is-project-switching .ai-sidebar { pointer-events: none; }
-.is-project-switching .canvas-container { opacity: .75; cursor: progress; }
+.is-project-switching .canvas-container, .is-project-switching .ai-sidebar, .is-project-switching .canvas-toolbar, .is-project-switching .zoom-controls { pointer-events: none; }
+.is-project-switching .canvas-container { cursor: progress; }
+.canvas-navigation-status { position: absolute; z-index: 90; top: 72px; right: 20px; max-width: calc(100% - 40px); padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-soft); background: var(--bg-2); box-shadow: var(--shadow-sm); font-size: 11px; pointer-events: none; animation: canvas-project-status 160ms step-end both; }
+.canvas-navigation-status[hidden] { display: none; }
+@keyframes canvas-project-spin { to { transform: rotate(360deg); } }
+@keyframes canvas-project-status { from { visibility: hidden; } to { visibility: visible; } }
+.canvas-el-image[data-image-state="loading"] { background: var(--bg-3); }
+.canvas-el-image[data-image-state="loading"]::after { content: '图片加载中…'; position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; pointer-events: none; animation: canvas-project-status 160ms step-end both; }
+.canvas-image-retry { display: none; }
+.canvas-el-image[data-image-state="error"] > .canvas-image-retry { display: block; position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); color: var(--text-soft); font-size: 12px; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .canvas-project-tab-wrap { transition: none; } .canvas-project-tab-wrap.pending .canvas-project-tab::before { animation: none; } }
 
 @media (min-width: 721px) {
   #view-generate:has(.ai-sidebar:not(.hidden)) .canvas-header-left { flex: 0 0 calc(var(--agent-w) - 28px); }
@@ -50,7 +65,9 @@
 .agent-model-option small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.4; }
 .agent-model-option[aria-selected="true"], .agent-model-option:hover:not(:disabled), .agent-model-option:focus-visible { background: var(--bg-3); }
 .agent-model-check { width: 16px; flex: none; color: var(--text); }
-.agent-format-button { display: flex; gap: 4px; align-items: center; min-width: 0; flex: 1; height: 28px; min-height: 28px; border: 0; background: transparent; padding: 3px 2px; color: var(--text-soft); font-size: 10px; white-space: nowrap; }
+.agent-format-button { display: inline-flex; gap: 4px; align-items: center; min-width: 0; flex: 0 1 auto; height: 28px; min-height: 28px; border: 0; border-radius: 6px; background: transparent; padding: 3px 6px; color: var(--text-soft); font-size: 10px; white-space: nowrap; }
+.agent-composer-toolbar > .agent-settings-button { margin-left: auto; }
+.ai-sidebar-bottom:has(#g-ai-format-popover:popover-open) .agent-format-button { background: var(--bg-3); }
 .agent-format-button span { overflow: hidden; text-overflow: ellipsis; }
 .agent-format-button .ui-icon:first-child { display: none; }
 .agent-format-button .ui-icon:last-child { width: 10px; height: 10px; flex: 0 0 10px; }
@@ -88,6 +105,7 @@
   .canvas-project-tab-close { min-height: 24px; }
   #view-generate > .ai-sidebar { top: 100px; left: 12px; right: auto; }
   #view-generate .canvas-project-picker { top: 94px; }
+  .canvas-navigation-status { top: 100px; right: 12px; }
   #view-generate .canvas-header-right { gap: 3px; }
   .agent-composer-toolbar { gap: 3px; }
   .agent-model-select { font-size: 11px; }
@@ -97,7 +115,7 @@
   .ai-sidebar #g-input { font-size: 14px; min-height: 52px; }
   .agent-composer-toolbar > .icon-button { width: 32px; height: 36px; min-height: 36px; flex-basis: 32px; }
   .ai-sidebar .ai-sidebar-send, .ai-sidebar .agent-stop { width: 34px; height: 34px; min-height: 34px; flex-basis: 34px; }
-  .agent-format-button { font-size: 10px; }
+  .agent-format-button { font-size: 10px; height: 36px; min-height: 36px; padding-block: 4px; }
   .agent-format-button span { overflow: visible; white-space: normal; line-height: 1.3; text-align: left; }
 }
 @media (prefers-reduced-motion: no-preference) { .agent-composer-popover:popover-open { animation: image-size-enter 120ms ease-out; } }
