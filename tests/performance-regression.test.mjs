@@ -48,6 +48,9 @@ test('canvas rerenders do not reset a relative image URL or refetch its pixels',
   element.content = '/api/results/new-asset'
   context.renderCanvas()
   assert.equal(srcWrites, 1)
+  element.content = ''
+  context.renderCanvas()
+  assert.equal(srcWrites, 1, 'an unhydrated cached image does not issue an empty-src request or flash an error')
 })
 
 test('PSD dependency loads only on export, shares concurrent requests and allows retry after failure', async () => {

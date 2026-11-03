@@ -5229,7 +5229,7 @@ function renderCanvas() {
     // Update image src if changed
     if (el.type === 'image') {
       const img = node.querySelector('.canvas-el-image')
-      if (img && img.getAttribute('src') !== el.content) { node.dataset.imageState = 'loading'; img.src = el.content }
+      if (img && el.content && img.getAttribute('src') !== el.content) { node.dataset.imageState = 'loading'; img.src = el.content }
       const size = node.querySelector('.canvas-el-size')
       if (size) size.textContent = el.type === 'image' && el.originalWidth && el.originalHeight ? `原图 ${el.originalWidth} × ${el.originalHeight} px` : `${Math.round(el.width)} × ${Math.round(el.height)}`
     } else if (el.type === 'text') {
@@ -5271,8 +5271,8 @@ function renderCanvasElement(el) {
         saveRuntimeState(); renderCanvas()
       }
     })
-    img.addEventListener('error', () => { node.dataset.imageState = 'error' })
-    img.src = el.content || ''
+    img.addEventListener('error', () => { node.dataset.imageState = img.getAttribute('src') ? 'error' : 'loading' })
+    if (el.content) img.src = el.content
     img.alt = el.name || 'image'
     img.draggable = false
     node.append(img)
